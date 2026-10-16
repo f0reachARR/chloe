@@ -4,6 +4,10 @@
 //! 以後は標準入力と端末の大きさを送る。guest-agent はプロセスの出力を送り、
 //! プロセスが終わったら [`AgentMessage::Exited`] を送って接続を閉じる。
 //!
+//! ポート転送では、ホストは最初に [`ClientMessage::Connect`] を送る。guest-agent が VM の中で
+//! TCP で接続して [`AgentMessage::Connected`] を返したら、以後はメッセージではなく生のバイト列を
+//! やり取りする ([`Connection::into_raw`])。
+//!
 //! メッセージは 4 バイトの長さ (ビッグエンディアン) のあとに postcard で符号化した本体を置く。
 
 pub mod firecracker;
@@ -38,6 +42,8 @@ pub enum ClientMessage {
     /// エージェントが作業中かを尋ねる。[`ClientMessage::Exec`] の代わりに接続して最初に送り、
     /// [`AgentMessage::Activity`] を受け取ったら接続を閉じる。
     Activity,
+    /// VM の中から TCP で接続する。[`ClientMessage::Exec`] の代わりに接続して最初に送る。
+    Connect(ConnectRequest),
 }
 
 /// guest-agent からホストへのメッセージ。
@@ -56,6 +62,16 @@ pub enum AgentMessage {
     Activity {
         busy: Vec<String>,
     },
+    /// [`ClientMessage::Connect`] の接続ができた。このあとは生のバイト列になる。
+    Connected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectRequest {
+    pub version: u32,
+    /// VM の中から見た接続先。
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +150,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         decode(self.framed.next().await)
     }
 
+    /// メッセージのやり取りをやめて、下の接続と、読んだがまだメッセージにしていないバイト列を返す。
+    /// 返したバイト列は、接続から読むより先に扱う。
+    pub fn into_raw(self) -> (S, bytes::BytesMut) {
+        let parts = self.framed.into_parts();
+        (parts.io, parts.read_buf)
+    }
+
     /// 送信側と受信側に分ける。送信と受信を同時に待つときに使う。
     pub fn split(self) -> (Sender<S>, Receiver<S>) {
         let (sink, stream) = self.framed.split();
@@ -208,6 +231,27 @@ mod tests {
 
         drop(agent);
         assert_eq!(client.recv::<AgentMessage>().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn into_raw_keeps_buffered_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (a, mut b) = tokio::io::duplex(64 * 1024);
+        let mut client = Connection::new(a);
+        // 応答のすぐあとに生のバイト列が続き、一度に読まれる。
+        let mut agent = Connection::new(&mut b);
+        agent.send(&AgentMessage::Connected).await.unwrap();
+        drop(agent);
+        b.write_all(b"raw").await.unwrap();
+        drop(b);
+        assert_eq!(
+            client.recv::<AgentMessage>().await.unwrap(),
+            Some(AgentMessage::Connected)
+        );
+        let (mut io, buffered) = client.into_raw();
+        let mut rest = buffered.to_vec();
+        io.read_to_end(&mut rest).await.unwrap();
+        assert_eq!(rest, b"raw");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //!
 //! セッションチャネル一つにつき guest-agent への接続を一つ開き、シェルかコマンドを実行して
 //! 入出力を中継する。`chloe` で始まるコマンドはゲートウェイが処理する ([`crate::commands`])。
+//! ポート転送 (`ssh -L`) では、VM の中の宛先への接続を guest-agent に頼んで中継する。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chloe_agent_proto::{
-    AGENT_PORT, AgentMessage, ClientMessage, Connection as AgentConnection, ExecRequest,
-    PROTOCOL_VERSION, TtyRequest, WindowSize, firecracker,
+    AGENT_PORT, AgentMessage, ClientMessage, ConnectRequest, Connection as AgentConnection,
+    ExecRequest, PROTOCOL_VERSION, TtyRequest, WindowSize, firecracker,
 };
 use chloe_controller::docker::DockerBackend;
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
@@ -18,7 +19,7 @@ use chloe_controller::{Controller, Error as ControllerError};
 use chloe_github::{DeviceCode, GitHubApp, Poll};
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Session};
-use russh::{Channel, ChannelId, Pty, Sig};
+use russh::{Channel, ChannelId, ChannelOpenFailure, Pty, Sig};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -91,7 +92,12 @@ pub struct Connection {
     channels: HashMap<ChannelId, ChannelState>,
     /// keyboard-interactive で進めている Device Flow。
     device: Option<(Authenticated, DeviceCode)>,
+    /// ポート転送をした接続では、転送中の TCP の接続がなくても、SSH の接続が切れるまで
+    /// ランナーを止めない (`ssh -N -L` で開いたまま、ときどき使うため)。
+    forwarding: ForwardingHold,
 }
+
+type ForwardingHold = Arc<std::sync::Mutex<Option<chloe_controller::Session<DockerBackend>>>>;
 
 impl Connection {
     pub fn new(shared: Arc<Shared>, peer: Option<std::net::SocketAddr>) -> Self {
@@ -101,6 +107,7 @@ impl Connection {
             user: None,
             channels: HashMap::new(),
             device: None,
+            forwarding: Arc::default(),
         }
     }
 
@@ -333,6 +340,44 @@ impl russh::server::Handler for Connection {
         Ok(())
     }
 
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let (Some(user), Ok(port)) = (self.user.clone(), u16::try_from(port_to_connect)) else {
+            reply.reject(ChannelOpenFailure::ConnectFailed).await;
+            return Ok(());
+        };
+        info!(
+            login = %user.login,
+            workspace = ?user.workspace,
+            host = host_to_connect,
+            port,
+            "port forwarding"
+        );
+        let request = ConnectRequest {
+            version: PROTOCOL_VERSION,
+            host: host_to_connect.to_string(),
+            port,
+        };
+        // ランナーの起動を待つことがあるので、接続の処理を止めないよう別のタスクで進める。
+        tokio::spawn(forward(
+            self.shared.clone(),
+            user,
+            self.forwarding.clone(),
+            channel,
+            reply,
+            request,
+        ));
+        Ok(())
+    }
+
     async fn pty_request(
         &mut self,
         channel: ChannelId,
@@ -540,7 +585,7 @@ async fn relay_inner(
                 None => return Ok(None),
             },
             message = rx.recv::<AgentMessage>() => match message? {
-                Some(AgentMessage::Started { .. }) | Some(AgentMessage::Activity { .. }) => {}
+                Some(AgentMessage::Started { .. } | AgentMessage::Activity { .. } | AgentMessage::Connected) => {}
                 Some(AgentMessage::Stdout(data)) => {
                     if handle.data(channel, data).await.is_err() {
                         return Ok(None);
@@ -559,6 +604,58 @@ async fn relay_inner(
             },
         }
     }
+}
+
+/// ポート転送。guest-agent に VM の中の宛先へ接続させ、つながったらチャネルを受け入れて
+/// バイト列を中継する。つながらなければチャネルを断る。
+async fn forward(
+    shared: Arc<Shared>,
+    user: Authenticated,
+    hold: ForwardingHold,
+    channel: Channel<Msg>,
+    reply: ChannelOpenHandle,
+    request: ConnectRequest,
+) {
+    let target = format!("{}:{}", request.host, request.port);
+    let connected = async {
+        let workspace = shared
+            .resolve_workspace(&user.login, user.workspace.as_deref())
+            .await?;
+        // 中継しているあいだは、ランナーが止められない。
+        let session = shared.controller.open(&workspace).await?;
+        if hold.lock().unwrap().is_none() {
+            let held = shared.controller.open(&workspace).await?;
+            hold.lock().unwrap().get_or_insert(held);
+        }
+        let stream = firecracker::connect(&session.vsock, AGENT_PORT, AGENT_CONNECT_WAIT)
+            .await
+            .context("the workspace VM is not reachable")?;
+        let mut conn = AgentConnection::new(stream);
+        conn.send(&ClientMessage::Connect(request)).await?;
+        match conn.recv::<AgentMessage>().await? {
+            Some(AgentMessage::Connected) => Ok((session, conn.into_raw())),
+            Some(AgentMessage::Error(message)) => bail!("guest-agent: {message}"),
+            _ => bail!("guest-agent did not accept the connection"),
+        }
+    }
+    .await;
+    let (session, (mut vsock, buffered)) = match connected {
+        Ok(connected) => connected,
+        Err(error) => {
+            warn!(login = %user.login, workspace = ?user.workspace, %target, "port forwarding failed: {error:#}");
+            reply.reject(ChannelOpenFailure::ConnectFailed).await;
+            return;
+        }
+    };
+    reply.accept().await;
+    let mut stream = channel.into_stream();
+    if tokio::io::AsyncWriteExt::write_all(&mut stream, &buffered)
+        .await
+        .is_ok()
+    {
+        let _ = tokio::io::copy_bidirectional(&mut stream, &mut vsock).await;
+    }
+    drop(session);
 }
 
 /// keyboard-interactive で一度に承認を待つ時間。

@@ -1,14 +1,15 @@
 //! ゲスト内常駐のエージェント。
 //!
 //! vsock で待ち受け、ホストからの要求ごとにプロセスを起動して、その入出力を中継する。
+//! ポート転送の要求では、VM の中から TCP で接続して、バイト列をそのまま中継する。
 //! 接続を受けるのはホスト (CID 2) からだけで、ゲスト内のプロセスからの接続は拒否する。
 
 use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use chloe_agent_proto::{
-    AGENT_PORT, AgentMessage, ClientMessage, Connection, ExecRequest, ExitStatus, PROTOCOL_VERSION,
-    Receiver, Sender, TtyRequest,
+    AGENT_PORT, AgentMessage, ClientMessage, ConnectRequest, Connection, ExecRequest, ExitStatus,
+    PROTOCOL_VERSION, Receiver, Sender, TtyRequest,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
@@ -32,6 +33,8 @@ const CA_ENV: &[&str] = &[
     "CODEX_CA_CERTIFICATE",
 ];
 const READ_BUF_LEN: usize = 32 * 1024;
+/// ポート転送で、VM の中の接続先につながるまで待つ時間。
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -68,7 +71,8 @@ async fn handle(stream: VsockStream) -> Result<()> {
             conn.send(&AgentMessage::Activity { busy }).await?;
             return Ok(());
         }
-        _ => bail!("the first message must be Exec or Activity"),
+        Some(ClientMessage::Connect(request)) => return forward(conn, request).await,
+        _ => bail!("the first message must be Exec, Activity or Connect"),
     };
     let (mut tx, rx) = conn.split();
     if request.version != PROTOCOL_VERSION {
@@ -89,6 +93,40 @@ async fn handle(stream: VsockStream) -> Result<()> {
         Ok(status) => tx.send(&AgentMessage::Exited(status)).await?,
         Err(error) => tx.send(&AgentMessage::Error(format!("{error:#}"))).await?,
     }
+    Ok(())
+}
+
+/// ポート転送。VM の中で `request` の宛先に接続し、ホストとのあいだでバイト列を中継する。
+async fn forward(mut conn: Connection<VsockStream>, request: ConnectRequest) -> Result<()> {
+    if request.version != PROTOCOL_VERSION {
+        let message = format!(
+            "unsupported protocol version {} (agent speaks {PROTOCOL_VERSION})",
+            request.version
+        );
+        conn.send(&AgentMessage::Error(message)).await?;
+        return Ok(());
+    }
+    let target = (request.host.as_str(), request.port);
+    let mut tcp =
+        match tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(target)).await {
+            Ok(Ok(tcp)) => tcp,
+            Ok(Err(error)) => {
+                let message = format!("connect to {}:{}: {error}", request.host, request.port);
+                conn.send(&AgentMessage::Error(message)).await?;
+                return Ok(());
+            }
+            Err(_) => {
+                let message = format!("connect to {}:{}: timed out", request.host, request.port);
+                conn.send(&AgentMessage::Error(message)).await?;
+                return Ok(());
+            }
+        };
+    info!(host = %request.host, port = request.port, "forward");
+    conn.send(&AgentMessage::Connected).await?;
+    let (mut vsock, buffered) = conn.into_raw();
+    tcp.write_all(&buffered).await?;
+    // どちらかが閉じても、もう片方の向きは最後まで流す。
+    let _ = tokio::io::copy_bidirectional(&mut vsock, &mut tcp).await;
     Ok(())
 }
 
@@ -224,7 +262,7 @@ async fn run_with_tty(
                 }
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::CloseStdin) => {}
-                Some(ClientMessage::Exec(_) | ClientMessage::Activity) => bail!("unexpected message"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_)) => bail!("unexpected message"),
                 // ホストが切断した。端末を閉じてプロセスに SIGHUP を届ける。
                 None => {
                     drop(input);
@@ -285,7 +323,7 @@ async fn run_with_pipes(
                 Some(ClientMessage::CloseStdin) => stdin = None,
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::Resize(_)) => {}
-                Some(ClientMessage::Exec(_) | ClientMessage::Activity) => bail!("unexpected message"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_)) => bail!("unexpected message"),
                 None => {
                     client_open = false;
                     let _ = child.start_kill();
