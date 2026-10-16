@@ -1,0 +1,55 @@
+# 開発用のゲートウェイの設定の例。リポジトリのルートで次のように起動する。
+#
+#   images/guest/kernel/build.sh && images/guest/rootfs/build.sh
+#   docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest/dev
+#   cargo build -p chloe-egress -p chloe-gateway
+#   target/debug/chloe-gateway --config images/guest/dev/gateway.example.toml
+#
+# 接続は ssh -p 2222 <GitHub のログイン名>@127.0.0.1 。公開鍵は GitHub に登録したものを使う。
+
+listen = "127.0.0.1:2222"
+host_key = "build/dev/gateway/host_key"
+database = "build/dev/gateway/chloe.db"
+master_key = "build/dev/gateway/master.key"
+idle_timeout_secs = 1800
+
+# ログインを許す GitHub のログイン名。
+allowed_users = ["your-github-login"]
+
+# team と Organization のワークスペースに入れる利用者 (GitHub App による確認を入れるまでの仮のもの)。
+[memberships]
+# "org:your-org" = ["your-github-login"]
+# "team:your-org/your-team" = ["your-github-login"]
+
+# すべてのワークスペースに共通の許可リスト。シークレットの差し替え先 (api.anthropic.com など) は
+# シークレットを登録すると自動で加わる。
+[policy]
+allow = [
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "claude.ai",
+    "platform.claude.com",
+    "api.openai.com",
+    "auth.openai.com",
+    "chatgpt.com",
+    "github.com",
+    "api.github.com",
+    "*.githubusercontent.com",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+]
+passthrough = [
+    "registry-1.docker.io",
+    "auth.docker.io",
+    "*.docker.com",
+    "*.ubuntu.com",
+]
+
+[runner]
+guest_dir = "build/guest"
+egress_bin = "target/debug/chloe-egress"
+state_root = "build/dev/gateway/workspaces"
