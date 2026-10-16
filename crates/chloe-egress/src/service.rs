@@ -102,6 +102,7 @@ where
             host: &host,
             sni: sni.as_deref(),
             tls: sni.is_some(),
+            method: &method,
             path_and_query: &path_and_query,
             headers: &mut headers,
             body: scanned_body.as_deref(),

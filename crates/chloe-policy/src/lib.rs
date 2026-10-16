@@ -4,8 +4,13 @@
 //!
 //! - 中継のみの宛先は、SNI を見て復号せずに中継する ([`Policy::tls_decision`])。
 //! - 許可リストにない宛先、SNI のない TLS、SNI と Host が食い違う要求は遮断する。
+//! - 宛先、メソッド、パスの規則 ([`PathRuleConfig`]) で、許可した宛先への要求をさらに絞る。
 //! - プレースホルダーは、規則に登録した宛先と場所に限って本物に差し替える。
 //!   それ以外の宛先でプレースホルダーを見つけたら遮断する。
+
+mod path;
+
+pub use path::{Action, PathRuleConfig};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -24,6 +29,9 @@ pub struct PolicyConfig {
     pub passthrough: Vec<String>,
     #[serde(default)]
     pub inject: Vec<InjectRuleConfig>,
+    /// 宛先、メソッド、パスの規則。上から順に評価する。
+    #[serde(default)]
+    pub rules: Vec<PathRuleConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +66,7 @@ pub struct Policy {
     allow: Vec<String>,
     passthrough: Vec<String>,
     rules: Vec<InjectRule>,
+    path_rules: Vec<path::PathRule>,
 }
 
 struct InjectRule {
@@ -83,6 +92,7 @@ pub struct Request<'a> {
     /// TLS の SNI。平文の HTTP なら `None`。
     pub sni: Option<&'a str>,
     pub tls: bool,
+    pub method: &'a str,
     /// パスとクエリ。
     pub path_and_query: &'a str,
     /// ヘッダー。名前は小文字にしておく。差し替えた値はここに書き戻す。
@@ -108,6 +118,10 @@ pub enum BlockReason {
     NoSni,
     SniHostMismatch,
     NotAllowed,
+    /// 宛先、メソッド、パスの規則で拒否した。
+    PathDenied,
+    /// パスを正規化できなかった (根より上を指す `..` や壊れたパーセントエンコード)。
+    BadPath,
     PlaceholderToUnboundHost,
 }
 
@@ -117,6 +131,8 @@ impl BlockReason {
             Self::NoSni => "no-sni",
             Self::SniHostMismatch => "sni-host-mismatch",
             Self::NotAllowed => "not-allowed",
+            Self::PathDenied => "path-denied",
+            Self::BadPath => "bad-path",
             Self::PlaceholderToUnboundHost => "placeholder-to-unbound-host",
         }
     }
@@ -148,10 +164,17 @@ impl Policy {
             .collect::<Result<_, Error>>()?;
         let mut allow = config.allow;
         allow.extend(config.passthrough.iter().cloned());
+        let path_rules = config
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| path::PathRule::new(index, rule))
+            .collect();
         Ok(Self {
             allow,
             passthrough: config.passthrough,
             rules,
+            path_rules,
         })
     }
 
@@ -182,6 +205,20 @@ impl Policy {
         }
         if !host_matches(&host, &self.allow) {
             return blocked(BlockReason::NotAllowed, None);
+        }
+        if !self.path_rules.is_empty() {
+            let Some(path) = path::normalize(request.path_and_query) else {
+                return blocked(BlockReason::BadPath, None);
+            };
+            let method = request.method.to_ascii_uppercase();
+            if let Some(rule) = self
+                .path_rules
+                .iter()
+                .find(|rule| rule.matches(&host, &method, &path))
+                && rule.action == Action::Deny
+            {
+                return blocked(BlockReason::PathDenied, Some(&rule.name));
+            }
         }
 
         // 先にすべての規則を確かめてから差し替える。途中で遮断したときに、
@@ -342,6 +379,7 @@ mod tests {
 
     struct Req {
         host: &'static str,
+        method: &'static str,
         sni: Option<&'static str>,
         path: &'static str,
         headers: Vec<(String, Vec<u8>)>,
@@ -352,6 +390,7 @@ mod tests {
         fn https(host: &'static str) -> Self {
             Self {
                 host,
+                method: "GET",
                 sni: Some(host),
                 path: "/",
                 headers: vec![],
@@ -369,6 +408,7 @@ mod tests {
                 host: self.host,
                 sni: self.sni,
                 tls: self.sni.is_some(),
+                method: self.method,
                 path_and_query: self.path,
                 headers: &mut self.headers,
                 body: self.body,
@@ -441,6 +481,7 @@ mod tests {
             host: no_sni.host,
             sni: None,
             tls: true,
+            method: "GET",
             path_and_query: "/",
             headers: &mut no_sni.headers,
             body: None,
@@ -550,6 +591,85 @@ mod tests {
             .header("authorization", &format!("token {GH_PH}"))
             .eval(&p);
         assert_eq!(reason(leaked), BlockReason::PlaceholderToUnboundHost);
+    }
+
+    #[test]
+    fn path_rules_first_match_wins() {
+        let config: PolicyConfig = serde_json::from_value(serde_json::json!({
+            "allow": ["api.github.com", "github.com"],
+            "rules": [
+                { "name": "no-delete", "hosts": ["api.github.com"], "methods": ["DELETE"], "paths": ["/repos/**"], "action": "deny" },
+                { "hosts": ["api.github.com"], "paths": ["/repos/ForteFibre/**", "/user", "/graphql"], "action": "allow" },
+                { "name": "github-default", "hosts": ["api.github.com"], "action": "deny" },
+                { "name": "no-push", "hosts": ["github.com"], "methods": ["POST"], "paths": ["/*/*/git-receive-pack", "/*/*.git/git-receive-pack"], "action": "deny" }
+            ]
+        }))
+        .unwrap();
+        let p = Policy::new(config, |_| Ok(String::new())).unwrap();
+        let eval = |host: &'static str, method: &'static str, path: &'static str| {
+            let mut req = Req::https(host);
+            req.method = method;
+            req.path = path;
+            req.eval(&p)
+        };
+        let allowed = Decision::Allowed { injected: vec![] };
+        let denied = |rule: &str| Decision::Blocked {
+            reason: BlockReason::PathDenied,
+            rule: Some(rule.into()),
+        };
+        assert_eq!(
+            eval("api.github.com", "GET", "/repos/fortefibre/chloe/pulls"),
+            allowed
+        );
+        assert_eq!(
+            eval("api.github.com", "delete", "/repos/ForteFibre/chloe"),
+            denied("no-delete")
+        );
+        assert_eq!(
+            eval("api.github.com", "GET", "/repos/other/x"),
+            denied("github-default")
+        );
+        // エンコードや .. で規則を回り込めない。
+        assert_eq!(
+            eval("api.github.com", "GET", "/repos/ForteFibre/../other/x"),
+            denied("github-default")
+        );
+        assert_eq!(
+            eval("api.github.com", "DELETE", "/repos/Forte%46ibre/chloe"),
+            denied("no-delete")
+        );
+        assert_eq!(
+            eval("api.github.com", "GET", "/../user"),
+            Decision::Blocked {
+                reason: BlockReason::BadPath,
+                rule: None
+            }
+        );
+        // どの規則にも当たらなければ許可リストだけで判定する。
+        assert_eq!(
+            eval(
+                "github.com",
+                "GET",
+                "/ForteFibre/chloe.git/info/refs?service=git-receive-pack"
+            ),
+            allowed
+        );
+        assert_eq!(
+            eval(
+                "github.com",
+                "POST",
+                "/ForteFibre/chloe.git/git-receive-pack"
+            ),
+            denied("no-push")
+        );
+        assert_eq!(
+            eval(
+                "github.com",
+                "POST",
+                "/ForteFibre/chloe.git/git-upload-pack"
+            ),
+            allowed
+        );
     }
 
     #[test]
