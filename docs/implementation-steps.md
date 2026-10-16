@@ -19,7 +19,7 @@
 | 0 | リポジトリの土台 | Cargo ワークスペース、ツールチェーンの固定、fmt と clippy | 空のクレート群がビルドできる |
 | 1 | ゲストイメージ | カーネル、rootfs、Firecracker の手動起動 | VM 内で `docker run hello-world`、`claude`、`codex` が動く |
 | 2 | ネットワークの検証 | netns、tap、nftables、mitmproxy の transparent モード、CA の公開、差し替え | 計画書の PoC 確認項目に結果が出る |
-| 3 | guest-agent と runner | vsock 越しの PTY と exec、VM を起動して端末をつなぐ CLI | `chloe-runner run` で VM のシェルに入れる |
+| 3 | guest-agent と runner | vsock 越しの PTY と exec、VM に端末をつなぐ CLI | `chloe-runner shell` で VM のシェルに入れる |
 | 4 | egress | rama で mitmproxy を置き換える | 段階 2 と同じ確認が rama で通る |
 | 5 | gateway | russh、GitHub の公開鍵、PTY 中継、Device Flow | `ssh alice@localhost` で VM に入れる |
 | 6 | controller と secrets | DB、ワークスペース管理、シークレットの保管先 | 二人の利用者が別々のシークレットで使える |
@@ -102,7 +102,37 @@ images/guest/dev/smoke-test.sh    # 終了条件の自動確認 (2 回起動す�
 5. 中継のみの宛先（Docker Hub など）を `ignore_hosts` で設定し、CA を入れていないコンテナからのイメージ取得を確かめる。
 6. 許可外のホストへプレースホルダーを送り、遮断されることを確かめる。
 
-## 段階 3 以降の進め方
+結果は [段階 2 の検証結果](poc/stage2-network.md) に記録した。
+本物の認証情報がないので、サブスクリプションのログインは未確認のまま残っている。
 
-段階 3 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。
+## 段階 3：guest-agent と runner
+
+### 作ったもの
+
+- **`chloe-agent-proto`**：ホストと guest-agent のあいだのプロトコル。一つの接続で一つのプロセスを扱い、長さつきのフレームに postcard で符号化したメッセージを載せる。
+- **`chloe-guest-agent`**：ゲストで systemd が常駐させる。vsock の 7000 番で待ち受け、ホスト（CID 2）からの接続だけを受ける。要求ごとに、端末つき（pty-process）かパイプでプロセスを起動する。root 以外の利用者には `runuser` で切り替え、既定の利用者は `user`、既定の作業ディレクトリは `/workspace` にした。musl で静的にリンクし、rootfs のビルドで組み込む。
+- **`chloe-runner`**：`shell` と `exec` を持つ CLI。Firecracker の vsock の Unix ソケットに `CONNECT 7000` を書いて guest-agent につなぐ。端末つきのときは raw モードにし、端末の大きさの変化（SIGWINCH）を送る。
+
+VM の起動そのものは、まだ `images/guest/dev/run.sh` のコンテナが行う。
+Firecracker を `chloe-runner` から直接起動する部分は、ランナーの管理を作る段階 6 で書く。
+そのため、当初の終了条件の `chloe-runner run` は `run.sh` と `chloe-runner shell` の組み合わせに置き換えた。
+
+```sh
+CHLOE_DEV_DETACH=1 images/guest/dev/run.sh
+target/debug/chloe-runner shell --vsock build/dev/vsock.sock
+```
+
+### 結果（2026-10-16）
+
+- ログインシェル、端末の割り当てと大きさ、標準入力、標準エラー、終了コード、利用者の切り替え、作業ディレクトリ、環境変数を `smoke-test.sh` で確かめた。
+- 確認スクリプトはシリアルコンソールではなく `chloe-runner exec` で実行するようにした。段階 1 の確認は 54 秒から 20 秒になった。
+- シリアルコンソールの root の自動ログインは外した。
+
+guest-agent の認証は、vsock の接続元が CID 2 であることだけに頼っている。
+ゲストのカーネルは vsock のループバック（`CONFIG_VSOCKETS_LOOPBACK`）を持たないので、ゲスト内のプロセスが guest-agent に接続することはできない。
+ホスト側の Unix ソケットに接続できる者は誰でもゲストの root になれるので、ソケットはランナーの外に出さない（開発用の `run.sh` だけは、ホストの利用者がつなげるよう 0666 にしている）。
+
+## 段階 4 以降の進め方
+
+段階 4 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。
 段階 2 の結果によって段階 4 の設計（HTTP/2 の扱い、差し替えの位置など）が変わりうるので、先に細かく決めない。
