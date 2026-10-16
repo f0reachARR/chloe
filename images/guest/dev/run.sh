@@ -33,6 +33,9 @@ for pair in "workspace:$WORKSPACE_SIZE" "docker:$DOCKER_SIZE"; do
     fi
 done
 
+# chloe-egress はホストでビルドしてコンテナに渡す (ホストの glibc はコンテナより古い)。
+cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-egress
+
 docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
 
 # CHLOE_DEV_DETACH=1 ならバックグラウンドで起動する (確認スクリプトはこちらを使う)。
@@ -48,6 +51,7 @@ fi
 exec docker run --rm "${run_flags[@]}" \
     --name "${CHLOE_DEV_NAME:-chloe-dev}" \
     -e CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}" \
+    -e CHLOE_PROXY="${CHLOE_PROXY:-egress}" \
     -e VCPUS="${VCPUS:-4}" \
     -e MEM_MIB="${MEM_MIB:-4096}" \
     --privileged \
@@ -55,4 +59,5 @@ exec docker run --rm "${run_flags[@]}" \
     --device /dev/net/tun \
     -v "$guest:/guest:ro" \
     -v "$state:/state" \
+    -v "$root/target/debug/chloe-egress:/opt/chloe/bin/chloe-egress:ro" \
     chloe-dev-runner

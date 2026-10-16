@@ -42,18 +42,26 @@ EOF
     echo 1 > /proc/sys/net/ipv4/ip_forward
     ;;
 proxy)
+    # CHLOE_PROXY でプロキシの実装を選ぶ。egress は 80 番と 443 番を別のポートで受ける。
+    CHLOE_PROXY="${CHLOE_PROXY:-egress}"
+    case "$CHLOE_PROXY" in
+    egress) http_port=8080 https_port=8443 ;;
+    mitmproxy) http_port=8080 https_port=8080 ;;
+    *) echo "unknown CHLOE_PROXY: $CHLOE_PROXY" >&2; exit 1 ;;
+    esac
     nft -f - <<EOF
 table inet chloe {
     chain prerouting {
         type nat hook prerouting priority dstnat;
         iifname "tap0" meta l4proto { tcp, udp } th dport 53 dnat ip to 172.29.0.1:53
-        iifname "tap0" tcp dport { 80, 443 } redirect to :8080
+        iifname "tap0" tcp dport 80 redirect to :$http_port
+        iifname "tap0" tcp dport 443 redirect to :$https_port
     }
     chain input {
         type filter hook input priority 0; policy accept;
         iifname "tap0" ct state established,related accept
         iifname "tap0" meta l4proto { tcp, udp } th dport 53 accept
-        iifname "tap0" tcp dport 8080 accept
+        iifname "tap0" tcp dport { $http_port, $https_port } accept
         iifname "tap0" counter drop
     }
     chain forward {
@@ -69,6 +77,18 @@ EOF
     export CHLOE_SECRET_ANTHROPIC="${CHLOE_SECRET_ANTHROPIC:-sk-ant-api03-not-a-real-key}"
     export CHLOE_SECRET_OPENAI="${CHLOE_SECRET_OPENAI:-sk-proj-not-a-real-key}"
 
+    policy="${CHLOE_POLICY:-/opt/chloe/proxy/policy.dev.json}"
+    if [ "$CHLOE_PROXY" = egress ]; then
+        /opt/chloe/bin/chloe-egress \
+            --http-listen "0.0.0.0:$http_port" \
+            --https-listen "0.0.0.0:$https_port" \
+            --policy "$policy" \
+            --ca-dir /state/egress \
+            --log "$logs/requests.jsonl" \
+            > "$logs/egress.log" 2>&1 &
+        proxy_pid=$!
+        proxy_log="$logs/egress.log"
+    else
     mkdir -p /state/mitmproxy
     /opt/mitmproxy/bin/mitmdump \
         --mode transparent \
@@ -77,19 +97,21 @@ EOF
         --set connection_strategy=lazy \
         --set block_global=false \
         -s /opt/chloe/proxy/chloe_policy.py \
-        --set chloe_policy="${CHLOE_POLICY:-/opt/chloe/proxy/policy.dev.json}" \
+        --set chloe_policy="$policy" \
         --set chloe_log="$logs/requests.jsonl" \
         > "$logs/mitmdump.log" 2>&1 &
     proxy_pid=$!
-    # 待ち受けを始めるまで待つ。アドオンの読み込みに失敗すると mitmdump は終了する。
+    proxy_log="$logs/mitmdump.log"
+    fi
+    # 待ち受けを始めるまで待つ。設定の読み込みに失敗するとプロキシは終了する。
     for _ in $(seq 100); do
-        grep -q "listening at" "$logs/mitmdump.log" 2>/dev/null && break
+        grep -qi "listening" "$proxy_log" 2>/dev/null && break
         sleep 0.1
     done
     sleep 0.5
     if ! kill -0 "$proxy_pid" 2>/dev/null; then
-        echo "mitmdump failed to start:" >&2
-        cat "$logs/mitmdump.log" >&2
+        echo "$CHLOE_PROXY failed to start:" >&2
+        cat "$proxy_log" >&2
         exit 1
     fi
     ;;

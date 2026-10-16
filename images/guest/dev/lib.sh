@@ -63,7 +63,7 @@ stop_vm() {
     "$runner" exec --user root -- systemctl reboot >/dev/null 2>&1 || true
     timeout 60 docker wait "$CHLOE_DEV_NAME" >/dev/null 2>&1 || docker kill "$CHLOE_DEV_NAME" >/dev/null 2>&1 || true
     # ランナーのコンテナが root で書いたログを読めるようにする。
-    docker run --rm -v "$dev_state:/state" chloe-guest-tools chown -R "$(id -u):$(id -g)" /state/logs /state/mitmproxy 2>/dev/null || true
+    docker run --rm -v "$dev_state:/state" chloe-guest-tools chown -R "$(id -u):$(id -g)" /state/logs /state/mitmproxy /state/egress 2>/dev/null || true
 }
 
 # ホスト側の確認。結果はゲスト側と同じ形式で出す。
