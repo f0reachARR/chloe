@@ -80,7 +80,14 @@ EOF
     export CHLOE_SECRET_ANTHROPIC="${CHLOE_SECRET_ANTHROPIC:-sk-ant-api03-not-a-real-key}"
     export CHLOE_SECRET_OPENAI="${CHLOE_SECRET_OPENAI:-sk-proj-not-a-real-key}"
 
-    as_owner /opt/chloe/bin/chloe-egress \
+    # コントロールプレーンの問い合わせ用ソケットがあれば、本物の値はそこへ問い合わせる。
+    # なければ (run.sh で直接起動したとき) 開発用に環境変数から読む。
+    broker_arg=""
+    if [ -S /state/broker.sock ]; then
+        broker_arg="--broker /state/broker.sock"
+    fi
+    # shellcheck disable=SC2086
+    as_owner /opt/chloe/bin/chloe-egress $broker_arg \
         --http-listen "0.0.0.0:$http_port" \
         --https-listen "0.0.0.0:$https_port" \
         --policy "${CHLOE_POLICY:-/opt/chloe/policy.dev.json}" \

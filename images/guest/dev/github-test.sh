@@ -185,7 +185,8 @@ check org-placeholder "ghu_chloe" echo "$org_ph"
 check org-api "401" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: token $org_ph' https://api.github.com/user"
 sleep 1
 check org-injected '"injected":["github_token-1"]' last_github_request "$(runner_key "$org_ph")"
-check org-runner-token "installation" sh -c '
-    docker inspect -f "{{range .Config.Env}}{{println .}}{{end}}" "$0$1" | grep -q "^CHLOE_SECRET_GITHUB_TOKEN=ghs_stub$" && echo installation' \
+check org-runner-no-token "0" sh -c '
+    docker inspect -f "{{range .Config.Env}}{{println .}}{{end}}" "$0$1" | grep -c "^CHLOE_SECRET_" || true' \
     "$prefix" "$(runner_key "$org_ph")"
+check org-token-served "secret served" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "secret served" | grep "acme/proj" | grep -o "secret served.*github_token" | tail -1' "$logs/gateway.log"
 check personal-not-in-org "absent" as alice+acme/proj 'env | grep -q ghu_stub && echo present || echo absent'

@@ -103,17 +103,16 @@ check distinct-placeholders "differ" sh -c '[ "$0" != "$1" ] && echo differ' "$a
 check both-running "2" sh -c 'docker ps -q --filter "name=^$0" | wc -l' "$prefix"
 check no-real-secret-in-vm "absent" as bob 'env | grep -q real-secret && echo present || echo absent'
 
-# プロキシに渡した本物の値は、ワークスペースごとに持ち主のものになっている。値そのものは出さない。
-runner_secret() {
-    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$prefix$1" \
-        | grep '^CHLOE_SECRET_ANTHROPIC_API_KEY=' | cut -d= -f2-
+# 本物の値はランナーに渡さない (コンテナの環境変数にもない)。
+runner_secret_env() {
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$prefix$1" | grep -c '^CHLOE_SECRET_' || true
 }
 # ランナーの識別子は、ゲストに渡した環境変数のファイルにプレースホルダーがあるかで探す。
 runner_key() { basename "$(dirname "$(dirname "$(grep -l "$1" "$mvp"/workspaces/*/config/guest.env)")")"; }
 alice_key="$(runner_key "$alice_ph")"
 bob_key="$(runner_key "$bob_ph")"
-check alice-runner-secret "match" sh -c '[ "$1" = real-secret-A ] && echo match || echo mismatch' _ "$(runner_secret "$alice_key")"
-check bob-runner-secret "match" sh -c '[ "$1" = real-secret-B ] && echo match || echo mismatch' _ "$(runner_secret "$bob_key")"
+check alice-runner-no-secret "0" runner_secret_env "$alice_key"
+check bob-runner-no-secret "0" runner_secret_env "$bob_key"
 
 # 自分のプレースホルダーは差し替えられ、他人のプレースホルダーは差し替えられない。
 anthropic() { as "$1" "curl -s -o /dev/null -w '%{http_code}' -H 'x-api-key: $2' -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models"; }
@@ -123,9 +122,10 @@ sleep 1
 last_anthropic_request() { egress_log "$1" | grep '"host":"api.anthropic.com"' | tail -1; }
 check alice-injected '"injected":["anthropic_api_key-0"]' last_anthropic_request "$alice_key"
 check bob-not-injected '"injected":[]' last_anthropic_request "$bob_key"
+check secret-served "secret served" sh -c 'grep "secret served" "$0" | sed "s/\x1b\[[0-9;]*m//g" | grep -o "secret served.*anthropic_api_key" | tail -1' "$logs/gateway.log"
 
 echo "--- updating a running workspace"
-check live-update "1 running workspace(s) use the new value" sh -c 'echo real-secret-A2 | "$@"' _ \
+check live-update "used from the next request" sh -c 'echo real-secret-A2 | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set anthropic_api_key
 check egress-updated "1" grep -c "policy updated" "$mvp/workspaces/$alice_key/logs/egress.log"
 check bob-untouched "0" sh -c 'grep -c "policy updated" "$0" || true' "$mvp/workspaces/$bob_key/logs/egress.log"
@@ -162,3 +162,12 @@ done
 check idle-stop "yes" echo "$stopped"
 check workspace-kept "kept" as alice 'cat /workspace/marker'
 check home-kept "kept" as alice 'cat ~/.claude/marker'
+
+echo "--- control plane down"
+# ゲートウェイ (問い合わせ先) を止めると、本物の値が要る要求は 503 で失敗し、要らない要求は通る。
+# VM には chloe-runner で vsock から直接入る。
+cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-runner
+kill "$gateway_pid"; wait "$gateway_pid" 2>/dev/null || true
+vm() { "$root/target/debug/chloe-runner" exec --vsock "$mvp/workspaces/$alice_key/vsock.sock" -- bash -lc "$1"; }
+check down-secret-503 "503" vm "curl -s -o /dev/null -w '%{http_code}' -H \"x-api-key: \$ANTHROPIC_API_KEY\" https://api.anthropic.com/v1/models"
+check down-plain-ok "200" vm "curl -s -o /dev/null -w '%{http_code}' https://httpbin.org/get"
