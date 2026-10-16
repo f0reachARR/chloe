@@ -1,10 +1,9 @@
 //! SSH の接続ごとの処理。
 //!
 //! セッションチャネル一つにつき guest-agent への接続を一つ開き、シェルかコマンドを実行して
-//! 入出力を中継する。
+//! 入出力を中継する。`chloe` で始まるコマンドはゲートウェイが処理する ([`crate::commands`])。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +12,10 @@ use chloe_agent_proto::{
     AGENT_PORT, AgentMessage, ClientMessage, Connection as AgentConnection, ExecRequest,
     PROTOCOL_VERSION, TtyRequest, WindowSize, firecracker,
 };
+use chloe_controller::docker::DockerBackend;
+use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
+use chloe_controller::{Controller, Error as ControllerError};
+use chloe_secrets::Owner;
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Session};
 use russh::{Channel, ChannelId, Pty, Sig};
@@ -20,24 +23,72 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::auth::{GitHubKeys, parse_user};
-use crate::config::{Config, Workspace};
+use crate::commands;
+use crate::config::Config;
 
-/// guest-agent への接続を待つ時間。VM が起動したばかりのときのために少し待つ。
-const AGENT_CONNECT_WAIT: Duration = Duration::from_secs(5);
+/// ワークスペースを指定しなかったときに入る、個人のワークスペースの名前。
+const DEFAULT_WORKSPACE: &str = "default";
+/// ランナーを起動してから guest-agent が応答するまで待つ時間。
+const AGENT_CONNECT_WAIT: Duration = Duration::from_secs(90);
 /// ホストから guest-agent へ送るメッセージを溜めておく数。
 const INPUT_BUFFER: usize = 64;
+/// 管理コマンドの標準入力の上限。
+const MAX_COMMAND_STDIN: usize = 64 * 1024;
 
 pub struct Shared {
     pub config: Config,
     pub keys: GitHubKeys,
+    pub controller: Controller<DockerBackend>,
 }
 
-/// 認証を通った利用者と、入るワークスペース。
+impl Shared {
+    /// 利用者が入れるワークスペースの持ち主 (本人と、所属する team や Organization)。
+    pub fn owners_for(&self, login: &str) -> Vec<Owner> {
+        let mut owners = vec![Owner::User(login.to_ascii_lowercase())];
+        for (owner, members) in &self.config.memberships {
+            if members.iter().any(|m| m.eq_ignore_ascii_case(login))
+                && let Ok(owner) = owner.parse()
+            {
+                owners.push(owner);
+            }
+        }
+        owners
+    }
+
+    pub fn can_access(&self, login: &str, owner: &Owner) -> bool {
+        self.owners_for(login).contains(owner)
+    }
+
+    /// 入るワークスペースを決める。指定がなければ個人の default を (なければ作って) 使う。
+    async fn resolve_workspace(&self, login: &str, spec: Option<&str>) -> Result<Workspace> {
+        let target = WorkspaceRef::parse(spec.unwrap_or(DEFAULT_WORKSPACE), login)?;
+        if !self.can_access(login, &target.owner) {
+            bail!("no such workspace: {target}");
+        }
+        let store = self.controller.store();
+        if let Some(ws) = store.find(&target).await? {
+            return Ok(ws);
+        }
+        if spec.is_some() {
+            bail!("no such workspace: {target} (create it with `chloe ws create {target}`)");
+        }
+        match store.create(&target, RootMode::Ephemeral, login).await {
+            Ok(ws) => Ok(ws),
+            // 同時に接続した別の接続が先に作った。
+            Err(ControllerError::AlreadyExists(_)) => store
+                .find(&target)
+                .await?
+                .context("the default workspace disappeared"),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// 認証を通った利用者と、SSH ユーザー名で指定されたワークスペース。
 #[derive(Clone)]
 struct Authenticated {
     login: String,
-    workspace_name: String,
-    workspace: Workspace,
+    workspace: Option<String>,
 }
 
 #[derive(Default)]
@@ -45,6 +96,8 @@ struct ChannelState {
     tty: Option<TtyRequest>,
     env: Vec<(String, String)>,
     input: Option<mpsc::Sender<ClientMessage>>,
+    /// 標準入力を最後まで読んでから実行する管理コマンド。
+    pending_command: Option<(Vec<String>, Vec<u8>)>,
 }
 
 pub struct Connection {
@@ -64,26 +117,32 @@ impl Connection {
         }
     }
 
-    /// 利用者がワークスペースに入れるなら、その情報を返す。
     async fn authorize(&self, user: &str, key: &PublicKey) -> Result<Option<Authenticated>> {
         let user = parse_user(user)?;
-        let workspace_name = user
-            .workspace
-            .unwrap_or_else(|| self.shared.config.default_workspace.clone());
-        let Some(workspace) = self.shared.config.workspaces.get(&workspace_name) else {
+        if !self.shared.config.is_allowed(&user.login) {
             return Ok(None);
-        };
-        // GitHub に問い合わせる前に、メンバーでない利用者を落とす。
-        if !workspace.is_member(&user.login) {
-            return Ok(None);
+        }
+        // ワークスペースを指定していれば、GitHub に問い合わせる前に存在と所属を確かめる。
+        if let Some(spec) = &user.workspace {
+            let target = WorkspaceRef::parse(spec, &user.login)?;
+            if !self.shared.can_access(&user.login, &target.owner)
+                || self
+                    .shared
+                    .controller
+                    .store()
+                    .find(&target)
+                    .await?
+                    .is_none()
+            {
+                return Ok(None);
+            }
         }
         if !self.shared.keys.is_registered(&user.login, key).await? {
             return Ok(None);
         }
         Ok(Some(Authenticated {
-            login: user.login,
-            workspace_name,
-            workspace: workspace.clone(),
+            login: user.login.to_ascii_lowercase(),
+            workspace: user.workspace,
         }))
     }
 
@@ -106,7 +165,7 @@ impl Connection {
         let (Some(user), Some(state)) = (&self.user, self.channels.get_mut(&channel)) else {
             return session.channel_failure(channel);
         };
-        if state.input.is_some() {
+        if state.input.is_some() || state.pending_command.is_some() {
             // 一つのチャネルで二度目の shell や exec は受けない。
             return session.channel_failure(channel);
         }
@@ -120,7 +179,7 @@ impl Connection {
         };
         info!(
             login = %user.login,
-            workspace = %user.workspace_name,
+            workspace = ?user.workspace,
             command = ?request.command,
             tty = request.tty.is_some(),
             "session started"
@@ -128,13 +187,38 @@ impl Connection {
         let (tx, rx) = mpsc::channel(INPUT_BUFFER);
         state.input = Some(tx);
         tokio::spawn(relay(
+            self.shared.clone(),
+            user.clone(),
             session.handle(),
             channel,
-            user.workspace.vsock.clone(),
             request,
             rx,
         ));
         session.channel_success(channel)
+    }
+
+    fn run_command(
+        &self,
+        channel: ChannelId,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        session: &Session,
+    ) {
+        let (Some(user), handle) = (self.user.clone(), session.handle()) else {
+            return;
+        };
+        let shared = self.shared.clone();
+        tokio::spawn(async move {
+            info!(login = %user.login, command = ?args, "management command");
+            let output = commands::run(&shared, &user.login, &args, &stdin).await;
+            let _ = handle.data(channel, output.stdout.into_bytes()).await;
+            let _ = handle
+                .extended_data(channel, 1, output.stderr.into_bytes())
+                .await;
+            let _ = handle.exit_status_request(channel, output.code).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+        });
     }
 
     async fn send_input(&mut self, channel: ChannelId, message: ClientMessage) {
@@ -167,7 +251,7 @@ impl russh::server::Handler for Connection {
     ) -> Result<Auth, Self::Error> {
         match self.check_key(user, public_key).await {
             Some(authenticated) => {
-                info!(peer = ?self.peer, login = %authenticated.login, workspace = %authenticated.workspace_name, "authenticated");
+                info!(peer = ?self.peer, login = %authenticated.login, workspace = ?authenticated.workspace, "authenticated");
                 self.user = Some(authenticated);
                 Ok(Auth::Accept)
             }
@@ -244,8 +328,20 @@ impl russh::server::Handler for Connection {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // OpenSSH と同じく、コマンドは利用者のシェルに渡す。
         let command = String::from_utf8_lossy(data).into_owned();
+        if let Some(args) = commands::parse(&command) {
+            let Some(state) = self.channels.get_mut(&channel) else {
+                return session.channel_failure(channel);
+            };
+            session.channel_success(channel)?;
+            if commands::needs_stdin(&args) {
+                state.pending_command = Some((args, Vec::new()));
+            } else {
+                self.run_command(channel, args, Vec::new(), session);
+            }
+            return Ok(());
+        }
+        // OpenSSH と同じく、コマンドは利用者のシェルに渡す。
         self.start(
             channel,
             vec!["/bin/bash".into(), "-c".into(), command],
@@ -259,6 +355,16 @@ impl russh::server::Handler for Connection {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if let Some((_, stdin)) = self
+            .channels
+            .get_mut(&channel)
+            .and_then(|s| s.pending_command.as_mut())
+        {
+            if stdin.len() + data.len() <= MAX_COMMAND_STDIN {
+                stdin.extend_from_slice(data);
+            }
+            return Ok(());
+        }
         self.send_input(channel, ClientMessage::Stdin(data.to_vec()))
             .await;
         Ok(())
@@ -267,8 +373,16 @@ impl russh::server::Handler for Connection {
     async fn channel_eof(
         &mut self,
         channel: ChannelId,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if let Some((args, stdin)) = self
+            .channels
+            .get_mut(&channel)
+            .and_then(|s| s.pending_command.take())
+        {
+            self.run_command(channel, args, stdin, session);
+            return Ok(());
+        }
         self.send_input(channel, ClientMessage::CloseStdin).await;
         Ok(())
     }
@@ -311,15 +425,25 @@ impl russh::server::Handler for Connection {
     }
 }
 
-/// guest-agent とのあいだで入出力を中継し、終わったらチャネルを閉じる。
+/// ワークスペースのランナーを用意し、guest-agent とのあいだで入出力を中継して、
+/// 終わったらチャネルを閉じる。
 async fn relay(
+    shared: Arc<Shared>,
+    user: Authenticated,
     handle: Handle,
     channel: ChannelId,
-    vsock: PathBuf,
     request: ExecRequest,
     input: mpsc::Receiver<ClientMessage>,
 ) {
-    let result = relay_inner(&handle, channel, &vsock, request, input).await;
+    let result = async {
+        let workspace = shared
+            .resolve_workspace(&user.login, user.workspace.as_deref())
+            .await?;
+        // セッションを持っているあいだは、ランナーが止められない。
+        let session = shared.controller.open(&workspace).await?;
+        relay_inner(&handle, channel, &session.vsock, request, input).await
+    }
+    .await;
     let code = match result {
         Ok(Some(code)) => code,
         // 利用者がチャネルを閉じた。

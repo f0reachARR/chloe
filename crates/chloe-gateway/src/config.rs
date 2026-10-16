@@ -1,12 +1,10 @@
 //! ゲートウェイの設定。
-//!
-//! 段階 6 でワークスペースの管理 (chloe-controller) ができるまでは、
-//! ワークスペースとその VM の vsock をこの設定に直接書く。
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use chloe_controller::runner::BasePolicy;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -18,24 +16,44 @@ pub struct Config {
     /// 公開鍵を取得する GitHub の URL。`{github_url}/{login}.keys` を読む。
     #[serde(default = "default_github_url")]
     pub github_url: String,
-    /// ワークスペースを指定しなかったときに入るワークスペース。
-    #[serde(default = "default_workspace")]
-    pub default_workspace: String,
-    pub workspaces: BTreeMap<String, Workspace>,
+    /// SQLite のデータベース。なければ作る。
+    pub database: PathBuf,
+    /// シークレットのマスター鍵。なければ生成する。
+    pub master_key: PathBuf,
+    /// 最後の接続が閉じてからランナーを止めるまでの秒数。
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    /// ログインを許す GitHub のログイン名。GitHub App による Organization の所属の確認を
+    /// 入れるまでは、ここで絞る。
+    pub allowed_users: Vec<String>,
+    /// team と Organization のワークスペースに入れる利用者 (持ち主 → ログイン名)。
+    /// GitHub App による所属の確認を入れるまでの仮のもの。
+    #[serde(default)]
+    pub memberships: BTreeMap<String, Vec<String>>,
+    /// すべてのワークスペースに共通の許可リスト。
+    #[serde(default)]
+    pub policy: BasePolicy,
+    pub runner: DockerRunner,
 }
 
+/// 開発用のランナー (chloe-dev-runner のコンテナ) の設定。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Workspace {
-    /// VM の guest-agent につながる Firecracker の vsock の Unix ソケット。
-    pub vsock: PathBuf,
-    /// このワークスペースに入れる GitHub のログイン名。
-    pub members: Vec<String>,
+pub struct DockerRunner {
+    #[serde(default = "default_runner_image")]
+    pub image: String,
+    pub guest_dir: PathBuf,
+    pub egress_bin: PathBuf,
+    pub state_root: PathBuf,
+    #[serde(default = "default_name_prefix")]
+    pub name_prefix: String,
 }
 
-impl Workspace {
-    pub fn is_member(&self, login: &str) -> bool {
-        self.members.iter().any(|m| m.eq_ignore_ascii_case(login))
+impl Config {
+    pub fn is_allowed(&self, login: &str) -> bool {
+        self.allowed_users
+            .iter()
+            .any(|u| u.eq_ignore_ascii_case(login))
     }
 }
 
@@ -43,8 +61,16 @@ fn default_github_url() -> String {
     "https://github.com".into()
 }
 
-fn default_workspace() -> String {
-    "default".into()
+fn default_idle_timeout() -> u64 {
+    30 * 60
+}
+
+fn default_runner_image() -> String {
+    "chloe-dev-runner".into()
+}
+
+fn default_name_prefix() -> String {
+    "chloe-".into()
 }
 
 #[cfg(test)]
@@ -57,15 +83,27 @@ mod tests {
             r#"
             listen = "127.0.0.1:2222"
             host_key = "host_key"
+            database = "chloe.db"
+            master_key = "master.key"
+            allowed_users = ["Alice"]
 
-            [workspaces.default]
-            vsock = "build/dev/vsock.sock"
-            members = ["Alice"]
+            [memberships]
+            "org:fortefibre" = ["alice"]
+
+            [policy]
+            allow = ["httpbin.org"]
+
+            [runner]
+            guest_dir = "build/guest"
+            egress_bin = "target/debug/chloe-egress"
+            state_root = "build/dev/workspaces"
             "#,
         )
         .unwrap();
         assert_eq!(config.github_url, "https://github.com");
-        assert!(config.workspaces["default"].is_member("alice"));
-        assert!(!config.workspaces["default"].is_member("bob"));
+        assert_eq!(config.idle_timeout_secs, 1800);
+        assert!(config.is_allowed("alice"));
+        assert!(!config.is_allowed("bob"));
+        assert_eq!(config.runner.image, "chloe-dev-runner");
     }
 }

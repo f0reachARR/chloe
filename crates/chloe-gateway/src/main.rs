@@ -4,6 +4,7 @@
 //! ワークスペースの VM の guest-agent へシェルやコマンドを中継する。
 
 mod auth;
+mod commands;
 mod config;
 mod session;
 
@@ -12,10 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chloe_controller::Controller;
+use chloe_controller::docker::DockerBackend;
+use chloe_controller::store::Store;
+use chloe_secrets::{MasterKey, SecretDb};
 use clap::Parser;
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::Server as _;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::auth::GitHubKeys;
 use crate::config::Config;
@@ -52,15 +58,50 @@ async fn main() -> Result<()> {
         ..Default::default()
     });
 
+    let controller = build_controller(&config).await?;
     let listen = config.listen;
     let shared = Arc::new(Shared {
         keys: GitHubKeys::new(&config.github_url)?,
+        controller,
         config,
     });
     tracing::info!(%listen, "listening");
     let mut server = Server { shared };
     server.run_on_address(ssh_config, listen).await?;
     Ok(())
+}
+
+async fn build_controller(config: &Config) -> Result<Controller<DockerBackend>> {
+    if let Some(dir) = config.database.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(&config.database)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("open {}", config.database.display()))?;
+    chloe_secrets::MIGRATOR.run(&pool).await?;
+    let master = MasterKey::load_or_generate(&config.master_key)
+        .with_context(|| format!("load {}", config.master_key.display()))?;
+    let backend = DockerBackend {
+        image: config.runner.image.clone(),
+        guest_dir: std::path::absolute(&config.runner.guest_dir)?,
+        egress_bin: std::path::absolute(&config.runner.egress_bin)?,
+        state_root: std::path::absolute(&config.runner.state_root)?,
+        name_prefix: config.runner.name_prefix.clone(),
+    };
+    Ok(Controller::new(
+        Store::new(pool.clone()),
+        SecretDb::new(pool, master),
+        backend,
+        config.policy.clone(),
+        Duration::from_secs(config.idle_timeout_secs),
+    ))
 }
 
 struct Server {
