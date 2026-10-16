@@ -10,13 +10,13 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// CA 証明書を返すホスト名。外部には存在しない。
 pub const CA_HOST: &str = "ca.chloe.internal";
 
 /// 方針の設定ファイルの形。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyConfig {
     #[serde(default)]
     pub allow: Vec<String>,
@@ -26,7 +26,7 @@ pub struct PolicyConfig {
     pub inject: Vec<InjectRuleConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectRuleConfig {
     pub name: String,
     pub placeholder: String,
@@ -38,7 +38,7 @@ pub struct InjectRuleConfig {
     pub secret_env: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InjectFormat {
     /// ヘッダーの値の中のプレースホルダーを本物に置き換える。
