@@ -9,3 +9,11 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+chloe-agent-proto.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+rustix.workspace = true
+tokio.workspace = true
