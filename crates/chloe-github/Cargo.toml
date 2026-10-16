@@ -1,0 +1,26 @@
+[package]
+name = "chloe-github"
+description = "GitHub App を使った認証と所属の確認"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chloe-secrets.workspace = true
+
+jsonwebtoken.workspace = true
+reqwest = { workspace = true, features = ["json", "form"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
