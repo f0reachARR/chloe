@@ -1,12 +1,42 @@
 #!/bin/sh
-# 読み取り専用のルートに tmpfs を重ねてから systemd を起動する。
+# 読み取り専用のルートに書き込み用の層を重ねてから systemd を起動する。
 # カーネルの引数で init=/sbin/overlay-init を指定して PID 1 として動かす。
+#
+# 書き込み用の層は、カーネルの引数に chloe.root=persistent があればワークスペースのディスク
+# (/dev/vdb の .root/) に置いて起動をまたいで残し、なければ tmpfs に置いて起動ごとに捨てる。
 set -e
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+mount -t proc proc /proc
+root_mode=ephemeral
+for arg in $(cat /proc/cmdline); do
+    [ "$arg" = chloe.root=persistent ] && root_mode=persistent
+done
+umount /proc
+
 mount -t tmpfs -o mode=0755 tmpfs /mnt
-mkdir -p /mnt/upper /mnt/work /mnt/root
-mount -t overlay overlay -o lowerdir=/,upperdir=/mnt/upper,workdir=/mnt/work /mnt/root
+layer=/mnt
+if [ "$root_mode" = persistent ] && [ -b /dev/vdb ]; then
+    mkdir -p /mnt/ws
+    mount /dev/vdb /mnt/ws
+    layer=/mnt/ws/.root
+    mkdir -p "$layer"
+    # 共通イメージが変わったことを検出できるよう、層を作ったときのイメージの版を残す。
+    # 版が違うときの扱い (層を捨てるか引き継ぐか) はまだ決めておらず、印を残すだけにする。
+    if [ ! -f "$layer/release" ]; then
+        cp /etc/chloe/release "$layer/release"
+    fi
+fi
+mkdir -p "$layer/upper" "$layer/work" /mnt/root
+mount -t overlay overlay -o "lowerdir=/,upperdir=$layer/upper,workdir=$layer/work" /mnt/root
+
+if [ "$layer" != /mnt ]; then
+    if cmp -s /etc/chloe/release "$layer/release"; then
+        rm -f /mnt/root/etc/chloe/root-outdated
+    else
+        echo "the persistent root layer was created on $(cat "$layer/release")" > /mnt/root/etc/chloe/root-outdated
+    fi
+fi
 
 # docker export では空になるファイルをここで用意する。
 echo chloe > /mnt/root/etc/hostname

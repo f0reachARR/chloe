@@ -1,0 +1,27 @@
+#!/bin/sh
+# ランナーの設定用ドライブ (/dev/vdd) から、ゲストの環境変数と CA 証明書を読み込む。
+#
+# - guest.env：プレースホルダーなどの環境変数。/run/chloe/env に置き、guest-agent と
+#   ログインシェル (/etc/profile.d/chloe.sh) が読む。プレースホルダーは宛先に束縛されて
+#   いて漏れても害がないので、すべての利用者が読めてよい。
+# - ca.pem：ランナーのプロキシの CA 証明書。システムの信頼ストアに入れる。
+set -eu
+
+mkdir -p /run/chloe
+: > /run/chloe/env
+chmod 0644 /run/chloe/env
+
+[ -b /dev/vdd ] || exit 0
+mnt=/run/chloe/config-drive
+mkdir -p "$mnt"
+mount -o ro /dev/vdd "$mnt"
+if [ -f "$mnt/guest.env" ]; then
+    cp "$mnt/guest.env" /run/chloe/env
+fi
+if [ -f "$mnt/ca.pem" ]; then
+    cp "$mnt/ca.pem" /usr/local/share/ca-certificates/chloe.crt
+    cp "$mnt/ca.pem" /run/chloe/ca.pem
+    update-ca-certificates >/dev/null
+fi
+umount "$mnt"
+rmdir "$mnt"

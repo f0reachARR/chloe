@@ -1,0 +1,14 @@
+[Unit]
+Description=Load chloe runner configuration
+DefaultDependencies=no
+After=local-fs.target
+Before=chloe-guest-agent.service docker.service containerd.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/chloe-load-config
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=chloe-guest-agent.service

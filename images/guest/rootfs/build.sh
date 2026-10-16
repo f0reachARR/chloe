@@ -20,7 +20,9 @@ bin="$cache/bin"
 mkdir -p "$bin"
 cp "$root/target/x86_64-unknown-linux-musl/release/chloe-guest-agent" "$bin/"
 
-docker build -t chloe-guest-rootfs --build-context chloe-bin="$bin" "$here"
+release="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$root" rev-parse --short HEAD)"
+docker build -t chloe-guest-rootfs --build-context chloe-bin="$bin" \
+    --build-arg CHLOE_RELEASE="$release" "$here"
 docker build -q -t chloe-guest-tools -f "$here/tools.Dockerfile" "$here" >/dev/null
 
 cid="$(docker create chloe-guest-rootfs)"
