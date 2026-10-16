@@ -12,7 +12,7 @@ RUN apt-get update \
         systemd systemd-sysv systemd-resolved dbus udev kmod \
         iproute2 iptables nftables iputils-ping \
         ca-certificates curl gnupg jq zstd \
-        git openssh-client tmux less vim-tiny sudo locales bash-completion \
+        git openssh-client tmux less vim-tiny sudo locales bash-completion python3 \
         bubblewrap e2fsprogs util-linux-extra \
     && rm -rf /var/lib/apt/lists/*
 

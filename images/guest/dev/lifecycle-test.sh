@@ -5,6 +5,8 @@
 # - 接続がなくなっても、作業中の印があるあいだはランナーを止めず、印が消えたら止める。
 # - ゲートウェイを再起動しても、動いているランナーを引き取り、本物の値の問い合わせに答え続ける。
 # - 持ち主のないランナーは reconcile で止める。
+# - ポート転送 (ssh -L) で VM の中のサーバーにつながり、転送している SSH の接続があるあいだは
+#   ランナーを止めない。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,9 +17,10 @@ work="$(mktemp -d)"
 prefix=chloe-lc-
 ssh_port=2226
 keys_port=18903
+forward_port=18904
 
 cleanup() {
-    kill "${keys_pid:-}" "${gateway_pid:-}" 2>/dev/null || true
+    kill "${keys_pid:-}" "${gateway_pid:-}" "${forward_pid:-}" 2>/dev/null || true
     docker ps -aq --filter "name=^$prefix" | xargs -r docker rm -f >/dev/null
     rm -rf "$work"
 }
@@ -121,6 +124,24 @@ check secret-after-restart "401" vm "curl -s -o /dev/null -w '%{http_code}' -H \
 check workspace-intact "kept" as_alice 'cat /workspace/marker'
 for _ in $(seq 60); do [ "$(running)" = stopped ] && break; sleep 1; done
 check adopted-idle-stop "stopped" running
+
+echo "--- port forwarding"
+as_alice 'echo served > /workspace/served.txt; (setsid python3 -m http.server --bind 127.0.0.1 --directory /workspace 3000 > /dev/null 2>&1 < /dev/null &); sleep 1' >/dev/null
+ssh "${ssh_opts[@]}" -i "$work/alice" -N -o ExitOnForwardFailure=yes \
+    -L "127.0.0.1:$forward_port:127.0.0.1:3000" -L "127.0.0.1:$((forward_port + 1)):127.0.0.1:3999" \
+    alice@127.0.0.1 &
+forward_pid=$!
+sleep 2
+check forward-http "served" curl -s "http://127.0.0.1:$forward_port/served.txt"
+check forward-closed-port "000" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$((forward_port + 1))/"
+check forward-logged "port forwarding failed" log_has 'port forwarding failed'
+# 転送中の TCP の接続がなくても、SSH の接続があるあいだはランナーを止めない。
+sleep 20
+check forward-keeps-running "running" running
+check forward-http-again "served" curl -s "http://127.0.0.1:$forward_port/served.txt"
+kill "$forward_pid"; wait "$forward_pid" 2>/dev/null || true
+for _ in $(seq 60); do [ "$(running)" = stopped ] && break; sleep 1; done
+check forward-idle-stop "stopped" running
 
 echo "--- orphans"
 docker run -d --name "${prefix}ws-999" ubuntu:26.04 sleep 600 >/dev/null
