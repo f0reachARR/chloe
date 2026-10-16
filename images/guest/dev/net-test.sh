@@ -36,6 +36,15 @@ check unbound-body sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' -d 't=$
 # 差し替え: 登録した宛先でも、規則にないヘッダーのプレースホルダーはそのまま (本物は入らない)
 check other-header sh -c "curl -fsS -H 'X-Token: $PH_TEST' https://httpbin.org/headers | grep -o 'chloe-ph-test-[0-9a-f]*'"
 
+# 宛先、メソッド、パスの規則 (policy.dev.json の rules)
+status() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
+check path-allowed sh -c "$(declare -f status); [ \"\$(status https://httpbin.org/anything/allowed/x)\" = 200 ] && echo 200"
+check path-denied sh -c "$(declare -f status); [ \"\$(status https://httpbin.org/anything/blocked)\" = 403 ] && echo 403"
+check path-method-denied sh -c "$(declare -f status); [ \"\$(status -X DELETE https://httpbin.org/anything/allowed/x)\" = 403 ] && echo 403"
+check path-dotdot-denied sh -c "$(declare -f status); [ \"\$(status --path-as-is https://httpbin.org/anything/allowed/../blocked)\" = 403 ] && echo 403"
+check path-encoded-denied sh -c "$(declare -f status); [ \"\$(status 'https://httpbin.org/anything/%61llowed/../blocked')\" = 403 ] && echo 403"
+check path-other-unaffected sh -c "$(declare -f status); [ \"\$(status https://httpbin.org/get)\" = 200 ] && echo 200"
+
 # SNI と Host の食い違い (ドメインフロンティング)
 check sni-mismatch sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: example.com' https://httpbin.org/get)\" = 403 ] && echo 403"
 
