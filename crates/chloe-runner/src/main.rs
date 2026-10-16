@@ -4,7 +4,6 @@
 //! シェルを開いたりコマンドを実行したりする。
 
 mod terminal;
-mod vsock;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -102,7 +101,7 @@ async fn exec(
     env: Vec<(String, String)>,
     tty: bool,
 ) -> Result<i32> {
-    let stream = vsock::connect(
+    let stream = chloe_agent_proto::firecracker::connect(
         &target.vsock,
         chloe_agent_proto::AGENT_PORT,
         Duration::from_secs(target.wait),

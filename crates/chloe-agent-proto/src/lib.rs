@@ -6,6 +6,8 @@
 //!
 //! メッセージは 4 バイトの長さ (ビッグエンディアン) のあとに postcard で符号化した本体を置く。
 
+pub mod firecracker;
+
 use bytes::Bytes;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
