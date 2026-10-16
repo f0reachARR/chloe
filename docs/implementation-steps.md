@@ -236,9 +236,19 @@ GitHub の代わりに、テスト用の公開鍵を返す HTTP サーバーを�
 - **一つのプレースホルダーを複数の宛先の規則で差し替える**：GitHub のトークンは `github.com`（Basic 認証）と `api.github.com`（Bearer）で別の規則になるので、同じプレースホルダーを持つ規則のどれかが宛先を許していれば束縛された宛先とみなすよう `chloe-policy` を直した。
 - **ランナーのコンテナが root のファイルを残す**：状態のディレクトリにログや CA を root で書くと、ホストの利用者が消せなくなる。`chloe-egress` をディレクトリの持ち主の権限で動かすようにした。
 
-### 残したもの（6f 以降）
+### 6f の結果（2026-10-16）
 
-- **6f GitHub App**：インストールトークンの発行、Organization と team の所属の確認（今は設定の `allowed_users` と `memberships` で代用している）、`keyboard-interactive` での Device Flow とユーザートークンの保存。GitHub App の情報がそろったら着手する（[GitHub App の準備](github-app.md)）。
+- **`chloe-github`**：アプリの JWT、インストールトークン（期限の 5 分前まで使い回す）、Organization と team の所属の確認（5 分間覚えておく）、Device Flow、ユーザートークンの更新。
+- **ゲートウェイ**：`github_app` を設定すると、アプリの Organization のメンバーがログインでき、Organization と team のワークスペースには GitHub 上の所属で入れる。公開鍵を登録していない利用者は keyboard-interactive で Device Flow を行う。`chloe github login|status|logout` を足した。
+- **GitHub のトークンの渡し方**：個人のワークスペースには Device Flow で得たユーザートークンを（失効まで 1 時間を切っていれば更新して）、team と Organization のワークスペースにはインストールトークンを、ランナーの起動時に渡す。
+- **ゲストの git**：GitHub に HTTPS でつなぎ、認証ヘルパーがプレースホルダーを返す。
+- `images/guest/dev/github-test.sh` で、GitHub のふりをするサーバーに対して 20 項目を確かめた。本物の GitHub では、アプリの JWT が受け付けられることまで確かめた（アプリのインストールを待っている）。
+
+6f で残したもの：
+
+- **ランナーが動いているあいだのトークンの更新**：トークンはランナーの起動時にだけ渡す。ユーザートークンは 8 時間、インストールトークンは 1 時間で失効するので、それより長く動き続けるランナーでは GitHub の操作が認証エラーになる。ランナーのプロキシが新しいトークンを受け取れるようにする（ランナー専用の設定 API と合わせて入れる）。
+- **インストールトークンの絞り込み**：Organization の管理者がワークスペースごとにリポジトリと権限を決める仕組み。今はインストールに与えたリポジトリと権限をそのまま使う。
+- **keyboard-interactive の自動テスト**：OpenSSH のクライアントで入力を流し込む必要があり、まだ手で確かめていない。
 - **team と Organization のシークレット**：管理コマンドは今、接続した利用者の個人のシークレットだけを扱う。
 - **`chloe secret rotate`**：プレースホルダーの作り直し。データベースの操作はあり、コマンドがない。
 - **ワークスペースの選択メニュー**：今は指定がなければ個人の `default` に入る。

@@ -84,3 +84,24 @@ private_key = "file:/home/<user>/.config/chloe/github-app.pem"
 
 `private_key` はシークレットの参照として読む。
 1Password Connect を使うようになったら、`op://<vault>/<item>/<field>` の形の参照に書き換え、秘密鍵のファイルは消す。
+
+## ゲートウェイでの使い方
+
+ゲートウェイの設定に GitHub App の設定のパスを書く。
+
+```toml
+github_app = "~/.config/chloe/github-app.toml"
+```
+
+これで次のようになる。
+
+- アプリの Organization のメンバーがログインできる。`allowed_users` は、それに加えて許す利用者になる。
+- Organization のワークスペース（`org/name`）にはそのメンバーが、team のワークスペース（`org/team/name`）にはその team のメンバーが入れる。確かめられるのはアプリをインストールした Organization だけである。
+- GitHub に公開鍵を登録していない利用者は、SSH の keyboard-interactive で Device Flow を行ってログインできる。
+- 個人のワークスペースで GitHub を使うには、一度 `ssh <host> chloe github login` を実行してユーザートークンを得る。トークンは chloe のデータベースに暗号化して置き、ランナーを起動するときに、失効まで 1 時間を切っていれば更新して渡す。
+- team と Organization のワークスペースには、アプリのインストールトークンを渡す。
+
+VM の中の `git` は、GitHub に HTTPS でつなぎ、認証ヘルパーがプレースホルダーを返す（SSH のリモートも HTTPS に読み替える）。
+
+設定は `cargo run -p chloe-github --example check -- ~/.config/chloe/github-app.toml <login>` で確かめられる（トークンの値は表示しない）。
+
