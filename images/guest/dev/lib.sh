@@ -5,7 +5,9 @@
 
 dev_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dev_root="$(cd "$dev_here/../../.." && pwd)"
-dev_state="$dev_root/build/dev"
+# CHLOE_DEV_STATE と CHLOE_DEV_NAME を変えると、ほかの確認と並べて実行できる。
+dev_state="${CHLOE_DEV_STATE:-$dev_root/build/dev}"
+export CHLOE_DEV_STATE="$dev_state"
 dev_logs="$dev_state/logs"
 mkdir -p "$dev_logs"
 export CHLOE_ROOT_MODE CHLOE_GUEST_ENV

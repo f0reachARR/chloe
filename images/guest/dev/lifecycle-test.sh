@@ -89,8 +89,8 @@ section hooks
 echo real-secret-A | as_alice chloe secret set anthropic_api_key >/dev/null
 check claude-hooks "begin claude" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 60 claude -p hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
 check claude-hooks-end "end claude" as_alice 'cat /tmp/act.log'
-check codex-hooks "begin codex" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 15 codex exec --skip-git-repo-check hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
-# Codex は 401 のあと再試行を続けるので、始まりのフックを確かめたら止める。
+check codex-hooks "begin codex" as_alice 'rm -f /tmp/act.log; (CHLOE_ACTIVITY_LOG=/tmp/act.log setsid timeout 15 codex exec --skip-git-repo-check hi < /dev/null > /dev/null 2>&1 &); for _ in $(seq 75); do grep -q "begin codex" /tmp/act.log 2>/dev/null && break; sleep 0.2; done; pkill -x codex; while pgrep -x codex > /dev/null; do sleep 0.1; done; cat /tmp/act.log'
+# Codex は 401 のあと再試行を続けるので、始まりのフックが呼ばれたら止める。
 # ターンが終わらずにフックが呼ばれないので印が残るが、印のプロセスはもう終わっている。
 check codex-marker-dead "dead" as_alice 'for f in /run/chloe/activity/codex-*; do [ -d "/proc/$(cat "$f")" ] && echo alive || echo dead; done'
 

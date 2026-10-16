@@ -10,7 +10,8 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
 guest="$root/build/guest"
-state="$root/build/dev"
+# CHLOE_DEV_STATE で状態のディレクトリを変えられる (確認を並べて実行するとき)。
+state="${CHLOE_DEV_STATE:-$root/build/dev}"
 mkdir -p "$state"
 
 for f in "$guest/kernel/vmlinux" "$guest/rootfs.ext4"; do
