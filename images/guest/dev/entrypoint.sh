@@ -133,4 +133,9 @@ cat > /tmp/vm.json <<EOF
 EOF
 
 rm -f /state/vsock.sock
+# 開発用: ホストの利用者が chloe-runner で vsock につなげるようにする。
+(
+    while [ ! -S /state/vsock.sock ]; do sleep 0.1; done
+    chmod 0666 /state/vsock.sock
+) &
 exec firecracker --no-api --config-file /tmp/vm.json

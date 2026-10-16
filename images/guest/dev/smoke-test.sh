@@ -31,7 +31,6 @@ second)
     ;;
 esac
 result done ok
-systemctl reboot
 EOF
 make_test_drive
 
@@ -40,3 +39,18 @@ echo "--- first boot"
 boot smoke-first smoke.sh first
 echo "--- second boot"
 boot smoke-second smoke.sh second
+
+echo "--- runner"
+start_vm
+host_check exit-code "status=3" sh -c '"$0" exec -- sh -c "exit 3"; echo "status=$?"' "$runner"
+host_check stdin "HELLO" sh -c 'echo hello | "$0" exec -- tr a-z A-Z' "$runner"
+host_check stderr "to-stderr" sh -c '"$0" exec -- sh -c "echo to-stderr >&2" 2>&1 >/dev/null' "$runner"
+host_check default-user "(docker)" sh -c '"$0" exec -- id | grep -o "uid=[0-9]*(user).*"' "$runner"
+host_check root-user "uid=0(root)" "$runner" exec --user root -- id
+host_check cwd "/workspace" "$runner" exec -- pwd
+host_check env "value-from-host" "$runner" exec -e CHLOE_TEST=value-from-host -- sh -c 'echo $CHLOE_TEST'
+host_check tty "/dev/pts/" "$runner" exec -t -- tty
+host_check tty-size "24 80" "$runner" exec -t -- stty size
+# 端末つきのログインシェル。script コマンドでホスト側にも端末を用意して、入力を流し込む。
+host_check shell "SHELL-OK user" sh -c 'printf "echo SHELL-OK \$(whoami)\nexit\n" | script -qec "$0 shell" /dev/null | grep -ao "SHELL-OK user"' "$runner"
+stop_vm

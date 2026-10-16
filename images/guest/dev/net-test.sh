@@ -53,7 +53,6 @@ check claude sh -c "ANTHROPIC_API_KEY=$PH_ANTHROPIC timeout 90 claude -p hi 2>&1
 check codex sh -c "CODEX_API_KEY=$PH_OPENAI timeout 90 codex exec --skip-git-repo-check hi 2>&1 | tail -5; true"
 
 result done ok
-systemctl reboot
 EOF
 make_test_drive
 

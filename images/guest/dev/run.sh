@@ -2,7 +2,8 @@
 # ビルドしたカーネルと rootfs で VM を起動し、シリアルコンソールにつなぐ。
 #
 # ワークスペースと Docker のイメージは build/dev/ に作り、起動をまたいで残す。
-# 終了するには VM の中で `reboot` を実行する (reboot=k で Firecracker が終了する)。
+# VM のシェルには別の端末から `chloe-runner shell --vsock build/dev/vsock.sock` で入る。
+# 終了するには VM の中で `sudo reboot` を実行する (reboot=k で Firecracker が終了する)。
 set -euo pipefail
 
 WORKSPACE_SIZE="${WORKSPACE_SIZE:-20G}"
@@ -34,11 +35,17 @@ done
 
 docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
 
-# 端末から起動したときだけ TTY を割り当てる。標準入力からコマンドを流し込む確認にも使える。
-tty_flags=(-i)
-[[ -t 0 ]] && tty_flags=(-it)
+# CHLOE_DEV_DETACH=1 ならバックグラウンドで起動する (確認スクリプトはこちらを使う)。
+# そうでなければ、端末から起動したときだけ TTY を割り当ててシリアルコンソールにつなぐ。
+if [[ "${CHLOE_DEV_DETACH:-}" == 1 ]]; then
+    run_flags=(-d)
+elif [[ -t 0 ]]; then
+    run_flags=(-it)
+else
+    run_flags=(-i)
+fi
 
-exec docker run --rm "${tty_flags[@]}" \
+exec docker run --rm "${run_flags[@]}" \
     --name "${CHLOE_DEV_NAME:-chloe-dev}" \
     -e CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}" \
     -e VCPUS="${VCPUS:-4}" \
