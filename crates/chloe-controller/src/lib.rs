@@ -2,6 +2,7 @@
 //!
 //! ゲートウェイと同じプロセスで使うライブラリ。
 
+mod broker;
 pub mod catalog;
 mod controller;
 pub mod docker;
@@ -9,7 +10,7 @@ pub mod runner;
 pub mod store;
 pub mod workspace;
 
-pub use controller::{Controller, Session};
+pub use controller::{Controller, DynamicSecrets, Session};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

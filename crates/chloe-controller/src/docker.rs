@@ -1,12 +1,10 @@
 //! 開発用のランナーの実装。ワークスペースごとに `chloe-dev-runner` のコンテナを起動する。
 //!
 //! ワークスペースの状態は `{state_root}/{key}/` に置く (ワークスペースと Docker のディスク、
-//! vsock、CA、ログ)。プロキシに渡す本物の値はコンテナの環境変数で渡すので、
-//! `docker inspect` で見える。本番のランナーでは別の渡し方にする。
+//! vsock、CA、ログ、本物の値の問い合わせ用ソケット)。本物の値はランナーに渡さない。
 
 use std::path::PathBuf;
 
-use chloe_secrets::ExposeSecret;
 use tokio::process::Command;
 use tracing::info;
 
@@ -85,10 +83,6 @@ impl RunnerBackend for DockerBackend {
                     self.egress_bin.display()
                 ),
             ]);
-        // 本物の値はコマンドの引数に書かず、docker の環境から渡す (`-e NAME` は値を環境から読む)。
-        for (name, value) in &spec.secrets {
-            command.args(["-e", name]).env(name, value.expose_secret());
-        }
         command.arg(&self.image);
         let output = command.output().await?;
         if !output.status.success() {
@@ -124,12 +118,7 @@ impl RunnerBackend for DockerBackend {
 
     async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let secrets: std::collections::BTreeMap<&str, &str> = spec
-            .secrets
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.expose_secret()))
-            .collect();
-        let line = serde_json::json!({ "policy": spec.policy, "secrets": secrets }).to_string();
+        let line = serde_json::json!({ "policy": spec.policy }).to_string();
         let socket = self.state_dir(&spec.key).join("egress.sock");
         let mut stream = tokio::net::UnixStream::connect(&socket).await?;
         stream.write_all(format!("{line}\n").as_bytes()).await?;
@@ -143,6 +132,10 @@ impl RunnerBackend for DockerBackend {
                 response.trim()
             )))
         }
+    }
+
+    fn broker_socket(&self, key: &str) -> PathBuf {
+        self.state_dir(key).join("broker.sock")
     }
 
     async fn is_running(&self, key: &str) -> Result<bool, Error> {

@@ -1,7 +1,8 @@
 //! ワークスペースへの接続とランナーの寿命。
 //!
 //! 接続を開くとランナーを (止まっていれば) 起動し、最後の接続が閉じてから `idle_timeout` が
-//! 経つとランナーを止める。
+//! 経つとランナーを止める。ランナーが動いているあいだは、そのランナー専用の問い合わせ用ソケットで
+//! 本物の値の問い合わせに答える ([`crate::broker`])。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,17 +12,74 @@ use std::time::Duration;
 use chloe_agent_proto::{
     AGENT_PORT, AgentMessage, ClientMessage, Connection, ExecRequest, PROTOCOL_VERSION, firecracker,
 };
-use chloe_secrets::{Owner, SecretDb};
+use chloe_secrets::{SecretDb, SecretString};
+use futures::future::BoxFuture;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::Error;
 use crate::catalog;
-use crate::runner::{BasePolicy, RunnerBackend, build_spec};
+use crate::runner::{BasePolicy, RunnerBackend, RunnerSpec, build_spec};
 use crate::store::Store;
 use crate::workspace::Workspace;
 
 /// VM を止めるときに、VM の中で再起動を頼んでから待つ時間の既定値。
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// データベースの外で作るシークレット (GitHub のトークンなど)。問い合わせのたびに尋ねる。
+/// `kinds` に挙げた種類は、データベースの同じ種類より優先する。
+pub trait DynamicSecrets: Send + Sync + 'static {
+    /// ワークスペースで使える種類。
+    fn kinds<'a>(&'a self, workspace: &'a Workspace) -> BoxFuture<'a, Vec<String>>;
+    fn resolve<'a>(
+        &'a self,
+        workspace: &'a Workspace,
+        kind: &'a str,
+    ) -> BoxFuture<'a, Result<Option<SecretString>, Error>>;
+}
+
+/// ワークスペースのシークレットの出どころをまとめたもの。
+#[derive(Clone)]
+pub(crate) struct Resolver {
+    secrets: Arc<SecretDb>,
+    dynamic: Option<Arc<dyn DynamicSecrets>>,
+}
+
+impl Resolver {
+    /// ワークスペースで使えるシークレットの種類。持ち主がデータベースに登録した種類と、
+    /// 動的に作る種類を合わせたもの。
+    pub async fn kinds(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
+        let mut kinds: Vec<String> = self
+            .secrets
+            .list(&workspace.owner)
+            .await?
+            .into_iter()
+            .filter(|name| catalog::kind(name).is_some())
+            .collect();
+        if let Some(dynamic) = &self.dynamic {
+            kinds.extend(dynamic.kinds(workspace).await);
+        }
+        kinds.sort();
+        kinds.dedup();
+        Ok(kinds)
+    }
+
+    pub async fn resolve(
+        &self,
+        workspace: &Workspace,
+        kind: &str,
+    ) -> Result<Option<SecretString>, Error> {
+        if catalog::kind(kind).is_none() {
+            return Ok(None);
+        }
+        if let Some(dynamic) = &self.dynamic
+            && dynamic.kinds(workspace).await.iter().any(|k| k == kind)
+        {
+            return dynamic.resolve(workspace, kind).await;
+        }
+        Ok(self.secrets.get(&workspace.owner, kind).await?)
+    }
+}
 
 pub struct Controller<B> {
     inner: Arc<Inner<B>>,
@@ -37,7 +95,7 @@ impl<B> Clone for Controller<B> {
 
 struct Inner<B> {
     store: Store,
-    secrets: SecretDb,
+    resolver: Resolver,
     backend: B,
     base: BasePolicy,
     idle_timeout: Duration,
@@ -47,9 +105,15 @@ struct Inner<B> {
 
 #[derive(Default)]
 struct RunnerState {
-    /// 起動と停止を一つずつ進めるための錠。
-    lifecycle: tokio::sync::Mutex<Option<PathBuf>>,
+    /// 起動と停止を一つずつ進めるための錠。動いていれば `Some`。
+    lifecycle: tokio::sync::Mutex<Option<Running>>,
     sessions: Mutex<SessionCount>,
+}
+
+struct Running {
+    vsock: PathBuf,
+    /// 本物の値の問い合わせに答えるタスク。
+    broker: JoinHandle<()>,
 }
 
 #[derive(Default)]
@@ -77,7 +141,10 @@ impl<B: RunnerBackend> Controller<B> {
         Self {
             inner: Arc::new(Inner {
                 store,
-                secrets,
+                resolver: Resolver {
+                    secrets: Arc::new(secrets),
+                    dynamic: None,
+                },
                 backend,
                 base,
                 idle_timeout,
@@ -87,14 +154,23 @@ impl<B: RunnerBackend> Controller<B> {
         }
     }
 
-    /// VM の中で再起動を頼んでから、ランナーが止まるのを待つ時間を変える。
-    pub fn with_stop_timeout(self, stop_timeout: Duration) -> Self {
+    fn configure(self, f: impl FnOnce(&mut Inner<B>)) -> Self {
         let mut inner = Arc::try_unwrap(self.inner)
-            .unwrap_or_else(|_| panic!("with_stop_timeout must be called before sharing"));
-        inner.stop_timeout = stop_timeout;
+            .unwrap_or_else(|_| panic!("the controller must be configured before sharing"));
+        f(&mut inner);
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    /// VM の中で再起動を頼んでから、ランナーが止まるのを待つ時間を変える。
+    pub fn with_stop_timeout(self, stop_timeout: Duration) -> Self {
+        self.configure(|inner| inner.stop_timeout = stop_timeout)
+    }
+
+    /// データベースの外で作るシークレットの出どころを足す。
+    pub fn with_dynamic_secrets(self, dynamic: Arc<dyn DynamicSecrets>) -> Self {
+        self.configure(|inner| inner.resolver.dynamic = Some(dynamic))
     }
 
     pub fn store(&self) -> &Store {
@@ -102,7 +178,7 @@ impl<B: RunnerBackend> Controller<B> {
     }
 
     pub fn secrets(&self) -> &SecretDb {
-        &self.inner.secrets
+        &self.inner.resolver.secrets
     }
 
     fn state(&self, workspace_id: i64) -> Arc<RunnerState> {
@@ -116,22 +192,10 @@ impl<B: RunnerBackend> Controller<B> {
     }
 
     /// ワークスペースへの接続を開く。ランナーが止まっていれば起動する。
-    ///
-    /// `extra` は、データベースのシークレットに加えて (同じ名前なら置き換えて) ランナーに渡す
-    /// シークレット。GitHub のトークンのように、接続のたびに発行し直すものに使う。
-    /// ランナーがすでに動いていれば使わない。
-    pub async fn open(
-        &self,
-        workspace: &Workspace,
-        extra: Vec<(String, chloe_secrets::SecretString)>,
-    ) -> Result<Session<B>, Error> {
+    pub async fn open(&self, workspace: &Workspace) -> Result<Session<B>, Error> {
         let state = self.state(workspace.id);
-        {
-            let mut sessions = state.sessions.lock().unwrap();
-            sessions.open += 1;
-        }
-        let result = self.ensure_running(workspace, &state, extra).await;
-        match result {
+        state.sessions.lock().unwrap().open += 1;
+        match self.ensure_running(workspace, &state).await {
             Ok(vsock) => Ok(Session {
                 controller: self.clone(),
                 workspace_id: workspace.id,
@@ -148,20 +212,36 @@ impl<B: RunnerBackend> Controller<B> {
         &self,
         workspace: &Workspace,
         state: &RunnerState,
-        extra: Vec<(String, chloe_secrets::SecretString)>,
     ) -> Result<PathBuf, Error> {
         let mut running = state.lifecycle.lock().await;
         let key = workspace.key();
-        if let Some(vsock) = running.as_ref()
-            && self.inner.backend.is_running(&key).await?
-        {
-            return Ok(vsock.clone());
+        if let Some(current) = running.as_ref() {
+            if self.inner.backend.is_running(&key).await? {
+                return Ok(current.vsock.clone());
+            }
+            current.broker.abort();
         }
-        let spec = self.build(workspace, extra).await?;
+        let spec = self.build(workspace).await?;
+        // ランナーのプロキシが問い合わせられるよう、起動する前に待ち受けを始める。
+        let broker = crate::broker::serve(
+            &self.inner.backend.broker_socket(&key),
+            workspace.clone(),
+            self.inner.resolver.clone(),
+        )?;
         info!(workspace = %workspace.display_name(), key, "starting runner");
-        let vsock = self.inner.backend.start(spec).await?;
-        *running = Some(vsock.clone());
-        Ok(vsock)
+        match self.inner.backend.start(spec).await {
+            Ok(vsock) => {
+                *running = Some(Running {
+                    vsock: vsock.clone(),
+                    broker,
+                });
+                Ok(vsock)
+            }
+            Err(error) => {
+                broker.abort();
+                Err(error)
+            }
+        }
     }
 
     /// 動いているランナーのワークスペースの一覧。
@@ -179,57 +259,29 @@ impl<B: RunnerBackend> Controller<B> {
         Ok(workspaces)
     }
 
-    /// 動いているランナーの方針と本物の値を作り直して送る。動いていなければ何もせず
-    /// `false` を返す。`extra` は [`Controller::open`] と同じ。
-    pub async fn refresh(
-        &self,
-        workspace: &Workspace,
-        extra: Vec<(String, chloe_secrets::SecretString)>,
-    ) -> Result<bool, Error> {
+    /// 動いているランナーの方針を作り直して送る (使えるシークレットの種類が変わったときなど)。
+    /// 動いていなければ何もせず `false` を返す。
+    pub async fn refresh(&self, workspace: &Workspace) -> Result<bool, Error> {
         let state = self.state(workspace.id);
         let running = state.lifecycle.lock().await;
         if running.is_none() {
             return Ok(false);
         }
-        let spec = self.build(workspace, extra).await?;
+        let spec = self.build(workspace).await?;
         self.inner.backend.update(spec).await?;
         info!(workspace = %workspace.display_name(), "runner policy refreshed");
         Ok(true)
     }
 
-    async fn build(
-        &self,
-        workspace: &Workspace,
-        extra: Vec<(String, chloe_secrets::SecretString)>,
-    ) -> Result<crate::runner::RunnerSpec, Error> {
+    async fn build(&self, workspace: &Workspace) -> Result<RunnerSpec, Error> {
         let placeholders = self.inner.store.placeholders(workspace.id).await?;
-        let mut secrets = self.owner_secrets(&workspace.owner).await?;
-        for (name, value) in extra {
-            secrets.retain(|(existing, _)| *existing != name);
-            secrets.push((name, value));
-        }
+        let kinds = self.inner.resolver.kinds(workspace).await?;
         Ok(build_spec(
             workspace,
             &self.inner.base,
             &placeholders,
-            secrets,
+            &kinds,
         ))
-    }
-
-    async fn owner_secrets(
-        &self,
-        owner: &Owner,
-    ) -> Result<Vec<(String, chloe_secrets::SecretString)>, Error> {
-        let mut secrets = Vec::new();
-        for name in self.inner.secrets.list(owner).await? {
-            if catalog::kind(&name).is_none() {
-                continue;
-            }
-            if let Some(value) = self.inner.secrets.get(owner, &name).await? {
-                secrets.push((name, value));
-            }
-        }
-        Ok(secrets)
     }
 
     fn close(&self, workspace_id: i64) {
@@ -266,20 +318,23 @@ impl<B: RunnerBackend> Controller<B> {
 
     async fn stop_runner(&self, workspace_id: i64, state: &RunnerState) -> Result<(), Error> {
         let mut running = state.lifecycle.lock().await;
-        let Some(vsock) = running.take() else {
+        let Some(current) = running.take() else {
             return Ok(());
         };
         let key = format!("ws-{workspace_id}");
         info!(key, "stopping runner");
         // VM の中で再起動を頼むと、ファイルシステムを閉じてから Firecracker が終わる。
-        if let Err(error) = request_reboot(&vsock, self.inner.stop_timeout).await {
+        if let Err(error) = request_reboot(&current.vsock, self.inner.stop_timeout).await {
             warn!(key, "failed to ask the VM to stop: {error}");
         }
         let deadline = tokio::time::Instant::now() + self.inner.stop_timeout;
         while tokio::time::Instant::now() < deadline && self.inner.backend.is_running(&key).await? {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        self.inner.backend.stop(&key).await
+        let result = self.inner.backend.stop(&key).await;
+        current.broker.abort();
+        let _ = std::fs::remove_file(self.inner.backend.broker_socket(&key));
+        result
     }
 }
 
@@ -310,31 +365,28 @@ async fn request_reboot(vsock: &std::path::Path, wait: Duration) -> Result<(), E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::RunnerSpec;
     use crate::workspace::{RootMode, WorkspaceRef};
-    use chloe_secrets::{ExposeSecret, MasterKey};
+    use chloe_secrets::{MasterKey, Owner};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    #[derive(Default)]
     struct FakeBackend {
+        dir: tempfile::TempDir,
         starts: AtomicUsize,
         stops: AtomicUsize,
-        running: Mutex<HashMap<String, Vec<(String, String)>>>,
+        updates: AtomicUsize,
+        /// 動いているランナーの識別子と、その方針の差し替えの規則の数。
+        running: Mutex<HashMap<String, usize>>,
     }
 
     impl RunnerBackend for Arc<FakeBackend> {
         async fn start(&self, spec: RunnerSpec) -> Result<PathBuf, Error> {
             self.starts.fetch_add(1, Ordering::SeqCst);
-            let secrets = spec
-                .secrets
-                .iter()
-                .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
-                .collect();
             self.running
                 .lock()
                 .unwrap()
-                .insert(spec.key.clone(), secrets);
-            Ok(PathBuf::from(format!("/nonexistent/{}.sock", spec.key)))
+                .insert(spec.key.clone(), spec.policy.inject.len());
+            Ok(self.dir.path().join(format!("{}.vsock", spec.key)))
         }
 
         async fn stop(&self, key: &str) -> Result<(), Error> {
@@ -348,24 +400,52 @@ mod tests {
         }
 
         async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
-            let secrets = spec
-                .secrets
-                .iter()
-                .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
-                .collect();
+            self.updates.fetch_add(1, Ordering::SeqCst);
             self.running
                 .lock()
                 .unwrap()
-                .insert(spec.key.clone(), secrets);
+                .insert(spec.key.clone(), spec.policy.inject.len());
             Ok(())
+        }
+
+        fn broker_socket(&self, key: &str) -> PathBuf {
+            self.dir.path().join(format!("{key}.broker.sock"))
+        }
+    }
+
+    /// GitHub のトークンのふり。alice の個人のワークスペースにだけ答える。
+    struct FakeGitHub;
+
+    impl DynamicSecrets for FakeGitHub {
+        fn kinds<'a>(&'a self, workspace: &'a Workspace) -> BoxFuture<'a, Vec<String>> {
+            Box::pin(async move {
+                match &workspace.owner {
+                    Owner::User(login) if login == "alice" => vec!["github_token".into()],
+                    _ => vec![],
+                }
+            })
+        }
+
+        fn resolve<'a>(
+            &'a self,
+            _workspace: &'a Workspace,
+            _kind: &'a str,
+        ) -> BoxFuture<'a, Result<Option<SecretString>, Error>> {
+            Box::pin(async { Ok(Some("ghu_fresh".to_string().into())) })
         }
     }
 
     async fn controller(idle: Duration) -> (Controller<Arc<FakeBackend>>, Arc<FakeBackend>) {
-        // 偽の実装は VM を持たないので、再起動を頼めない。待つ時間を短くしておく。
         let pool = crate::store::tests::pool().await;
         let secrets = SecretDb::new(pool.clone(), MasterKey::from_bytes("t", &[3; 32]).unwrap());
-        let backend = Arc::new(FakeBackend::default());
+        let backend = Arc::new(FakeBackend {
+            dir: tempfile::tempdir().unwrap(),
+            starts: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+            updates: AtomicUsize::new(0),
+            running: Mutex::new(HashMap::new()),
+        });
+        // 偽の実装は VM を持たないので、再起動を頼めない。待つ時間を短くしておく。
         let controller = Controller::new(
             Store::new(pool),
             secrets,
@@ -373,8 +453,20 @@ mod tests {
             BasePolicy::default(),
             idle,
         )
-        .with_stop_timeout(Duration::from_millis(50));
+        .with_stop_timeout(Duration::from_millis(50))
+        .with_dynamic_secrets(Arc::new(FakeGitHub));
         (controller, backend)
+    }
+
+    async fn ask(socket: &std::path::Path, secret: &str) -> String {
+        let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        stream
+            .write_all(format!("{}\n", serde_json::json!({ "secret": secret })).as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        line
     }
 
     #[tokio::test]
@@ -390,8 +482,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let first = controller.open(&ws, vec![]).await.unwrap();
-        let second = controller.open(&ws, vec![]).await.unwrap();
+        let first = controller.open(&ws).await.unwrap();
+        let second = controller.open(&ws).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
         drop(first);
         tokio::time::sleep(ms(600)).await;
@@ -404,7 +496,7 @@ mod tests {
         drop(second);
         tokio::time::sleep(ms(100)).await;
         // 止まる前にまた接続すると、停止の予約は無効になる。
-        let third = controller.open(&ws, vec![]).await.unwrap();
+        let third = controller.open(&ws).await.unwrap();
         tokio::time::sleep(ms(600)).await;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 0);
         assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
@@ -413,36 +505,15 @@ mod tests {
         tokio::time::sleep(ms(1500)).await;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
         assert!(!backend.is_running(&ws.key()).await.unwrap());
+        // 止めたら問い合わせ用ソケットも片づく。
+        assert!(!backend.broker_socket(&ws.key()).exists());
 
-        let _again = controller.open(&ws, vec![]).await.unwrap();
+        let _again = controller.open(&ws).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn refreshes_only_running_runners() {
-        let (controller, backend) = controller(Duration::from_secs(60)).await;
-        let ws = controller
-            .store()
-            .create(
-                &WorkspaceRef::parse("api", "alice").unwrap(),
-                RootMode::Ephemeral,
-                "alice",
-            )
-            .await
-            .unwrap();
-        let token = |v: &str| vec![("github_token".to_string(), v.to_string().into())];
-        assert!(!controller.refresh(&ws, token("old")).await.unwrap());
-        let _session = controller.open(&ws, token("old")).await.unwrap();
-        assert_eq!(controller.running().await.unwrap(), [ws.clone()]);
-        assert!(controller.refresh(&ws, token("new")).await.unwrap());
-        assert_eq!(
-            backend.running.lock().unwrap()[&ws.key()],
-            [("CHLOE_SECRET_GITHUB_TOKEN".to_string(), "new".to_string())]
-        );
-    }
-
-    #[tokio::test]
-    async fn passes_only_the_owners_secrets() {
+    async fn broker_answers_only_the_workspace_secrets() {
         let (controller, backend) = controller(Duration::from_secs(60)).await;
         let alice = Owner::User("alice".into());
         let bob = Owner::User("bob".into());
@@ -474,29 +545,65 @@ mod tests {
             )
             .await
             .unwrap();
-        let _a = controller.open(&ws_a, vec![]).await.unwrap();
-        let _b = controller
-            .open(
-                &ws_b,
-                vec![("github_token".into(), "ghs_installation".to_string().into())],
+        let _a = controller.open(&ws_a).await.unwrap();
+        let _b = controller.open(&ws_b).await.unwrap();
+        // alice は anthropic と github (動的) の規則、bob は anthropic の規則だけを持つ。
+        assert_eq!(backend.running.lock().unwrap()[&ws_a.key()], 3);
+        assert_eq!(backend.running.lock().unwrap()[&ws_b.key()], 1);
+
+        let socket_a = backend.broker_socket(&ws_a.key());
+        let socket_b = backend.broker_socket(&ws_b.key());
+        assert!(
+            ask(&socket_a, "CHLOE_SECRET_ANTHROPIC_API_KEY")
+                .await
+                .contains("alice-key")
+        );
+        assert!(
+            ask(&socket_b, "CHLOE_SECRET_ANTHROPIC_API_KEY")
+                .await
+                .contains("bob-key")
+        );
+        assert!(
+            ask(&socket_a, "CHLOE_SECRET_GITHUB_TOKEN")
+                .await
+                .contains("ghu_fresh")
+        );
+        assert!(
+            ask(&socket_b, "CHLOE_SECRET_GITHUB_TOKEN")
+                .await
+                .contains("error")
+        );
+        assert!(ask(&socket_a, "SOMETHING_ELSE").await.contains("error"));
+
+        // 値を変えると、次の問い合わせから新しい値になる (送り込みは要らない)。
+        controller
+            .secrets()
+            .set(
+                &alice,
+                "anthropic_api_key",
+                &"alice-key-2".to_string().into(),
             )
             .await
             .unwrap();
-        let running = backend.running.lock().unwrap();
-        assert_eq!(
-            running[&ws_a.key()],
-            [(
-                "CHLOE_SECRET_ANTHROPIC_API_KEY".to_string(),
-                "alice-key".to_string()
-            )]
+        assert!(
+            ask(&socket_a, "CHLOE_SECRET_ANTHROPIC_API_KEY")
+                .await
+                .contains("alice-key-2")
         );
-        assert_eq!(running[&ws_b.key()][0].1, "bob-key");
-        assert_eq!(
-            running[&ws_b.key()][1],
-            (
-                "CHLOE_SECRET_GITHUB_TOKEN".to_string(),
-                "ghs_installation".to_string()
-            )
+        controller
+            .secrets()
+            .delete(&alice, "anthropic_api_key")
+            .await
+            .unwrap();
+        assert!(
+            ask(&socket_a, "CHLOE_SECRET_ANTHROPIC_API_KEY")
+                .await
+                .contains("error")
         );
+
+        // 種類が変わったときは方針を作り直して送る。
+        assert!(controller.refresh(&ws_a).await.unwrap());
+        assert_eq!(backend.running.lock().unwrap()[&ws_a.key()], 2);
+        assert_eq!(backend.updates.load(Ordering::SeqCst), 1);
     }
 }
