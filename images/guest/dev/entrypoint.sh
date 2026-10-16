@@ -115,23 +115,52 @@ dnsmasq \
     --address="/ca.chloe.internal/172.29.0.1" \
     --log-facility="$logs/dnsmasq.log" --log-queries &
 
-# 確認用のドライブ (/dev/vdd) があれば読み取り専用で付ける。
+# ワークスペースと Docker のディスクがなければ作る。持ち主は状態のディレクトリに合わせる。
+for pair in "workspace:${WORKSPACE_SIZE:-20G}" "docker:${DOCKER_SIZE:-40G}"; do
+    name="${pair%%:*}" size="${pair#*:}" img="/state/${pair%%:*}.ext4"
+    if [ ! -f "$img" ]; then
+        truncate -s "$size" "$img"
+        mkfs.ext4 -q -L "chloe-$name" "$img"
+        chown --reference=/state "$img"
+    fi
+done
+
+# 設定用のドライブ (/dev/vdd)。ゲストの環境変数 (プレースホルダー) と CA 証明書を渡す。
+config_dir="$(mktemp -d)"
+if [ -n "${CHLOE_GUEST_ENV:-}" ]; then
+    cp "$CHLOE_GUEST_ENV" "$config_dir/guest.env"
+fi
+if [ -f /state/egress/ca.pem ]; then
+    cp /state/egress/ca.pem "$config_dir/ca.pem"
+fi
+rm -f /tmp/config.ext4
+truncate -s 4M /tmp/config.ext4
+mkfs.ext4 -q -L chloe-config -d "$config_dir" /tmp/config.ext4
+
+# 確認用のドライブ (/dev/vde) があれば読み取り専用で付ける。
 extra_drive=""
 if [ -f /state/test.ext4 ]; then
     extra_drive=',
     { "drive_id": "test", "path_on_host": "/state/test.ext4", "is_root_device": false, "is_read_only": true }'
 fi
 
+# ルートの変更をワークスペースのディスクに残すかどうか (overlay-init が読む)。
+root_arg=""
+if [ "${CHLOE_ROOT_MODE:-ephemeral}" = persistent ]; then
+    root_arg=" chloe.root=persistent"
+fi
+
 cat > /tmp/vm.json <<EOF
 {
   "boot-source": {
     "kernel_image_path": "/guest/kernel/vmlinux",
-    "boot_args": "console=ttyS0 reboot=k panic=1 init=/sbin/overlay-init"
+    "boot_args": "console=ttyS0 reboot=k panic=1 init=/sbin/overlay-init$root_arg"
   },
   "drives": [
     { "drive_id": "rootfs", "path_on_host": "/guest/rootfs.ext4", "is_root_device": true, "is_read_only": true },
     { "drive_id": "workspace", "path_on_host": "/state/workspace.ext4", "is_root_device": false, "is_read_only": false },
-    { "drive_id": "docker", "path_on_host": "/state/docker.ext4", "is_root_device": false, "is_read_only": false }$extra_drive
+    { "drive_id": "docker", "path_on_host": "/state/docker.ext4", "is_root_device": false, "is_read_only": false },
+    { "drive_id": "config", "path_on_host": "/tmp/config.ext4", "is_root_device": false, "is_read_only": true }$extra_drive
   ],
   "machine-config": { "vcpu_count": $VCPUS, "mem_size_mib": $MEM_MIB },
   "network-interfaces": [

@@ -1,6 +1,6 @@
 # VM を使う確認スクリプトの共通部分。source して使う。
 #
-# 確認用のスクリプトを読み取り専用のドライブ (/dev/vdd) として渡し、chloe-runner exec で
+# 確認用のスクリプトを読み取り専用のドライブ (/dev/vde) として渡し、chloe-runner exec で
 # guest-agent に実行させる。ゲスト側のスクリプトは結果を "==RESULT== 名前: ok|FAIL 出力" の行で出す。
 
 dev_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +8,7 @@ dev_root="$(cd "$dev_here/../../.." && pwd)"
 dev_state="$dev_root/build/dev"
 dev_logs="$dev_state/logs"
 mkdir -p "$dev_logs"
+export CHLOE_ROOT_MODE CHLOE_GUEST_ENV
 export CHLOE_DEV_NAME="${CHLOE_DEV_NAME:-chloe-dev-test}"
 export CHLOE_VSOCK="$dev_state/vsock.sock"
 
@@ -47,7 +48,7 @@ boot() {
     local log="$dev_logs/$name.log"
     start_vm
     "$runner" exec --user root -- \
-        sh -c "mount -o ro /dev/vdd /mnt && bash /mnt/$script $*" < /dev/null > "$log" 2>&1 || true
+        sh -c "mount -o ro /dev/vde /mnt && bash /mnt/$script $*" < /dev/null > "$log" 2>&1 || true
     stop_vm
     grep -a '^==RESULT==' "$log"
 }
