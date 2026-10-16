@@ -20,7 +20,10 @@ check ca-publish sh -c 'curl -fsS http://ca.chloe.internal/ca.pem -o /usr/local/
 
 # 許可と遮断
 check allowed sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' https://httpbin.org/get)\" = 200 ] && echo 200"
-check not-allowed sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' https://example.com/)\" = 403 ] && echo 403"
+# 許可していない名前は DNS で解決できない。DNS を迂回しても、プロキシが 403 で遮断する。
+check_fails dns-not-allowed getent hosts example.com
+check dns-allowed getent hosts httpbin.org
+check not-allowed sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' --resolve example.com:443:1.1.1.1 https://example.com/)\" = 403 ] && echo 403"
 check http2 curl -sS -o /dev/null -w '%{http_version}' --http2 https://httpbin.org/get
 check plain-http sh -c "curl -fsS http://httpbin.org/get | grep -o '\"url\": \"[^\"]*\"'"
 
@@ -49,8 +52,8 @@ check_fails container-no-ca docker run --rm curlimages/curl -sS --max-time 20 ht
 check container-with-ca docker run --rm --entrypoint sh curlimages/curl -c 'curl -fsS http://ca.chloe.internal/ca.pem -o /tmp/ca.pem && curl -fsS -o /dev/null -w "%{http_code}" --cacert /tmp/ca.pem https://httpbin.org/get'
 
 # Claude Code と Codex: TLS を通って API に届き、偽の秘密情報で認証エラーになる
-check claude sh -c "ANTHROPIC_API_KEY=$PH_ANTHROPIC timeout 90 claude -p hi 2>&1 | tail -3; true"
-check codex sh -c "CODEX_API_KEY=$PH_OPENAI timeout 90 codex exec --skip-git-repo-check hi 2>&1 | tail -5; true"
+check claude sh -c "ANTHROPIC_API_KEY=$PH_ANTHROPIC timeout 90 claude -p hi < /dev/null 2>&1 | tail -3; true"
+check codex sh -c "CODEX_API_KEY=$PH_OPENAI timeout 90 codex exec --skip-git-repo-check hi < /dev/null 2>&1 | tail -5; true"
 
 result done ok
 EOF

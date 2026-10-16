@@ -97,10 +97,21 @@ EOF
     ;;
 esac
 
+# proxy モードでは、許可リストにある名前だけを上流に問い合わせ、それ以外は NXDOMAIN を返す。
+# DNS の問い合わせ名に情報を載せて持ち出す経路を塞ぐためである。
+# "*.example.com" は dnsmasq では example.com とそのサブドメインに一致する (少し広い)。
+dns_servers="--server=$upstream_dns"
+if [ "$CHLOE_NET_MODE" = proxy ]; then
+    dns_servers="--address=/#/"
+    for name in $(jq -r '(.allow + .passthrough)[] | ltrimstr("*.")' "${CHLOE_POLICY:-/opt/chloe/policy.dev.json}"); do
+        dns_servers="$dns_servers --server=/$name/$upstream_dns"
+    done
+fi
+# shellcheck disable=SC2086
 dnsmasq \
     --keep-in-foreground --no-resolv --no-hosts \
     --listen-address=172.29.0.1 --bind-interfaces \
-    --server="$upstream_dns" \
+    $dns_servers \
     --address="/ca.chloe.internal/172.29.0.1" \
     --log-facility="$logs/dnsmasq.log" --log-queries &
 

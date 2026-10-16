@@ -6,7 +6,7 @@ ARG FIRECRACKER_VERSION=v1.17.0
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl dnsmasq-base iproute2 nftables \
+        ca-certificates curl dnsmasq-base iproute2 jq nftables \
     && rm -rf /var/lib/apt/lists/*
 
 RUN cd /tmp \
