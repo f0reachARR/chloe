@@ -7,14 +7,19 @@ use sqlx::{Row, SqlitePool};
 
 use crate::{Error, MasterKey, Owner};
 
+/// 複製しても同じデータベースとマスター鍵を指す。
+#[derive(Clone)]
 pub struct SecretDb {
     pool: SqlitePool,
-    master: MasterKey,
+    master: std::sync::Arc<MasterKey>,
 }
 
 impl SecretDb {
     pub fn new(pool: SqlitePool, master: MasterKey) -> Self {
-        Self { pool, master }
+        Self {
+            pool,
+            master: std::sync::Arc::new(master),
+        }
     }
 
     pub async fn set(&self, owner: &Owner, name: &str, value: &SecretString) -> Result<(), Error> {
