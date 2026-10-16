@@ -543,8 +543,19 @@ async fn request_reboot(vsock: &std::path::Path, wait: Duration) -> Result<(), E
     }))
     .await
     .map_err(|e| Error::Runner(e.to_string()))?;
-    // 再起動が始まると接続が切れるので、終了の知らせは待たなくてよい。
-    let _ = tokio::time::timeout(Duration::from_secs(5), conn.recv::<AgentMessage>()).await;
+    // 接続を閉じると guest-agent はプロセスを止めるので、systemctl が再起動を頼み終わる
+    // (終わるか、再起動で接続が切れる) まで待つ。`Started` だけで閉じると、再起動が始まらない。
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match conn.recv::<AgentMessage>().await {
+                Ok(Some(AgentMessage::Exited(_) | AgentMessage::Error(_))) | Ok(None) | Err(_) => {
+                    break;
+                }
+                Ok(Some(_)) => {}
+            }
+        }
+    })
+    .await;
     Ok(())
 }
 
@@ -566,15 +577,21 @@ mod tests {
         running: Mutex<HashMap<String, usize>>,
         /// 偽の guest-agent が答える、作業中のエージェントの印。
         busy: Arc<Mutex<Vec<String>>>,
+        /// 偽の guest-agent が再起動を最後まで受け付けた回数。
+        reboots: Arc<AtomicUsize>,
     }
 
     /// Firecracker の vsock の握手と guest-agent の応答をまねる。
-    async fn fake_agent(path: PathBuf, busy: Arc<Mutex<Vec<String>>>) {
+    ///
+    /// 本物と同じく、コマンドの要求には先に `Started` を返し、終わる前に接続が閉じられたら
+    /// プロセスを止めたことにする (再起動の要求なら、再起動は始まらない)。
+    async fn fake_agent(path: PathBuf, busy: Arc<Mutex<Vec<String>>>, reboots: Arc<AtomicUsize>) {
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let busy = busy.clone();
+                let reboots = reboots.clone();
                 tokio::spawn(async move {
                     while stream.read_u8().await.ok() != Some(b'\n') {}
                     stream.write_all(b"OK 1\n").await.unwrap();
@@ -584,7 +601,20 @@ mod tests {
                             let busy = busy.lock().unwrap().clone();
                             conn.send(&AgentMessage::Activity { busy }).await
                         }
-                        Ok(Some(ClientMessage::Exec(_))) => {
+                        Ok(Some(ClientMessage::Exec(request))) => {
+                            conn.send(&AgentMessage::Started { pid: 1 }).await.unwrap();
+                            // コマンドが動いているあいだに相手が閉じたら、プロセスは止められる。
+                            let closed = tokio::time::timeout(
+                                Duration::from_millis(20),
+                                conn.recv::<ClientMessage>(),
+                            )
+                            .await;
+                            if matches!(closed, Ok(Ok(None) | Err(_))) {
+                                return;
+                            }
+                            if request.command == ["systemctl", "reboot"] {
+                                reboots.fetch_add(1, Ordering::SeqCst);
+                            }
                             let status = ExitStatus {
                                 code: Some(0),
                                 signal: None,
@@ -601,7 +631,12 @@ mod tests {
     impl RunnerBackend for Arc<FakeBackend> {
         async fn start(&self, spec: RunnerSpec) -> Result<PathBuf, Error> {
             self.starts.fetch_add(1, Ordering::SeqCst);
-            fake_agent(self.vsock_path(&spec.key), self.busy.clone()).await;
+            fake_agent(
+                self.vsock_path(&spec.key),
+                self.busy.clone(),
+                self.reboots.clone(),
+            )
+            .await;
             self.running
                 .lock()
                 .unwrap()
@@ -671,6 +706,7 @@ mod tests {
             updates: AtomicUsize::new(0),
             running: Mutex::new(HashMap::new()),
             busy: Arc::new(Mutex::new(vec![])),
+            reboots: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -852,6 +888,8 @@ mod tests {
         drop(third);
         tokio::time::sleep(ms(1500)).await;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        // VM には再起動を最後まで頼んでいる (ファイルシステムを閉じてから止まる)。
+        assert_eq!(backend.reboots.load(Ordering::SeqCst), 1);
         assert!(!backend.is_running(&ws.key()).await.unwrap());
         // 止めたら問い合わせ用ソケットも片づく。
         assert!(!backend.broker_socket(&ws.key()).exists());
