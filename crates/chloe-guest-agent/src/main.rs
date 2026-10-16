@@ -21,6 +21,10 @@ const DEFAULT_USER: &str = "user";
 const RUNNER_ENV: &str = "/run/chloe/env";
 /// OS の信頼ストアを読まないツールのために、chloe の CA を含む信頼ストアを指す。
 const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+/// エージェントの作業中の印 (chloe-activity が置く)。
+const ACTIVITY_DIR: &str = "/run/chloe/activity";
+/// これより長く更新されていない印は、エージェントが落ちて残ったものとみなす。
+const ACTIVITY_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 const CA_ENV: &[&str] = &[
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
@@ -57,8 +61,14 @@ async fn main() -> Result<()> {
 
 async fn handle(stream: VsockStream) -> Result<()> {
     let mut conn = Connection::new(stream);
-    let Some(ClientMessage::Exec(request)) = conn.recv().await? else {
-        bail!("the first message must be Exec");
+    let request = match conn.recv().await? {
+        Some(ClientMessage::Exec(request)) => request,
+        Some(ClientMessage::Activity) => {
+            let busy = busy_markers(std::path::Path::new(ACTIVITY_DIR), ACTIVITY_TTL);
+            conn.send(&AgentMessage::Activity { busy }).await?;
+            return Ok(());
+        }
+        _ => bail!("the first message must be Exec or Activity"),
     };
     let (mut tx, rx) = conn.split();
     if request.version != PROTOCOL_VERSION {
@@ -106,6 +116,27 @@ fn command_line(request: &ExecRequest) -> (String, Vec<String>) {
             ("/usr/sbin/runuser".into(), args)
         }
     }
+}
+
+/// `dir` の中の、`ttl` より最近に更新された印の名前。
+fn busy_markers(dir: &std::path::Path, ttl: std::time::Duration) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut busy: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age < ttl)
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    busy.sort();
+    busy
 }
 
 /// 起動するプロセスの環境変数。ランナーの環境変数、CA の変数、要求の環境変数の順に重ねる。
@@ -180,7 +211,7 @@ async fn run_with_tty(
                 }
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::CloseStdin) => {}
-                Some(ClientMessage::Exec(_)) => bail!("unexpected Exec"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity) => bail!("unexpected message"),
                 // ホストが切断した。端末を閉じてプロセスに SIGHUP を届ける。
                 None => {
                     drop(input);
@@ -241,7 +272,7 @@ async fn run_with_pipes(
                 Some(ClientMessage::CloseStdin) => stdin = None,
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::Resize(_)) => {}
-                Some(ClientMessage::Exec(_)) => bail!("unexpected Exec"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity) => bail!("unexpected message"),
                 None => {
                     client_open = false;
                     let _ = child.start_kill();
@@ -310,6 +341,26 @@ mod tests {
         let (program, args) = command_line(&request(&[], None));
         assert_eq!(program, "/usr/sbin/runuser");
         assert_eq!(args, ["-u", "user", "--", "/bin/bash", "--login"]);
+    }
+
+    #[test]
+    fn reports_only_fresh_markers() {
+        let dir = std::env::temp_dir().join(format!("chloe-activity-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("claude-s1"), "").unwrap();
+        std::fs::write(dir.join("codex-s2"), "").unwrap();
+        let old = std::fs::File::options()
+            .write(true)
+            .open(dir.join("codex-s2"))
+            .unwrap();
+        old.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(
+            busy_markers(&dir, std::time::Duration::from_secs(1800)),
+            ["claude-s1"]
+        );
+        assert!(busy_markers(&dir.join("missing"), std::time::Duration::from_secs(1)).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

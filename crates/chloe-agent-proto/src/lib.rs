@@ -35,6 +35,9 @@ pub enum ClientMessage {
     Resize(WindowSize),
     /// プロセスにシグナルを送る。
     Signal(i32),
+    /// エージェントが作業中かを尋ねる。[`ClientMessage::Exec`] の代わりに接続して最初に送り、
+    /// [`AgentMessage::Activity`] を受け取ったら接続を閉じる。
+    Activity,
 }
 
 /// guest-agent からホストへのメッセージ。
@@ -49,6 +52,10 @@ pub enum AgentMessage {
     Exited(ExitStatus),
     /// 要求を処理できなかった。このあと接続を閉じる。
     Error(String),
+    /// 作業中のエージェントの印 (古いものを除く)。空なら作業中のものはない。
+    Activity {
+        busy: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
