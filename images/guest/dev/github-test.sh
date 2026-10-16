@@ -22,17 +22,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-result() { echo "==RESULT== $1: $2"; }
-check() {
-    local name="$1" expected="$2"; shift 2
-    local out
-    out="$("$@" 2>&1)" || true
-    if [[ "$out" == *"$expected"* ]]; then
-        result "$name" "ok ${out//$'\n'/ | }"
-    else
-        result "$name" "FAIL expected '$expected', got: ${out//$'\n'/ | }"
-    fi
-}
+# shellcheck source=gateway-lib.sh
+source "$here/gateway-lib.sh"
 
 docker ps -aq --filter "name=^$prefix" | xargs -r docker rm -f >/dev/null
 rm -rf "$state"
@@ -126,7 +117,7 @@ host_key = "$state/host_key"
 github_url = "http://127.0.0.1:$stub_port"
 database = "$state/chloe.db"
 master_key = "$state/master.key"
-idle_timeout_secs = 15
+idle_timeout_secs = 5
 github_app = "$work/github-app.toml"
 allowed_users = ["bob"]
 
@@ -144,7 +135,7 @@ cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-gateway -p chloe
 docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
 "$root/target/debug/chloe-gateway" --config "$work/gateway.toml" > "$logs/gateway.log" 2>&1 &
 gateway_pid=$!
-sleep 1
+wait_until 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$ssh_port"
 
 ssh_opts=(-p "$ssh_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
     -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o LogLevel=ERROR)
@@ -153,18 +144,18 @@ egress_log() { cat "$state/workspaces/$1/logs/requests.jsonl" 2>/dev/null; }
 runner_key() { basename "$(dirname "$(dirname "$(grep -l "$1" "$state"/workspaces/*/config/guest.env)")")"; }
 last_github_request() { egress_log "$1" | grep '"host":"api.github.com"' | tail -1; }
 
-echo "--- who can log in"
+section "who can log in"
 check org-member "alice" as alice 'echo $(id -un) alice'
 check allowed-user "ok" as bob 'echo ok'
 check outsider "Permission denied" as carol true
 
-echo "--- chloe github login"
+section "chloe github login"
 check status-before "not signed in" as alice chloe github status
 check login "Signed in" as alice chloe github login
 check status-after "signed in" as alice chloe github status
 check token-not-logged "clean" sh -c '! grep -q ghu_stub_alice "$0" && echo clean' "$logs/gateway.log"
 
-echo "--- personal workspace gets the user token"
+section "personal workspace gets the user token"
 # ログインする前に起動したランナーは止めてから使う。
 as alice chloe ws stop default >/dev/null
 alice_ph="$(as alice 'printenv GH_TOKEN')"
@@ -174,7 +165,7 @@ check api-user "401" as alice "curl -s -o /dev/null -w '%{http_code}' -H 'Author
 sleep 1
 check api-injected '"injected":["github_token-1"]' last_github_request "$(runner_key "$alice_ph")"
 
-echo "--- organization and team workspaces"
+section "organization and team workspaces"
 check create-org "created acme/proj" as alice chloe ws create acme/proj
 check create-team "created acme/dev/tools" as alice chloe ws create acme/dev/tools
 check not-member-create "not a member" as bob chloe ws create acme/other
@@ -190,3 +181,5 @@ check org-runner-no-token "0" sh -c '
     "$prefix" "$(runner_key "$org_ph")"
 check org-token-served "secret served" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "secret served" | grep "acme/proj" | grep -o "secret served.*github_token" | tail -1' "$logs/gateway.log"
 check personal-not-in-org "absent" as alice+acme/proj 'env | grep -q ghu_stub && echo present || echo absent'
+
+timing_summary

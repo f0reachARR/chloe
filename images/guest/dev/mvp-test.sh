@@ -23,17 +23,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-result() { echo "==RESULT== $1: $2"; }
-check() {
-    local name="$1" expected="$2"; shift 2
-    local out
-    out="$("$@" 2>&1)" || true
-    if [[ "$out" == *"$expected"* ]]; then
-        result "$name" "ok ${out//$'\n'/ | }"
-    else
-        result "$name" "FAIL expected '$expected', got: ${out//$'\n'/ | }"
-    fi
-}
+# shellcheck source=gateway-lib.sh
+source "$here/gateway-lib.sh"
 
 docker ps -aq --filter "name=^$prefix" | xargs -r docker rm -f >/dev/null
 rm -rf "$mvp"
@@ -53,7 +44,7 @@ host_key = "$mvp/host_key"
 github_url = "http://127.0.0.1:$keys_port"
 database = "$mvp/chloe.db"
 master_key = "$mvp/master.key"
-idle_timeout_secs = 15
+idle_timeout_secs = 5
 allowed_users = ["alice", "bob"]
 
 [memberships]
@@ -74,14 +65,14 @@ cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-gateway -p chloe
 docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
 "$root/target/debug/chloe-gateway" --config "$work/gateway.toml" > "$logs/gateway.log" 2>&1 &
 gateway_pid=$!
-sleep 1
+wait_until 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$ssh_port"
 
 ssh_opts=(-p "$ssh_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
     -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o LogLevel=ERROR)
 as() { local user="$1"; shift; ssh "${ssh_opts[@]}" -i "$work/${user%%+*}" "$user@127.0.0.1" "$@"; }
 egress_log() { cat "$mvp/workspaces/$1/logs/requests.jsonl" 2>/dev/null; }
 
-echo "--- secrets and management commands"
+section "secrets and management commands"
 check alice-secret "saved anthropic_api_key" sh -c 'echo real-secret-A | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set anthropic_api_key
 check bob-secret "saved anthropic_api_key" sh -c 'echo real-secret-B | "$@"' _ \
@@ -89,7 +80,7 @@ check bob-secret "saved anthropic_api_key" sh -c 'echo real-secret-B | "$@"' _ \
 check secret-list "anthropic_api_key" as alice chloe secret list
 check secret-not-logged "clean" sh -c '! grep -q real-secret "$0" && echo clean' "$logs/gateway.log"
 
-echo "--- two users at the same time"
+section "two users at the same time"
 # 関数を & で動かすと $! はサブシェルになり、kill が ssh に届かないので、ssh を直接起動する。
 ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 'sleep 300' &
 alice_bg=$!
@@ -124,7 +115,7 @@ check alice-injected '"injected":["anthropic_api_key-0"]' last_anthropic_request
 check bob-not-injected '"injected":[]' last_anthropic_request "$bob_key"
 check secret-served "secret served" sh -c 'grep "secret served" "$0" | sed "s/\x1b\[[0-9;]*m//g" | grep -o "secret served.*anthropic_api_key" | tail -1' "$logs/gateway.log"
 
-echo "--- updating a running workspace"
+section "updating a running workspace"
 check live-update "used from the next request" sh -c 'echo real-secret-A2 | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set anthropic_api_key
 check egress-updated "1" grep -c "policy updated" "$mvp/workspaces/$alice_key/logs/egress.log"
@@ -133,7 +124,7 @@ check alice-still-injected "401" anthropic alice "$alice_ph"
 sleep 1
 check alice-injected-after-update '"injected":["anthropic_api_key-0"]' last_anthropic_request "$alice_key"
 
-echo "--- workspaces"
+section "workspaces"
 check ws-list "default" as alice chloe ws list
 check ws-create-org "created acme/proj" as alice chloe ws create acme/proj --root persistent
 check ws-create-not-member "not a member" as bob chloe ws create acme/proj2
@@ -141,7 +132,7 @@ check ws-org-member "user" as alice+acme/proj 'id -un'
 check ws-org-not-member "Permission denied" as bob+acme/proj true
 check ws-org-list "acme/proj	persistent" as alice chloe ws list
 
-echo "--- authentication"
+section "authentication"
 check wrong-key "Permission denied" ssh "${ssh_opts[@]}" -i "$work/stranger" alice@127.0.0.1 true
 check not-allowed-user "Permission denied" as carol true
 check bad-login "Permission denied" ssh "${ssh_opts[@]}" -i "$work/alice" '../x@127.0.0.1' true
@@ -150,7 +141,7 @@ check pty "/dev/pts/" as alice -tt tty
 check shell "SHELL-OK user" sh -c 'printf "echo SHELL-OK \$(whoami)\nexit\n" | script -qec "$*" /dev/null | grep -ao "SHELL-OK user"' _ \
     ssh "${ssh_opts[*]}" -i "$work/alice" -tt alice@127.0.0.1
 
-echo "--- idle stop and persistence"
+section "idle stop and persistence"
 as alice 'echo kept > /workspace/marker && mkdir -p ~/.claude && echo kept > ~/.claude/marker'
 kill "$alice_bg" "$bob_bg" 2>/dev/null || true
 wait "$alice_bg" "$bob_bg" 2>/dev/null || true
@@ -163,7 +154,7 @@ check idle-stop "yes" echo "$stopped"
 check workspace-kept "kept" as alice 'cat /workspace/marker'
 check home-kept "kept" as alice 'cat ~/.claude/marker'
 
-echo "--- control plane down"
+section "control plane down"
 # ゲートウェイ (問い合わせ先) を止めると、本物の値が要る要求は 503 で失敗し、要らない要求は通る。
 # VM には chloe-runner で vsock から直接入る。
 cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-runner
@@ -171,3 +162,5 @@ kill "$gateway_pid"; wait "$gateway_pid" 2>/dev/null || true
 vm() { "$root/target/debug/chloe-runner" exec --vsock "$mvp/workspaces/$alice_key/vsock.sock" -- bash -lc "$1"; }
 check down-secret-503 "503" vm "curl -s -o /dev/null -w '%{http_code}' -H \"x-api-key: \$ANTHROPIC_API_KEY\" https://api.anthropic.com/v1/models"
 check down-plain-ok "200" vm "curl -s -o /dev/null -w '%{http_code}' https://httpbin.org/get"
+
+timing_summary

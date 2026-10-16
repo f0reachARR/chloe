@@ -28,17 +28,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-result() { echo "==RESULT== $1: $2"; }
-check() {
-    local name="$1" expected="$2"; shift 2
-    local out
-    out="$("$@" 2>&1)" || true
-    if [[ "$out" == *"$expected"* ]]; then
-        result "$name" "ok ${out//$'\n'/ | }"
-    else
-        result "$name" "FAIL expected '$expected', got: ${out//$'\n'/ | }"
-    fi
-}
+# shellcheck source=gateway-lib.sh
+source "$here/gateway-lib.sh"
+# 待ち時間を短くするため、停止までの時間と問い合わせの間隔を短くする。
+# ただし、確認と確認のあいだにランナーが止まらないだけの長さは残す。
+idle=5
 
 docker ps -aq --filter "name=^$prefix" | xargs -r docker rm -f >/dev/null
 rm -rf "$state"
@@ -55,9 +49,9 @@ github_url = "http://127.0.0.1:$keys_port"
 database = "$state/chloe.db"
 master_key = "$state/master.key"
 audit_log = "$logs/audit.jsonl"
-idle_timeout_secs = 10
-activity_poll_secs = 3
-reconcile_interval_secs = 5
+idle_timeout_secs = $idle
+activity_poll_secs = 1
+reconcile_interval_secs = 2
 allowed_users = ["alice"]
 
 [policy]
@@ -75,7 +69,7 @@ docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/n
 start_gateway() {
     "$root/target/debug/chloe-gateway" --config "$work/gateway.toml" >> "$logs/gateway.log" 2>&1 &
     gateway_pid=$!
-    sleep 1
+    wait_until 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$ssh_port"
 }
 start_gateway
 
@@ -85,73 +79,77 @@ as_alice() { ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 "$@"; }
 key=ws-1
 container="$prefix$key"
 running() { [ -n "$(docker ps -q --filter "name=^$container\$")" ] && echo running || echo stopped; }
+is_stopped() { [ "$(running)" = stopped ]; }
 # ゲートウェイを通さずに VM で実行する (ゲートウェイの接続数に数えない)。
 vm() { timeout 60 "$root/target/debug/chloe-runner" exec --vsock "$state/workspaces/$key/vsock.sock" -- bash -lc "$1" < /dev/null; }
-gateway_log() { sed 's/\x1b\[[0-9;]*m//g' "$logs/gateway.log"; }
+gateway_log() { strip_colors "$logs/gateway.log"; }
 log_has() { gateway_log | grep -o "$1" | tail -1; }
 
-echo "--- hooks"
+section hooks
 echo real-secret-A | as_alice chloe secret set anthropic_api_key >/dev/null
-check claude-hooks "begin claude" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 120 claude -p hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
+check claude-hooks "begin claude" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 60 claude -p hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
 check claude-hooks-end "end claude" as_alice 'cat /tmp/act.log'
-check codex-hooks "begin codex" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 120 codex exec --skip-git-repo-check hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
-# Codex はターンが失敗するとフックを呼ばないので印が残るが、印のプロセスはもう終わっている。
+check codex-hooks "begin codex" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 15 codex exec --skip-git-repo-check hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
+# Codex は 401 のあと再試行を続けるので、始まりのフックを確かめたら止める。
+# ターンが終わらずにフックが呼ばれないので印が残るが、印のプロセスはもう終わっている。
 check codex-marker-dead "dead" as_alice 'for f in /run/chloe/activity/codex-*; do [ -d "/proc/$(cat "$f")" ] && echo alive || echo dead; done'
 
-echo "--- waiting for a working agent"
+section "waiting for a working agent"
 # 接続を一本つないだまま、エージェントのふりをする "claude" という名前のプロセスと印を作り、
 # それから接続を切る。(chloe-activity がフックから呼ばれたときと同じく、印にプロセス ID を書く。)
 ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 'sleep 300' &
 holder=$!
-sleep 3
+wait_until 90 vm true
 # (/bin/sleep は呼ばれた名前で動きを変える coreutils の一体型なので、名前を変えて写せない。
 # シェルスクリプトのプロセスの名前は、スクリプトのファイル名になる。)
 check fake-agent-marker "has-pid" vm 'mkdir -p /tmp/fake-agent && printf "#!/bin/sh\nwhile :; do sleep 5; done\n" > /tmp/fake-agent/claude && chmod +x /tmp/fake-agent/claude && (setsid /tmp/fake-agent/claude > /dev/null 2>&1 < /dev/null &) ; sleep 1; pgrep -x claude > /run/chloe/activity/claude-test-session; grep -qx "[0-9][0-9]*" /run/chloe/activity/claude-test-session && echo has-pid'
 kill "$holder"; wait "$holder" 2>/dev/null || true
-sleep 25
+# 停止までの時間が過ぎても、作業中なので止めずに何度か尋ね直す。
+wait_until $((idle + 20)) count_at_least 3 "$logs/gateway.log" 'an agent is working' || true
 check busy-keeps-running "running" running
 check busy-logged "an agent is working" log_has 'an agent is working' 
 vm 'pkill -x claude' || true
-for _ in $(seq 60); do [ "$(running)" = stopped ] && break; sleep 1; done
+wait_until 30 is_stopped || true
 check idle-after-work "stopped" running
 
-echo "--- gateway restart"
+section "gateway restart"
 as_alice 'echo kept > /workspace/marker' >/dev/null
 check started-again "running" running
 kill "$gateway_pid"; wait "$gateway_pid" 2>/dev/null || true
 check survives-restart "running" running
 start_gateway
+wait_until 10 count_at_least 1 "$logs/gateway.log" 'adopted a running runner' || true
 check adopted "adopted a running runner" log_has 'adopted a running runner' 
 check list-running "running" as_alice chloe ws list
 check secret-after-restart "401" vm "curl -s -o /dev/null -w '%{http_code}' -H \"x-api-key: \$ANTHROPIC_API_KEY\" -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models"
 check workspace-intact "kept" as_alice 'cat /workspace/marker'
-for _ in $(seq 60); do [ "$(running)" = stopped ] && break; sleep 1; done
+wait_until 30 is_stopped || true
 check adopted-idle-stop "stopped" running
 
-echo "--- port forwarding"
+section "port forwarding"
 as_alice 'echo served > /workspace/served.txt; (setsid python3 -m http.server --bind 127.0.0.1 --directory /workspace 3000 > /dev/null 2>&1 < /dev/null &); sleep 1' >/dev/null
 ssh "${ssh_opts[@]}" -i "$work/alice" -N -o ExitOnForwardFailure=yes \
     -L "127.0.0.1:$forward_port:127.0.0.1:3000" -L "127.0.0.1:$((forward_port + 1)):127.0.0.1:3999" \
     alice@127.0.0.1 &
 forward_pid=$!
-sleep 2
+wait_until 30 curl -sf "http://127.0.0.1:$forward_port/served.txt" || true
 check forward-http "served" curl -s "http://127.0.0.1:$forward_port/served.txt"
 check forward-closed-port "000" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$((forward_port + 1))/"
 check forward-logged "port forwarding failed" log_has 'port forwarding failed'
 # 転送中の TCP の接続がなくても、SSH の接続があるあいだはランナーを止めない。
-sleep 20
+sleep $((idle + 3))
 check forward-keeps-running "running" running
 check forward-http-again "served" curl -s "http://127.0.0.1:$forward_port/served.txt"
 kill "$forward_pid"; wait "$forward_pid" 2>/dev/null || true
-for _ in $(seq 60); do [ "$(running)" = stopped ] && break; sleep 1; done
+wait_until 30 is_stopped || true
 check forward-idle-stop "stopped" running
 
-echo "--- orphans"
+section orphans
 docker run -d --name "${prefix}ws-999" ubuntu:26.04 sleep 600 >/dev/null
-for _ in $(seq 20); do [ -z "$(docker ps -q --filter "name=^${prefix}ws-999\$")" ] && break; sleep 1; done
+wait_until 20 bash -c "[ -z \"\$(docker ps -q --filter 'name=^${prefix}ws-999\$')\" ]" || true
 check orphan-stopped "gone" sh -c '[ -z "$(docker ps -q --filter "name=^$0ws-999\$")" ] && echo gone' "$prefix"
 
-echo "--- audit log"
+section "audit log"
 audit_has() { grep "\"message\":\"$1" "$logs/audit.jsonl" | head -1; }
 check audit-authenticated '"method":"publickey"' audit_has authenticated
 check audit-session '"kind":"exec"' audit_has 'session started'
@@ -167,3 +165,4 @@ check audit-no-secret "0" grep -c real-secret-A "$logs/audit.jsonl"
 check audit-no-args "0" grep -c 'claude -p' "$logs/audit.jsonl"
 check audit-mode "600" stat -c %a "$logs/audit.jsonl"
 
+timing_summary
