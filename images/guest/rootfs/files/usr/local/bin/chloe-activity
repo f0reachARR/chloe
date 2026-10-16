@@ -4,8 +4,10 @@
 #   chloe-activity begin|touch|end <tool>
 #
 # 標準入力にフックの JSON (session_id を含む) が来る。印は /run/chloe/activity/<tool>-<session_id>。
-# begin と touch は印を作るか更新し、end は消す。guest-agent は、最近更新された印があれば
-# 作業中と答え、ランナーは接続がなくなっても止まらない。
+# begin と touch は印を作るか更新し、end は消す。印にはエージェントのプロセス ID を書く。
+# guest-agent は、最近更新されていて、エージェントのプロセスがまだ動いている印があれば作業中と
+# 答え、ランナーは接続がなくなっても止まらない。Codex のようにターンが失敗したときにフックを
+# 呼ばないエージェントでも、プロセスが終われば印は無視される。
 # UserPromptSubmit のフックの標準出力は会話に加わるので、何も出力しない。フックを失敗させない
 # よう、常に 0 で終わる。
 action="$1"
@@ -14,10 +16,27 @@ dir=/run/chloe/activity
 session="$(jq -r '.session_id // .sessionId // empty' 2>/dev/null | tr -c 'A-Za-z0-9._\n-' '_' | head -c 128)"
 [ -n "$session" ] || session=unknown
 file="$dir/$tool-$session"
+
+# 祖先のプロセスから、名前が <tool> のもの (エージェント本体) を探す。
+agent_pid() {
+    pid=$$
+    while [ "$pid" -gt 1 ] 2>/dev/null; do
+        if [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "$tool" ]; then
+            echo "$pid"
+            return
+        fi
+        pid="$(awk '{ print $4 }' "/proc/$pid/stat" 2>/dev/null)"
+        [ -n "$pid" ] || return
+    done
+}
+# 確認用: CHLOE_ACTIVITY_LOG があれば、受けた出来事を追記する。
+if [ -n "${CHLOE_ACTIVITY_LOG:-}" ]; then
+    echo "$action $tool" >> "$CHLOE_ACTIVITY_LOG" 2>/dev/null
+fi
 case "$action" in
 begin | touch)
     mkdir -p "$dir" 2>/dev/null
-    touch "$file" 2>/dev/null
+    agent_pid > "$file" 2>/dev/null
     ;;
 end)
     rm -f "$file" 2>/dev/null

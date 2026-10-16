@@ -119,22 +119,35 @@ fn command_line(request: &ExecRequest) -> (String, Vec<String>) {
 }
 
 /// `dir` の中の、`ttl` より最近に更新された印の名前。
+///
+/// 印にエージェントのプロセス ID が書いてあり、そのプロセスがもう動いていなければ、
+/// 印を消して作業中とはみなさない (ターンの失敗でフックが呼ばれずに残った印など)。
 fn busy_markers(dir: &std::path::Path, ttl: std::time::Duration) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
     };
-    let mut busy: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|modified| modified.elapsed().ok())
-                .is_some_and(|age| age < ttl)
-        })
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
+    let mut busy = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let fresh = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < ttl);
+        if !fresh {
+            continue;
+        }
+        let pid = std::fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok());
+        if let Some(pid) = pid
+            && !std::path::Path::new(&format!("/proc/{pid}")).exists()
+        {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        busy.push(entry.file_name().to_string_lossy().into_owned());
+    }
     busy.sort();
     busy
 }
@@ -347,8 +360,10 @@ mod tests {
     fn reports_only_fresh_markers() {
         let dir = std::env::temp_dir().join(format!("chloe-activity-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("claude-s1"), "").unwrap();
+        std::fs::write(dir.join("claude-s1"), format!("{}\n", std::process::id())).unwrap();
         std::fs::write(dir.join("codex-s2"), "").unwrap();
+        // 終わったプロセスの印は無視して消す。
+        std::fs::write(dir.join("codex-dead"), "999999999\n").unwrap();
         let old = std::fs::File::options()
             .write(true)
             .open(dir.join("codex-s2"))
@@ -359,6 +374,7 @@ mod tests {
             busy_markers(&dir, std::time::Duration::from_secs(1800)),
             ["claude-s1"]
         );
+        assert!(!dir.join("codex-dead").exists());
         assert!(busy_markers(&dir.join("missing"), std::time::Duration::from_secs(1)).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
