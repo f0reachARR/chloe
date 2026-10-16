@@ -7,6 +7,10 @@
 //! - 宛先、メソッド、パスの規則 ([`PathRuleConfig`]) で、許可した宛先への要求をさらに絞る。
 //! - プレースホルダーは、規則に登録した宛先と場所に限って本物に差し替える。
 //!   それ以外の宛先でプレースホルダーを見つけたら遮断する。
+//!
+//! 方針は本物の値を持たない。[`Policy::evaluate`] はどのヘッダーをどの規則で差し替えるか
+//! ([`Substitution`]) だけを決め、呼び出し側が本物の値を取ってきて [`Policy::apply`] で書き換え、
+//! すぐに捨てる。
 
 mod path;
 
@@ -14,7 +18,7 @@ pub use path::{Action, PathRuleConfig};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use secrecy::{ExposeSecret, SecretString};
+pub use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 /// CA 証明書を返すホスト名。外部には存在しない。
@@ -42,7 +46,7 @@ pub struct InjectRuleConfig {
     pub header: String,
     #[serde(default)]
     pub format: InjectFormat,
-    /// 本物の値を読む環境変数。段階 6 でシークレットの保管先への参照に置き換える。
+    /// 本物の値を問い合わせるときの名前 (開発用のプロキシでは環境変数の名前にもなる)。
     pub secret_env: String,
 }
 
@@ -54,12 +58,6 @@ pub enum InjectFormat {
     Replace,
     /// Basic 認証のパスワードがプレースホルダーのとき、パスワードを本物に置き換える。
     BasicPassword,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("failed to resolve the secret for rule {rule}: {message}")]
-    Secret { rule: String, message: String },
 }
 
 pub struct Policy {
@@ -75,7 +73,15 @@ struct InjectRule {
     hosts: Vec<String>,
     header: String,
     format: InjectFormat,
-    secret: SecretString,
+    secret: String,
+}
+
+/// 差し替えの予定。`header` 番目のヘッダーを `rule` 番目の規則で、`secret` の本物の値に差し替える。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Substitution {
+    pub header: usize,
+    rule: usize,
+    pub secret: String,
 }
 
 /// TLS の接続を復号するかどうか。
@@ -95,8 +101,8 @@ pub struct Request<'a> {
     pub method: &'a str,
     /// パスとクエリ。
     pub path_and_query: &'a str,
-    /// ヘッダー。名前は小文字にしておく。差し替えた値はここに書き戻す。
-    pub headers: &'a mut Vec<(String, Vec<u8>)>,
+    /// ヘッダー。名前は小文字にしておく。
+    pub headers: &'a [(String, Vec<u8>)],
     /// 本文。大きすぎて調べなかったときは `None`。
     pub body: Option<&'a [u8]>,
 }
@@ -105,7 +111,7 @@ pub struct Request<'a> {
 pub enum Decision {
     /// CA 証明書を返す。
     Ca,
-    /// 上流へ送る。`injected` は差し替えた規則の名前。
+    /// 上流へ送る。`injected` は差し替える規則の名前。
     Allowed { injected: Vec<String> },
     Blocked {
         reason: BlockReason,
@@ -139,29 +145,19 @@ impl BlockReason {
 }
 
 impl Policy {
-    /// 設定から方針を作る。`resolve` は規則の本物の値を返す。
-    pub fn new(
-        config: PolicyConfig,
-        resolve: impl Fn(&InjectRuleConfig) -> Result<String, String>,
-    ) -> Result<Self, Error> {
+    pub fn new(config: PolicyConfig) -> Self {
         let rules = config
             .inject
             .iter()
-            .map(|rule| {
-                let secret = resolve(rule).map_err(|message| Error::Secret {
-                    rule: rule.name.clone(),
-                    message,
-                })?;
-                Ok(InjectRule {
-                    name: rule.name.clone(),
-                    placeholder: rule.placeholder.clone(),
-                    hosts: rule.hosts.clone(),
-                    header: rule.header.to_ascii_lowercase(),
-                    format: rule.format,
-                    secret: secret.into(),
-                })
+            .map(|rule| InjectRule {
+                name: rule.name.clone(),
+                placeholder: rule.placeholder.clone(),
+                hosts: rule.hosts.clone(),
+                header: rule.header.to_ascii_lowercase(),
+                format: rule.format,
+                secret: rule.secret_env.clone(),
             })
-            .collect::<Result<_, Error>>()?;
+            .collect();
         let mut allow = config.allow;
         allow.extend(config.passthrough.iter().cloned());
         let path_rules = config
@@ -170,12 +166,12 @@ impl Policy {
             .enumerate()
             .map(|(index, rule)| path::PathRule::new(index, rule))
             .collect();
-        Ok(Self {
+        Self {
             allow,
             passthrough: config.passthrough,
             rules,
             path_rules,
-        })
+        }
     }
 
     pub fn tls_decision(&self, sni: Option<&str>) -> TlsDecision {
@@ -190,25 +186,73 @@ impl Policy {
         host_matches(host, &self.allow)
     }
 
-    /// 要求を判定し、許可するなら差し替えを `request.headers` に書き戻す。
-    pub fn evaluate(&self, request: &mut Request<'_>) -> Decision {
+    /// 要求を判定し、許可するなら差し替えの予定も返す。
+    pub fn evaluate(&self, request: &Request<'_>) -> (Decision, Vec<Substitution>) {
+        match self.decide(request) {
+            Ok(substitutions) => {
+                let mut injected = Vec::new();
+                for s in &substitutions {
+                    let name = &self.rules[s.rule].name;
+                    if !injected.contains(name) {
+                        injected.push(name.clone());
+                    }
+                }
+                (Decision::Allowed { injected }, substitutions)
+            }
+            Err(decision) => (decision, vec![]),
+        }
+    }
+
+    /// 差し替えに要る本物の値の名前 (重複なし)。
+    pub fn secrets_needed(substitutions: &[Substitution]) -> Vec<String> {
+        let mut names: Vec<String> = substitutions.iter().map(|s| s.secret.clone()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// 本物の値で `headers` を書き換える。`value` が値を返さない名前があれば、
+    /// 何も書き換えずにその名前を返す。
+    pub fn apply(
+        &self,
+        headers: &mut [(String, Vec<u8>)],
+        substitutions: &[Substitution],
+        value: impl Fn(&str) -> Option<SecretString>,
+    ) -> Result<(), String> {
+        let mut rendered = Vec::with_capacity(substitutions.len());
+        for s in substitutions {
+            let secret = value(&s.secret).ok_or_else(|| s.secret.clone())?;
+            let rule = &self.rules[s.rule];
+            if let Some(new) = rule.render(&headers[s.header].1, secret.expose_secret()) {
+                rendered.push((s.header, new));
+            }
+        }
+        for (index, new) in rendered {
+            headers[index].1 = new;
+        }
+        Ok(())
+    }
+
+    fn decide(&self, request: &Request<'_>) -> Result<Vec<Substitution>, Decision> {
         let host = normalize_host(request.host);
         if host == CA_HOST {
-            return Decision::Ca;
+            return Err(Decision::Ca);
         }
         if request.tls {
             match request.sni.map(normalize_host) {
-                None => return blocked(BlockReason::NoSni, None),
-                Some(sni) if sni != host => return blocked(BlockReason::SniHostMismatch, None),
+                None => return Err(blocked(BlockReason::NoSni, None)),
+                Some(sni) if sni != host => {
+                    return Err(blocked(BlockReason::SniHostMismatch, None));
+                }
                 Some(_) => {}
             }
         }
         if !host_matches(&host, &self.allow) {
-            return blocked(BlockReason::NotAllowed, None);
+            return Err(blocked(BlockReason::NotAllowed, None));
         }
         if !self.path_rules.is_empty() {
             let Some(path) = path::normalize(request.path_and_query) else {
-                return blocked(BlockReason::BadPath, None);
+                return Err(blocked(BlockReason::BadPath, None));
             };
             let method = request.method.to_ascii_uppercase();
             if let Some(rule) = self
@@ -217,14 +261,12 @@ impl Policy {
                 .find(|rule| rule.matches(&host, &method, &path))
                 && rule.action == Action::Deny
             {
-                return blocked(BlockReason::PathDenied, Some(&rule.name));
+                return Err(blocked(BlockReason::PathDenied, Some(&rule.name)));
             }
         }
 
-        // 先にすべての規則を確かめてから差し替える。途中で遮断したときに、
-        // 一部だけ差し替えたヘッダーが残らないようにする。
-        let mut edits = Vec::new();
-        for rule in &self.rules {
+        let mut substitutions = Vec::new();
+        for (rule_index, rule) in self.rules.iter().enumerate() {
             // 同じプレースホルダーを複数の規則で差し替えることがある (git と API など)。
             // どれかの規則がこの宛先を許していれば、束縛された宛先とみなす。
             let bound = self
@@ -236,12 +278,17 @@ impl Policy {
                     continue;
                 }
                 if !bound {
-                    return blocked(BlockReason::PlaceholderToUnboundHost, Some(&rule.name));
+                    return Err(blocked(
+                        BlockReason::PlaceholderToUnboundHost,
+                        Some(&rule.name),
+                    ));
                 }
-                if *name == rule.header
-                    && let Some(rendered) = rule.render(value)
-                {
-                    edits.push((index, rendered, rule.name.clone()));
+                if *name == rule.header && rule.renders(value) {
+                    substitutions.push(Substitution {
+                        header: index,
+                        rule: rule_index,
+                        secret: rule.secret.clone(),
+                    });
                 }
             }
             let in_url = request.path_and_query.contains(&rule.placeholder);
@@ -249,18 +296,13 @@ impl Policy {
                 .body
                 .is_some_and(|body| contains_bytes(body, rule.placeholder.as_bytes()));
             if (in_url || in_body) && !bound {
-                return blocked(BlockReason::PlaceholderToUnboundHost, Some(&rule.name));
+                return Err(blocked(
+                    BlockReason::PlaceholderToUnboundHost,
+                    Some(&rule.name),
+                ));
             }
         }
-
-        let mut injected = Vec::new();
-        for (index, value, rule) in edits {
-            request.headers[index].1 = value;
-            if !injected.contains(&rule) {
-                injected.push(rule);
-            }
-        }
-        Decision::Allowed { injected }
+        Ok(substitutions)
     }
 }
 
@@ -282,8 +324,15 @@ impl InjectRule {
             || (self.format == InjectFormat::BasicPassword && self.basic_user(value).is_some())
     }
 
-    fn render(&self, value: &[u8]) -> Option<Vec<u8>> {
-        let secret = self.secret.expose_secret();
+    /// この規則で差し替えられる値か。
+    fn renders(&self, value: &[u8]) -> bool {
+        match self.format {
+            InjectFormat::BasicPassword => self.basic_user(value).is_some(),
+            InjectFormat::Replace => contains_bytes(value, self.placeholder.as_bytes()),
+        }
+    }
+
+    fn render(&self, value: &[u8], secret: &str) -> Option<Vec<u8>> {
         match self.format {
             InjectFormat::BasicPassword => {
                 let user = self.basic_user(value)?;
@@ -371,10 +420,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        Policy::new(config, |rule| {
-            Ok(format!("real-{}", rule.secret_env.to_lowercase()))
-        })
-        .unwrap()
+        Policy::new(config)
     }
 
     struct Req {
@@ -403,16 +449,23 @@ mod tests {
             self
         }
 
+        /// 判定し、許可なら本物の値 ("real-" と小文字にした secret_env) で書き換える。
         fn eval(&mut self, policy: &Policy) -> Decision {
-            policy.evaluate(&mut Request {
+            let (decision, substitutions) = policy.evaluate(&Request {
                 host: self.host,
                 sni: self.sni,
                 tls: self.sni.is_some(),
                 method: self.method,
                 path_and_query: self.path,
-                headers: &mut self.headers,
+                headers: &self.headers,
                 body: self.body,
-            })
+            });
+            policy
+                .apply(&mut self.headers, &substitutions, |name| {
+                    Some(format!("real-{}", name.to_lowercase()).into())
+                })
+                .unwrap();
+            decision
         }
 
         fn header_value(&self, name: &str) -> String {
@@ -477,13 +530,13 @@ mod tests {
         let mut no_sni = Req::https("httpbin.org");
         no_sni.sni = None;
         // sni が None だと平文扱いになるので、TLS を明示して判定する。
-        let decision = p.evaluate(&mut Request {
+        let (decision, _) = p.evaluate(&Request {
             host: no_sni.host,
             sni: None,
             tls: true,
             method: "GET",
             path_and_query: "/",
-            headers: &mut no_sni.headers,
+            headers: &no_sni.headers,
             body: None,
         });
         assert_eq!(reason(decision), BlockReason::NoSni);
@@ -577,7 +630,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let p = Policy::new(config, |_| Ok("real".into())).unwrap();
+        let p = Policy::new(config);
         let mut api =
             Req::https("api.github.com").header("authorization", &format!("token {GH_PH}"));
         assert_eq!(
@@ -586,7 +639,7 @@ mod tests {
                 injected: vec!["gh-api".into()]
             }
         );
-        assert_eq!(api.header_value("authorization"), "token real");
+        assert_eq!(api.header_value("authorization"), "token real-g");
         let leaked = Req::https("example.org")
             .header("authorization", &format!("token {GH_PH}"))
             .eval(&p);
@@ -605,7 +658,7 @@ mod tests {
             ]
         }))
         .unwrap();
-        let p = Policy::new(config, |_| Ok(String::new())).unwrap();
+        let p = Policy::new(config);
         let eval = |host: &'static str, method: &'static str, path: &'static str| {
             let mut req = Req::https(host);
             req.method = method;
@@ -673,20 +726,35 @@ mod tests {
     }
 
     #[test]
+    fn apply_needs_every_secret() {
+        let p = policy();
+        let mut headers = vec![(
+            "authorization".to_string(),
+            format!("Bearer {PH}").into_bytes(),
+        )];
+        let (_, substitutions) = p.evaluate(&Request {
+            host: "httpbin.org",
+            sni: Some("httpbin.org"),
+            tls: true,
+            method: "GET",
+            path_and_query: "/",
+            headers: &headers,
+            body: None,
+        });
+        assert_eq!(Policy::secrets_needed(&substitutions), ["TEST"]);
+        // 値が得られなければ何も書き換えない。
+        assert_eq!(
+            p.apply(&mut headers, &substitutions, |_| None),
+            Err("TEST".to_string())
+        );
+        assert_eq!(headers[0].1, format!("Bearer {PH}").into_bytes());
+    }
+
+    #[test]
     fn plain_http_has_no_sni() {
         let p = policy();
         let mut req = Req::https("httpbin.org:80");
         req.sni = None;
         assert_eq!(req.eval(&p), Decision::Allowed { injected: vec![] });
-    }
-
-    #[test]
-    fn secret_resolution_errors_name_the_rule() {
-        let config: PolicyConfig = serde_json::from_value(serde_json::json!({
-            "inject": [{ "name": "r", "placeholder": "p", "hosts": [], "header": "h", "secret_env": "X" }]
-        }))
-        .unwrap();
-        let error = Policy::new(config, |_| Err("unset".into())).err().unwrap();
-        assert!(error.to_string().contains("rule r"));
     }
 }
