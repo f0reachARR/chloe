@@ -47,6 +47,8 @@ RUN locale-gen en_US.UTF-8 \
     && chown user:user /workspace
 
 COPY files/ /
+# guest-agent は build.sh が musl でビルドし、chloe-bin のビルドコンテキストとして渡す。
+COPY --from=chloe-bin chloe-guest-agent /usr/local/sbin/chloe-guest-agent
 RUN chmod 0755 /usr/sbin/overlay-init /usr/local/sbin/chloe-mount-disks \
-    && systemctl enable systemd-networkd systemd-resolved docker chloe-disks.service \
+    && systemctl enable systemd-networkd systemd-resolved docker chloe-disks.service chloe-guest-agent.service \
     && systemctl mask systemd-firstboot.service systemd-timesyncd.service

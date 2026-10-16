@@ -14,7 +14,13 @@ out="$root/build/guest"
 cache="$root/build/cache"
 mkdir -p "$out" "$cache"
 
-docker build -t chloe-guest-rootfs "$here"
+cargo build --quiet --release --target x86_64-unknown-linux-musl \
+    --manifest-path "$root/Cargo.toml" -p chloe-guest-agent
+bin="$cache/bin"
+mkdir -p "$bin"
+cp "$root/target/x86_64-unknown-linux-musl/release/chloe-guest-agent" "$bin/"
+
+docker build -t chloe-guest-rootfs --build-context chloe-bin="$bin" "$here"
 docker build -q -t chloe-guest-tools -f "$here/tools.Dockerfile" "$here" >/dev/null
 
 cid="$(docker create chloe-guest-rootfs)"
