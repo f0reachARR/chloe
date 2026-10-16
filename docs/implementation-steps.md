@@ -242,7 +242,13 @@ GitHub の代わりに、テスト用の公開鍵を返す HTTP サーバーを�
 - **ゲートウェイ**：`github_app` を設定すると、アプリの Organization のメンバーがログインでき、Organization と team のワークスペースには GitHub 上の所属で入れる。公開鍵を登録していない利用者は keyboard-interactive で Device Flow を行う。`chloe github login|status|logout` を足した。
 - **GitHub のトークンの渡し方**：個人のワークスペースには Device Flow で得たユーザートークンを（失効まで 1 時間を切っていれば更新して）、team と Organization のワークスペースにはインストールトークンを、ランナーの起動時に渡す。
 - **ゲストの git**：GitHub に HTTPS でつなぎ、認証ヘルパーがプレースホルダーを返す。
-- `images/guest/dev/github-test.sh` で、GitHub のふりをするサーバーに対して 20 項目を確かめた。本物の GitHub では、アプリの JWT が受け付けられることまで確かめた（アプリのインストールを待っている）。
+- `images/guest/dev/github-test.sh` で、GitHub のふりをするサーバーに対して 20 項目を確かめた。
+- 本物の GitHub（ForteFibre にインストールしたアプリ）でも次を確かめた。
+  - インストールトークンの発行と Organization の所属の確認（メンバーは true、メンバーでない利用者は false）。
+  - `allowed_users` を空にして、GitHub に登録した公開鍵と Organization の所属だけでログインできる。
+  - `chloe github login` の Device Flow（ブラウザで承認）。ゲートウェイのログにトークンは出ない。
+  - 個人のワークスペースの VM にはプレースホルダーだけがあり、`api.github.com/user` がプレースホルダー経由で利用者本人として答える。非公開リポジトリへの `git ls-remote` が、401 のあと認証ヘルパーとプロキシの差し替えで通る。`git@github.com:` のリモートも HTTPS に読み替えて通る。
+  - Organization のワークスペースにはインストールトークンが渡る（`/installation/repositories` が見え、`/user` は使えない）。
 
 6f で残したもの：
 
