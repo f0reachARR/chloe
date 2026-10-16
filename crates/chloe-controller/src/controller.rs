@@ -116,13 +116,21 @@ impl<B: RunnerBackend> Controller<B> {
     }
 
     /// ワークスペースへの接続を開く。ランナーが止まっていれば起動する。
-    pub async fn open(&self, workspace: &Workspace) -> Result<Session<B>, Error> {
+    ///
+    /// `extra` は、データベースのシークレットに加えて (同じ名前なら置き換えて) ランナーに渡す
+    /// シークレット。GitHub のトークンのように、接続のたびに発行し直すものに使う。
+    /// ランナーがすでに動いていれば使わない。
+    pub async fn open(
+        &self,
+        workspace: &Workspace,
+        extra: Vec<(String, chloe_secrets::SecretString)>,
+    ) -> Result<Session<B>, Error> {
         let state = self.state(workspace.id);
         {
             let mut sessions = state.sessions.lock().unwrap();
             sessions.open += 1;
         }
-        let result = self.ensure_running(workspace, &state).await;
+        let result = self.ensure_running(workspace, &state, extra).await;
         match result {
             Ok(vsock) => Ok(Session {
                 controller: self.clone(),
@@ -140,6 +148,7 @@ impl<B: RunnerBackend> Controller<B> {
         &self,
         workspace: &Workspace,
         state: &RunnerState,
+        extra: Vec<(String, chloe_secrets::SecretString)>,
     ) -> Result<PathBuf, Error> {
         let mut running = state.lifecycle.lock().await;
         let key = workspace.key();
@@ -149,7 +158,11 @@ impl<B: RunnerBackend> Controller<B> {
             return Ok(vsock.clone());
         }
         let placeholders = self.inner.store.placeholders(workspace.id).await?;
-        let secrets = self.owner_secrets(&workspace.owner).await?;
+        let mut secrets = self.owner_secrets(&workspace.owner).await?;
+        for (name, value) in extra {
+            secrets.retain(|(existing, _)| *existing != name);
+            secrets.push((name, value));
+        }
         let spec = build_spec(workspace, &self.inner.base, &placeholders, secrets);
         info!(workspace = %workspace.display_name(), key, "starting runner");
         let vsock = self.inner.backend.start(spec).await?;
@@ -318,8 +331,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let first = controller.open(&ws).await.unwrap();
-        let second = controller.open(&ws).await.unwrap();
+        let first = controller.open(&ws, vec![]).await.unwrap();
+        let second = controller.open(&ws, vec![]).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
         drop(first);
         tokio::time::sleep(ms(600)).await;
@@ -332,7 +345,7 @@ mod tests {
         drop(second);
         tokio::time::sleep(ms(100)).await;
         // 止まる前にまた接続すると、停止の予約は無効になる。
-        let third = controller.open(&ws).await.unwrap();
+        let third = controller.open(&ws, vec![]).await.unwrap();
         tokio::time::sleep(ms(600)).await;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 0);
         assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
@@ -342,7 +355,7 @@ mod tests {
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
         assert!(!backend.is_running(&ws.key()).await.unwrap());
 
-        let _again = controller.open(&ws).await.unwrap();
+        let _again = controller.open(&ws, vec![]).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
     }
 
@@ -379,8 +392,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let _a = controller.open(&ws_a).await.unwrap();
-        let _b = controller.open(&ws_b).await.unwrap();
+        let _a = controller.open(&ws_a, vec![]).await.unwrap();
+        let _b = controller
+            .open(
+                &ws_b,
+                vec![("github_token".into(), "ghs_installation".to_string().into())],
+            )
+            .await
+            .unwrap();
         let running = backend.running.lock().unwrap();
         assert_eq!(
             running[&ws_a.key()],
@@ -390,5 +409,12 @@ mod tests {
             )]
         );
         assert_eq!(running[&ws_b.key()][0].1, "bob-key");
+        assert_eq!(
+            running[&ws_b.key()][1],
+            (
+                "CHLOE_SECRET_GITHUB_TOKEN".to_string(),
+                "ghs_installation".to_string()
+            )
+        );
     }
 }

@@ -94,6 +94,21 @@ impl Store {
         Ok(workspaces)
     }
 
+    /// ワークスペースを持つ持ち主の一覧。
+    pub async fn owners(&self) -> Result<Vec<Owner>, Error> {
+        let rows = sqlx::query("SELECT DISTINCT owner FROM workspaces ORDER BY owner")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let owner: String = row.try_get("owner")?;
+                owner
+                    .parse()
+                    .map_err(|e: chloe_secrets::Error| Error::Invalid(e.to_string()))
+            })
+            .collect()
+    }
+
     pub async fn delete(&self, id: i64) -> Result<(), Error> {
         sqlx::query("DELETE FROM workspaces WHERE id = ?1")
             .bind(id)
