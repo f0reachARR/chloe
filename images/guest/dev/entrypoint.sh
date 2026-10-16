@@ -11,7 +11,16 @@ CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}"
 VCPUS="${VCPUS:-4}"
 MEM_MIB="${MEM_MIB:-4096}"
 logs=/state/logs
-mkdir -p "$logs"
+# 状態のディレクトリに書くファイルは、ディレクトリの持ち主 (ホストの利用者) のものにする。
+# root のファイルが残ると、ホストの利用者が消せなくなる。
+owner="$(stat -c %u:%g /state)"
+as_owner() { setpriv --reuid="${owner%%:*}" --regid="${owner##*:}" --clear-groups "$@"; }
+mkdir -p "$logs" /state/egress
+chown "$owner" "$logs" /state/egress
+for f in requests.jsonl egress.log dnsmasq.log; do
+    touch "$logs/$f"
+    chown "$owner" "$logs/$f"
+done
 
 ip tuntap add tap0 mode tap
 ip addr add 172.29.0.1/30 dev tap0
@@ -71,7 +80,7 @@ EOF
     export CHLOE_SECRET_ANTHROPIC="${CHLOE_SECRET_ANTHROPIC:-sk-ant-api03-not-a-real-key}"
     export CHLOE_SECRET_OPENAI="${CHLOE_SECRET_OPENAI:-sk-proj-not-a-real-key}"
 
-    /opt/chloe/bin/chloe-egress \
+    as_owner /opt/chloe/bin/chloe-egress \
         --http-listen "0.0.0.0:$http_port" \
         --https-listen "0.0.0.0:$https_port" \
         --policy "${CHLOE_POLICY:-/opt/chloe/policy.dev.json}" \
