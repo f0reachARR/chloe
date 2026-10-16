@@ -1,0 +1,11 @@
+[package]
+name = "chloe-gateway"
+description = "SSH 入口、認証、PTY 中継"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

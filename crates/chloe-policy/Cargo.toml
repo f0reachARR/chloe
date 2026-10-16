@@ -1,0 +1,11 @@
+[package]
+name = "chloe-policy"
+description = "許可リストと差し替え規則"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
