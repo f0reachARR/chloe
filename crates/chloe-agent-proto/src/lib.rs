@@ -7,6 +7,7 @@
 //! メッセージは 4 バイトの長さ (ビッグエンディアン) のあとに postcard で符号化した本体を置く。
 
 use bytes::Bytes;
+use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -121,10 +122,50 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
     /// 次のメッセージを受け取る。相手が接続を閉じたら `None` を返す。
     pub async fn recv<T: DeserializeOwned>(&mut self) -> Result<Option<T>, Error> {
-        match self.framed.next().await {
-            Some(frame) => Ok(Some(postcard::from_bytes(&frame?)?)),
-            None => Ok(None),
-        }
+        decode(self.framed.next().await)
+    }
+
+    /// 送信側と受信側に分ける。送信と受信を同時に待つときに使う。
+    pub fn split(self) -> (Sender<S>, Receiver<S>) {
+        let (sink, stream) = self.framed.split();
+        (Sender { sink }, Receiver { stream })
+    }
+}
+
+type Frames<S> = Framed<S, LengthDelimitedCodec>;
+
+/// [`Connection::split`] で分けた送信側。
+pub struct Sender<S> {
+    sink: SplitSink<Frames<S>, Bytes>,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> Sender<S> {
+    pub async fn send<T: Serialize>(&mut self, message: &T) -> Result<(), Error> {
+        let bytes = postcard::to_stdvec(message)?;
+        self.sink.send(Bytes::from(bytes)).await?;
+        Ok(())
+    }
+}
+
+/// [`Connection::split`] で分けた受信側。
+pub struct Receiver<S> {
+    stream: SplitStream<Frames<S>>,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> Receiver<S> {
+    /// 次のメッセージを受け取る。相手が接続を閉じたら `None` を返す。
+    /// 取り消しても途中のメッセージは失われない ([`tokio::select!`] で使える)。
+    pub async fn recv<T: DeserializeOwned>(&mut self) -> Result<Option<T>, Error> {
+        decode(self.stream.next().await)
+    }
+}
+
+fn decode<T: DeserializeOwned>(
+    frame: Option<std::io::Result<bytes::BytesMut>>,
+) -> Result<Option<T>, Error> {
+    match frame {
+        Some(frame) => Ok(Some(postcard::from_bytes(&frame?)?)),
+        None => Ok(None),
     }
 }
 
