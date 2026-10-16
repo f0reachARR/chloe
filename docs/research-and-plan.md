@@ -210,7 +210,7 @@ chloe は、利用者全体を扱う **コントロールプレーン** と、�
 │ ネットワーク namespace (物理サーバー) / Pod (K8s)     │
 │                                                     │
 │  firecracker (jailer) ── VM ── guest-agent (vsock)   │
-│     │ virtio-blk         │ tap0 (10.0.0.2)           │
+│     │ virtio-blk         │ tap0 (172.29.0.2)         │
 │     │ rootfs/ws/docker   ▼                          │
 │     │            nftables: tap0 からは :3128 だけ許可 │
 │     │                    │                          │
