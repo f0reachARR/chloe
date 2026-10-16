@@ -86,6 +86,18 @@ async fn main() -> Result<()> {
         github,
         config,
     });
+    // 動いているランナーの GitHub のトークンを、失効する前に作り直して送る。
+    let refresher = shared.clone();
+    let interval = Duration::from_secs(shared.config.refresh_interval_secs.max(30));
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let refreshed = refresher.refresh_running(None).await;
+            tracing::debug!(refreshed, "refreshed running runners");
+        }
+    });
     tracing::info!(%listen, "listening");
     let mut server = Server { shared };
     server.run_on_address(ssh_config, listen).await?;

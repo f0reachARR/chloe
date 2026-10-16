@@ -499,16 +499,15 @@ async fn relay(
         let workspace = shared
             .resolve_workspace(&user.login, user.workspace.as_deref())
             .await?;
-        let mut extra = Vec::new();
-        match shared.github_token_for(&workspace).await {
-            Ok(Some(token)) => extra.push(("github_token".to_string(), token)),
-            Ok(None) => {}
+        let extra = match shared.extras_for(&workspace).await {
+            Ok(extra) => extra,
             Err(error) => {
                 warn!(workspace = %workspace.display_name(), "no GitHub token for the runner: {error:#}");
                 let message = format!("chloe: GitHub is not available in this session: {error:#}\r\n");
                 let _ = handle.extended_data(channel, 1, message.into_bytes()).await;
+                vec![]
             }
-        }
+        };
         // セッションを持っているあいだは、ランナーが止められない。
         let session = shared.controller.open(&workspace, extra).await?;
         relay_inner(&handle, channel, &session.vsock, request, input).await
@@ -646,7 +645,13 @@ async fn github_login_command(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(device.expires_in);
     match finish_device_flow(shared, github, login, &device, deadline).await {
         Ok(true) => {
-            say("Signed in. New and restarted workspaces get the GitHub token.\n".into()).await;
+            let refreshed = shared
+                .refresh_running(Some(&crate::access::personal(login)))
+                .await;
+            say(format!(
+                "Signed in. Workspaces get the GitHub token from their next start ({refreshed} running workspace(s) updated now; those started before you set up GitHub need `chloe ws stop` once).\n"
+            ))
+            .await;
             0
         }
         Ok(false) => {

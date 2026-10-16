@@ -118,6 +118,47 @@ impl Shared {
         }
     }
 
+    /// ランナーに渡す、接続のたびに発行し直すシークレット (今は GitHub のトークン)。
+    pub async fn extras_for(&self, workspace: &Workspace) -> Result<Vec<(String, SecretString)>> {
+        Ok(match self.github_token_for(workspace).await? {
+            Some(token) => vec![("github_token".to_string(), token)],
+            None => vec![],
+        })
+    }
+
+    /// 動いているランナーの方針と本物の値を作り直して送る。
+    pub async fn refresh_workspace(&self, workspace: &Workspace) -> Result<bool> {
+        let extra = self.extras_for(workspace).await?;
+        Ok(self.controller.refresh(workspace, extra).await?)
+    }
+
+    /// 動いているランナーのうち、`owner` のもの (`None` ならすべて) を作り直す。
+    /// 失敗したワークスペースはログに残して続ける。
+    pub async fn refresh_running(&self, owner: Option<&Owner>) -> usize {
+        let workspaces = match self.controller.running().await {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                tracing::warn!("failed to list running workspaces: {error:#}");
+                return 0;
+            }
+        };
+        let mut refreshed = 0;
+        for workspace in workspaces {
+            if owner.is_some_and(|owner| *owner != workspace.owner) {
+                continue;
+            }
+            match self.refresh_workspace(&workspace).await {
+                Ok(true) => refreshed += 1,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    workspace = %workspace.display_name(),
+                    "failed to refresh the runner: {error:#}"
+                ),
+            }
+        }
+        refreshed
+    }
+
     pub async fn load_user_token(&self, login: &str) -> Result<Option<UserToken>> {
         let Some(value) = self
             .controller

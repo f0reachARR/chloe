@@ -285,8 +285,9 @@ async fn secret_set(
         .set(&personal(login), kind, &value.to_string().into())
         .await
         .map_err(|e| e.to_string())?;
+    let refreshed = shared.refresh_running(Some(&personal(login))).await;
     Ok(format!(
-        "saved {kind} (running workspaces pick it up on their next start)\n"
+        "saved {kind} ({refreshed} running workspace(s) use the new value now; a kind that was not set when a workspace started needs `chloe ws stop` first)\n"
     ))
 }
 
@@ -299,6 +300,7 @@ async fn secret_rm(shared: &Shared, login: &str, kind: &str) -> Result<String, S
         .await
         .map_err(|e| e.to_string())?;
     if removed {
+        shared.refresh_running(Some(&personal(login))).await;
         Ok(format!("removed {kind}\n"))
     } else {
         Err(format!("no such secret: {kind}"))
