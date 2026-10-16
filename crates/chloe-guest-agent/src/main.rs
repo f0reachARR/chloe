@@ -17,6 +17,16 @@ use tracing::{info, warn};
 
 /// 利用者を指定しない要求を実行する利用者。
 const DEFAULT_USER: &str = "user";
+/// ランナーが渡した環境変数 (プレースホルダーなど)。chloe-load-config が置く。
+const RUNNER_ENV: &str = "/run/chloe/env";
+/// OS の信頼ストアを読まないツールのために、chloe の CA を含む信頼ストアを指す。
+const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+const CA_ENV: &[&str] = &[
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "CODEX_CA_CERTIFICATE",
+];
 const READ_BUF_LEN: usize = 32 * 1024;
 
 #[tokio::main]
@@ -78,9 +88,16 @@ fn command_line(request: &ExecRequest) -> (String, Vec<String>) {
     let command = &request.command;
     match (command.is_empty(), user == "root") {
         (true, true) => ("/bin/bash".into(), vec!["--login".into()]),
+        // runuser --login は環境を消すので使わない。ログインシェルで profile を読ませる。
         (true, false) => (
             "/usr/sbin/runuser".into(),
-            vec!["--login".into(), user.into()],
+            vec![
+                "-u".into(),
+                user.into(),
+                "--".into(),
+                "/bin/bash".into(),
+                "--login".into(),
+            ],
         ),
         (false, true) => (command[0].clone(), command[1..].to_vec()),
         (false, false) => {
@@ -89,6 +106,34 @@ fn command_line(request: &ExecRequest) -> (String, Vec<String>) {
             ("/usr/sbin/runuser".into(), args)
         }
     }
+}
+
+/// 起動するプロセスの環境変数。ランナーの環境変数、CA の変数、要求の環境変数の順に重ねる。
+fn process_env(request: &ExecRequest) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::fs::read_to_string(RUNNER_ENV)
+        .map(|content| parse_env_file(&content))
+        .unwrap_or_default();
+    env.extend(
+        CA_ENV
+            .iter()
+            .map(|k| (k.to_string(), CA_BUNDLE.to_string())),
+    );
+    env.extend(request.env.iter().cloned());
+    env
+}
+
+/// KEY=VALUE の行を読む。空行と # で始まる行は飛ばす。値の引用符は扱わない。
+fn parse_env_file(content: &str) -> Vec<(String, String)> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| {
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
 }
 
 fn working_dir(request: &ExecRequest) -> String {
@@ -111,7 +156,7 @@ async fn run_with_tty(
     let mut child = pty_process::Command::new(&program)
         .args(&args)
         .env("TERM", &tty.term)
-        .envs(request.env.iter().map(|(k, v)| (k, v)))
+        .envs(process_env(request))
         .current_dir(working_dir(request))
         .spawn(pts)
         .with_context(|| format!("failed to spawn {program}"))?;
@@ -159,7 +204,7 @@ async fn run_with_pipes(
     let (program, args) = command_line(request);
     let mut child = tokio::process::Command::new(&program)
         .args(&args)
-        .envs(request.env.iter().map(|(k, v)| (k, v)))
+        .envs(process_env(request))
         .current_dir(working_dir(request))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -261,10 +306,22 @@ mod tests {
     }
 
     #[test]
-    fn login_shell_for_default_user() {
+    fn login_shell_for_default_user_keeps_environment() {
         let (program, args) = command_line(&request(&[], None));
         assert_eq!(program, "/usr/sbin/runuser");
-        assert_eq!(args, ["--login", "user"]);
+        assert_eq!(args, ["-u", "user", "--", "/bin/bash", "--login"]);
+    }
+
+    #[test]
+    fn parses_runner_env_file() {
+        let env = parse_env_file("A=1\n\n# c\nB=x=y\nbad line\n=v\nC D=1\n");
+        assert_eq!(
+            env,
+            [
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "x=y".to_string())
+            ]
+        );
     }
 
     #[test]
