@@ -39,16 +39,12 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
     let cli = Cli::parse();
     let config: Config = toml::from_str(
         &std::fs::read_to_string(&cli.config)
             .with_context(|| format!("read {}", cli.config.display()))?,
     )?;
+    init_logging(config.audit_log.as_deref())?;
 
     let host_key = load_or_generate_host_key(&config.host_key)?;
     let ssh_config = Arc::new(russh::server::Config {
@@ -177,6 +173,47 @@ fn expand_home(path: &Path) -> PathBuf {
         (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => path.to_path_buf(),
     }
+}
+
+/// 標準エラーへのログと、`audit` を target にしたイベントだけを JSON Lines で書く監査ログ。
+fn init_logging(audit_log: Option<&Path>) -> Result<()> {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let stderr = tracing_subscriber::fmt::layer().with_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+    );
+    let audit = match audit_log {
+        Some(path) => {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)
+                .with_context(|| format!("open the audit log {}", path.display()))?;
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .flatten_event(true)
+                    .with_current_span(false)
+                    .with_span_list(false)
+                    .with_target(false)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_filter(
+                        tracing_subscriber::filter::Targets::new()
+                            .with_target("audit", tracing::Level::INFO),
+                    ),
+            )
+        }
+        None => None,
+    };
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(audit)
+        .init();
+    Ok(())
 }
 
 fn load_or_generate_host_key(path: &Path) -> Result<PrivateKey> {

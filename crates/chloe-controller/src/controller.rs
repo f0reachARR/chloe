@@ -255,7 +255,7 @@ impl<B: RunnerBackend> Controller<B> {
             workspace.clone(),
             self.inner.resolver.clone(),
         )?;
-        info!(workspace = %workspace.display_name(), key, "starting runner");
+        info!(target: "audit", workspace = %workspace.display_name(), key, "starting runner");
         match self.inner.backend.start(spec).await {
             Ok(vsock) => {
                 *running = Some(Running {
@@ -421,7 +421,7 @@ impl<B: RunnerBackend> Controller<B> {
                 None => None,
             };
             let Some(workspace) = workspace else {
-                warn!(key, "stopping a runner without a workspace");
+                warn!(target: "audit", key, "stopping a runner without a workspace");
                 self.inner.backend.stop(key).await?;
                 let _ = std::fs::remove_file(self.inner.backend.broker_socket(key));
                 report.stopped.push(key.clone());
@@ -446,7 +446,7 @@ impl<B: RunnerBackend> Controller<B> {
                 .store
                 .record_runner(workspace.id, self.inner.backend.node())
                 .await?;
-            info!(workspace = %workspace.display_name(), key, "adopted a running runner");
+            info!(target: "audit", workspace = %workspace.display_name(), key, "adopted a running runner");
             report.adopted.push(key.clone());
             self.schedule_idle_stop(workspace.id);
         }
@@ -468,7 +468,7 @@ impl<B: RunnerBackend> Controller<B> {
             if let Some(current) = running.take() {
                 current.broker.abort();
                 let _ = std::fs::remove_file(self.inner.backend.broker_socket(&key));
-                warn!(key, "a runner stopped without the controller");
+                warn!(target: "audit", key, "a runner stopped without the controller");
                 report.cleared.push(key);
             }
         }
@@ -492,7 +492,7 @@ impl<B: RunnerBackend> Controller<B> {
             return Ok(());
         };
         let key = format!("ws-{workspace_id}");
-        info!(key, "stopping runner");
+        info!(target: "audit", key, "stopping runner");
         // VM の中で再起動を頼むと、ファイルシステムを閉じてから Firecracker が終わる。
         if let Err(error) = request_reboot(&current.vsock, self.inner.stop_timeout).await {
             warn!(key, "failed to ask the VM to stop: {error}");

@@ -7,6 +7,8 @@
 # - 持ち主のないランナーは reconcile で止める。
 # - ポート転送 (ssh -L) で VM の中のサーバーにつながり、転送している SSH の接続があるあいだは
 #   ランナーを止めない。
+# - 監査ログに、ログイン、セッション、ポート転送、ランナー、シークレットの問い合わせが残り、
+#   本物の値と利用者のコマンドの引数は残らない。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +54,7 @@ host_key = "$state/host_key"
 github_url = "http://127.0.0.1:$keys_port"
 database = "$state/chloe.db"
 master_key = "$state/master.key"
+audit_log = "$logs/audit.jsonl"
 idle_timeout_secs = 10
 activity_poll_secs = 3
 reconcile_interval_secs = 5
@@ -147,3 +150,20 @@ echo "--- orphans"
 docker run -d --name "${prefix}ws-999" ubuntu:26.04 sleep 600 >/dev/null
 for _ in $(seq 20); do [ -z "$(docker ps -q --filter "name=^${prefix}ws-999\$")" ] && break; sleep 1; done
 check orphan-stopped "gone" sh -c '[ -z "$(docker ps -q --filter "name=^$0ws-999\$")" ] && echo gone' "$prefix"
+
+echo "--- audit log"
+audit_has() { grep "\"message\":\"$1" "$logs/audit.jsonl" | head -1; }
+check audit-authenticated '"method":"publickey"' audit_has authenticated
+check audit-session '"kind":"exec"' audit_has 'session started'
+check audit-session-ended '"message":"session ended"' audit_has 'session ended'
+check audit-command '"command":"[\"secret\", \"set\", \"anthropic_api_key\"]"' audit_has 'management command'
+check audit-runner '"key":"ws-1"' audit_has 'starting runner'
+check audit-adopted '"message":"adopted a running runner"' audit_has 'adopted'
+check audit-secret '"secret":"anthropic_api_key"' audit_has 'secret served'
+check audit-forward '"port":3000' audit_has 'port forwarding"'
+check audit-forward-failed '3999' audit_has 'port forwarding failed'
+check audit-orphan '"key":"ws-999"' audit_has 'stopping a runner without a workspace'
+check audit-no-secret "0" grep -c real-secret-A "$logs/audit.jsonl"
+check audit-no-args "0" grep -c 'claude -p' "$logs/audit.jsonl"
+check audit-mode "600" stat -c %a "$logs/audit.jsonl"
+

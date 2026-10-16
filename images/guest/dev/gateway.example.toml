@@ -12,6 +12,8 @@ listen = "127.0.0.1:2222"
 host_key = "build/dev/gateway/host_key"
 database = "build/dev/gateway/chloe.db"
 master_key = "build/dev/gateway/master.key"
+# 監査ログ (JSON Lines)。ログイン、セッション、ポート転送、ランナー、シークレットの問い合わせを記録する。
+audit_log = "build/dev/gateway/audit.jsonl"
 idle_timeout_secs = 1800
 
 # GitHub App の設定 (docs/github-app.md)。アプリの Organization のメンバーがログインできる。

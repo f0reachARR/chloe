@@ -79,18 +79,18 @@ async fn answer(line: &str, workspace: &Workspace, resolver: &Resolver) -> Strin
     };
     match resolver.resolve(workspace, kind.name).await {
         Ok(Some(value)) => {
-            info!(workspace = %workspace.display_name(), secret = kind.name, "secret served");
+            info!(target: "audit", workspace = %workspace.display_name(), secret = kind.name, "secret served");
             let mut encoded = serde_json::to_string(value.expose_secret()).unwrap_or_default();
             let answer = format!("{{\"value\":{encoded}}}\n");
             encoded.zeroize();
             answer
         }
         Ok(None) => {
-            warn!(workspace = %workspace.display_name(), secret = kind.name, "secret not available");
+            warn!(target: "audit", workspace = %workspace.display_name(), secret = kind.name, "secret not available");
             error("not available for this workspace")
         }
         Err(e) => {
-            warn!(workspace = %workspace.display_name(), secret = kind.name, "failed to resolve a secret: {e}");
+            warn!(target: "audit", workspace = %workspace.display_name(), secret = kind.name, "failed to resolve a secret: {e}");
             error("failed to resolve the secret")
         }
     }

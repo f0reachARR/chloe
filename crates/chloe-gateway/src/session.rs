@@ -151,7 +151,7 @@ impl Connection {
         match self.authorize(user, key).await {
             Ok(result) => result,
             Err(error) => {
-                warn!(peer = ?self.peer, user, "authentication failed: {error:#}");
+                warn!(target: "audit", peer = %peer_name(self.peer), user, "authentication failed: {error:#}");
                 None
             }
         }
@@ -178,10 +178,12 @@ impl Connection {
             cwd: None,
             tty: state.tty.clone(),
         };
+        // 監査には、利用者のコマンドの引数 (トークンを含むことがある) を残さない。
         info!(
+            target: "audit",
             login = %user.login,
-            workspace = ?user.workspace,
-            command = ?request.command,
+            workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE),
+            kind = if request.command.is_empty() { "shell" } else { "exec" },
             tty = request.tty.is_some(),
             "session started"
         );
@@ -210,7 +212,7 @@ impl Connection {
         };
         let shared = self.shared.clone();
         tokio::spawn(async move {
-            info!(login = %user.login, command = ?args, "management command");
+            info!(target: "audit", login = %user.login, command = ?args, "management command");
             if args == ["github", "login"] {
                 let code = github_login_command(&shared, &user.login, &handle, channel).await;
                 let _ = handle.exit_status_request(channel, code).await;
@@ -259,12 +261,12 @@ impl russh::server::Handler for Connection {
     ) -> Result<Auth, Self::Error> {
         match self.check_key(user, public_key).await {
             Some(authenticated) => {
-                info!(peer = ?self.peer, login = %authenticated.login, workspace = ?authenticated.workspace, "authenticated");
+                info!(target: "audit", peer = %peer_name(self.peer), login = %authenticated.login, workspace = authenticated.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), method = "publickey", "authenticated");
                 self.user = Some(authenticated);
                 Ok(Auth::Accept)
             }
             None => {
-                info!(peer = ?self.peer, user, "rejected");
+                info!(target: "audit", peer = %peer_name(self.peer), user, method = "publickey", "rejected");
                 Ok(Auth::reject())
             }
         }
@@ -317,13 +319,16 @@ impl russh::server::Handler for Connection {
         };
         match outcome {
             Ok(Some(authenticated)) => {
-                info!(peer = ?self.peer, login = %authenticated.login, "authenticated with GitHub Device Flow");
+                info!(target: "audit", peer = %peer_name(self.peer), login = %authenticated.login, workspace = authenticated.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), method = "device_flow", "authenticated");
                 self.user = Some(authenticated);
                 Ok(Auth::Accept)
             }
-            Ok(None) => Ok(Auth::reject()),
+            Ok(None) => {
+                info!(target: "audit", peer = %peer_name(self.peer), user, method = "device_flow", "rejected");
+                Ok(Auth::reject())
+            }
             Err(error) => {
-                warn!(peer = ?self.peer, user, "Device Flow failed: {error:#}");
+                warn!(target: "audit", peer = %peer_name(self.peer), user, method = "device_flow", "rejected: {error:#}");
                 Ok(Auth::reject())
             }
         }
@@ -355,8 +360,9 @@ impl russh::server::Handler for Connection {
             return Ok(());
         };
         info!(
+            target: "audit",
             login = %user.login,
-            workspace = ?user.workspace,
+            workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE),
             host = host_to_connect,
             port,
             "port forwarding"
@@ -552,7 +558,10 @@ async fn relay(
     let code = match result {
         Ok(Some(code)) => code,
         // 利用者がチャネルを閉じた。
-        Ok(None) => return,
+        Ok(None) => {
+            info!(target: "audit", login = %user.login, workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), "session ended");
+            return;
+        }
         Err(error) => {
             warn!("session failed: {error:#}");
             let message = format!("chloe: {error:#}\r\n");
@@ -560,6 +569,7 @@ async fn relay(
             1
         }
     };
+    info!(target: "audit", login = %user.login, workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), code, "session ended");
     let _ = handle.exit_status_request(channel, code).await;
     let _ = handle.eof(channel).await;
     let _ = handle.close(channel).await;
@@ -642,7 +652,7 @@ async fn forward(
     let (session, (mut vsock, buffered)) = match connected {
         Ok(connected) => connected,
         Err(error) => {
-            warn!(login = %user.login, workspace = ?user.workspace, %target, "port forwarding failed: {error:#}");
+            warn!(target: "audit", login = %user.login, workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), %target, "port forwarding failed: {error:#}");
             reply.reject(ChannelOpenFailure::ConnectFailed).await;
             return;
         }
@@ -777,4 +787,10 @@ fn signal_number(signal: &Sig) -> Option<i32> {
         Sig::TERM => 15,
         Sig::Custom(_) => return None,
     })
+}
+
+/// ログに書く接続元。
+fn peer_name(peer: Option<std::net::SocketAddr>) -> String {
+    peer.map(|p| p.to_string())
+        .unwrap_or_else(|| "unknown".into())
 }

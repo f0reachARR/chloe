@@ -64,7 +64,7 @@ impl GitHubTokens {
                 "refresh the GitHub token (run `chloe github login` if this keeps failing)",
             )?;
         store_user_token(&self.secrets, login, &token).await?;
-        info!(login, "refreshed the GitHub user token");
+        info!(target: "audit", login, "refreshed the GitHub user token");
         Ok(Some(token.access_token.into()))
     }
 }

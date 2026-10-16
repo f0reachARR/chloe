@@ -18,6 +18,10 @@ pub struct Config {
     pub github_url: String,
     /// SQLite のデータベース。なければ作る。
     pub database: PathBuf,
+    /// 監査ログ (JSON Lines) を追記するファイル。ログイン、セッション、ポート転送、管理コマンド、
+    /// ランナーの起動と停止、シークレットの問い合わせを記録する。値は書かない。
+    #[serde(default)]
+    pub audit_log: Option<PathBuf>,
     /// シークレットのマスター鍵。なければ生成する。
     pub master_key: PathBuf,
     /// 最後の接続が閉じてからランナーを止めるまでの秒数。
