@@ -188,7 +188,12 @@ impl Policy {
         // 一部だけ差し替えたヘッダーが残らないようにする。
         let mut edits = Vec::new();
         for rule in &self.rules {
-            let bound = host_matches(&host, &rule.hosts);
+            // 同じプレースホルダーを複数の規則で差し替えることがある (git と API など)。
+            // どれかの規則がこの宛先を許していれば、束縛された宛先とみなす。
+            let bound = self
+                .rules
+                .iter()
+                .any(|r| r.placeholder == rule.placeholder && host_matches(&host, &r.hosts));
             for (index, (name, value)) in request.headers.iter().enumerate() {
                 if !rule.contains(value) {
                     continue;
@@ -517,6 +522,32 @@ mod tests {
         // Basic 認証で包んだプレースホルダーも、登録していない宛先へは送らせない。
         let leaked = Req::https("httpbin.org")
             .header("authorization", &basic)
+            .eval(&p);
+        assert_eq!(reason(leaked), BlockReason::PlaceholderToUnboundHost);
+    }
+
+    #[test]
+    fn one_placeholder_with_rules_for_different_hosts() {
+        let config: PolicyConfig = serde_json::from_value(serde_json::json!({
+            "allow": ["github.com", "api.github.com", "example.org"],
+            "inject": [
+                { "name": "gh-git", "placeholder": GH_PH, "hosts": ["github.com"], "header": "authorization", "format": "basic-password", "secret_env": "G" },
+                { "name": "gh-api", "placeholder": GH_PH, "hosts": ["api.github.com"], "header": "authorization", "secret_env": "G" }
+            ]
+        }))
+        .unwrap();
+        let p = Policy::new(config, |_| Ok("real".into())).unwrap();
+        let mut api =
+            Req::https("api.github.com").header("authorization", &format!("token {GH_PH}"));
+        assert_eq!(
+            api.eval(&p),
+            Decision::Allowed {
+                injected: vec!["gh-api".into()]
+            }
+        );
+        assert_eq!(api.header_value("authorization"), "token real");
+        let leaked = Req::https("example.org")
+            .header("authorization", &format!("token {GH_PH}"))
             .eval(&p);
         assert_eq!(reason(leaked), BlockReason::PlaceholderToUnboundHost);
     }
