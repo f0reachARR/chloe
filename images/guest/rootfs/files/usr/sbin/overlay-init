@@ -1,0 +1,22 @@
+#!/bin/sh
+# 読み取り専用のルートに tmpfs を重ねてから systemd を起動する。
+# カーネルの引数で init=/sbin/overlay-init を指定して PID 1 として動かす。
+set -e
+
+mount -t tmpfs -o mode=0755 tmpfs /mnt
+mkdir -p /mnt/upper /mnt/work /mnt/root
+mount -t overlay overlay -o lowerdir=/,upperdir=/mnt/upper,workdir=/mnt/work /mnt/root
+
+# docker export では空になるファイルをここで用意する。
+echo chloe > /mnt/root/etc/hostname
+printf '127.0.0.1 localhost\n127.0.1.1 chloe\n::1 localhost ip6-localhost ip6-loopback\n' > /mnt/root/etc/hosts
+ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/root/etc/resolv.conf
+: > /mnt/root/etc/machine-id
+
+# カーネルが自動でマウントした devtmpfs を新しいルートへ移す。
+mount --move /dev /mnt/root/dev
+
+mkdir -p /mnt/root/media/root-ro
+cd /mnt/root
+pivot_root . media/root-ro
+exec chroot . /sbin/init "$@" < dev/console > dev/console 2>&1
