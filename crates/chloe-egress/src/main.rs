@@ -10,6 +10,7 @@
 mod ca;
 mod control;
 mod log;
+mod secrets;
 mod service;
 
 use std::convert::Infallible;
@@ -70,9 +71,13 @@ struct Cli {
     /// 要求のログ (JSON Lines)。
     #[arg(long)]
     log: Option<PathBuf>,
-    /// 方針と本物の値を動いたまま入れ替えるための制御用の Unix ソケット。
+    /// 方針を動いたまま入れ替えるための制御用の Unix ソケット。
     #[arg(long)]
     control: Option<PathBuf>,
+    /// 本物の値を問い合わせるコントロールプレーンの Unix ソケット。指定しなければ、
+    /// 開発用にこのプロセスの環境変数から読む。
+    #[arg(long)]
+    broker: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -87,8 +92,11 @@ async fn main() -> Result<()> {
     let config: PolicyConfig = serde_json::from_slice(
         &std::fs::read(&cli.policy).with_context(|| format!("read {}", cli.policy.display()))?,
     )?;
-    // 起動時の本物の値は、ランナーの環境変数から読む。
-    let policy = control::SharedPolicy::new(control::build_policy(config, &Default::default())?);
+    let policy = control::SharedPolicy::new(chloe_policy::Policy::new(config));
+    let secrets = match &cli.broker {
+        Some(path) => secrets::SecretSource::Broker(path.clone()),
+        None => secrets::SecretSource::Env,
+    };
     let ca = ca::load_or_generate(&cli.ca_dir)?;
     let logger = Arc::new(Logger::open(cli.log.as_deref())?);
 
@@ -128,6 +136,7 @@ async fn main() -> Result<()> {
         client,
         logger: logger.clone(),
         ca_pem: ca.cert_pem.clone().into(),
+        secrets,
     });
 
     let tls_config = TlsServerConfig::new()

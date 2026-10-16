@@ -3,14 +3,12 @@
 //! 接続ごとに JSON を一行受け取り、一行で答える。
 //!
 //! ```json
-//! {"policy": {...PolicyConfig...}, "secrets": {"CHLOE_SECRET_GITHUB_TOKEN": "..."}}
+//! {"policy": {...PolicyConfig...}}
 //! ```
 //!
-//! 差し替えの規則の `secret_env` は、まず `secrets` から、なければプロキシの環境変数から引く。
-//! ソケットは権限 600 で作り、プロキシと同じ利用者 (ランナーの状態のディレクトリの持ち主) だけが
+//! 本物の値は送らない (差し替えのたびに問い合わせる。[`crate::secrets`])。ソケットは権限 600 で作り、プロキシと同じ利用者 (ランナーの状態のディレクトリの持ち主) だけが
 //! つなげる。
 
-use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -40,22 +38,10 @@ impl SharedPolicy {
     }
 }
 
-/// 方針の設定と本物の値から方針を作る。値はまず `secrets` から、なければ環境変数から引く。
-pub fn build_policy(config: PolicyConfig, secrets: &BTreeMap<String, String>) -> Result<Policy> {
-    Ok(Policy::new(config, |rule| {
-        secrets
-            .get(&rule.secret_env)
-            .cloned()
-            .or_else(|| std::env::var(&rule.secret_env).ok())
-            .ok_or_else(|| format!("{} is not set", rule.secret_env))
-    })?)
-}
-
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Update {
     policy: PolicyConfig,
-    #[serde(default)]
-    secrets: BTreeMap<String, String>,
 }
 
 pub async fn serve(path: &Path, shared: SharedPolicy) -> Result<()> {
@@ -91,8 +77,7 @@ pub async fn serve(path: &Path, shared: SharedPolicy) -> Result<()> {
 fn apply(line: &str, shared: &SharedPolicy) -> Result<usize> {
     let update: Update = serde_json::from_str(line).context("invalid update")?;
     let rules = update.policy.inject.len();
-    let policy = build_policy(update.policy, &update.secrets)?;
-    shared.replace(policy);
+    shared.replace(Policy::new(update.policy));
     Ok(rules)
 }
 
@@ -101,38 +86,42 @@ mod tests {
     use super::*;
     use chloe_policy::{Decision, Request};
 
-    fn evaluate(shared: &SharedPolicy, auth: &str) -> (Decision, String) {
-        let mut headers = vec![("authorization".to_string(), auth.as_bytes().to_vec())];
-        let decision = shared.current().evaluate(&mut Request {
+    fn injected(shared: &SharedPolicy, auth: &str) -> Vec<String> {
+        let headers = vec![("authorization".to_string(), auth.as_bytes().to_vec())];
+        let (decision, substitutions) = shared.current().evaluate(&Request {
             host: "api.github.com",
             sni: Some("api.github.com"),
             tls: true,
             method: "GET",
             path_and_query: "/user",
-            headers: &mut headers,
+            headers: &headers,
             body: None,
         });
-        (decision, String::from_utf8(headers[0].1.clone()).unwrap())
+        match decision {
+            Decision::Allowed { .. } => chloe_policy::Policy::secrets_needed(&substitutions),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
-    fn update(secret: &str) -> String {
+    fn update(placeholder: &str) -> String {
         serde_json::json!({
             "policy": {
                 "allow": ["api.github.com"],
-                "inject": [{ "name": "gh", "placeholder": "ghu_chloeX", "hosts": ["api.github.com"], "header": "authorization", "secret_env": "CHLOE_SECRET_GITHUB_TOKEN" }]
-            },
-            "secrets": { "CHLOE_SECRET_GITHUB_TOKEN": secret }
+                "inject": [{ "name": "gh", "placeholder": placeholder, "hosts": ["api.github.com"], "header": "authorization", "secret_env": "CHLOE_SECRET_GITHUB_TOKEN" }]
+            }
         })
         .to_string()
     }
 
     #[tokio::test]
-    async fn replaces_secrets_over_the_socket() {
+    async fn replaces_the_policy_over_the_socket() {
         let dir = std::env::temp_dir().join(format!("chloe-control-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("egress.sock");
-        let shared =
-            SharedPolicy::new(build_policy(PolicyConfig::default(), &BTreeMap::new()).unwrap());
+        let shared = SharedPolicy::new(Policy::new(PolicyConfig {
+            allow: vec!["api.github.com".into()],
+            ..Default::default()
+        }));
         tokio::spawn({
             let socket = socket.clone();
             let shared = shared.clone();
@@ -161,15 +150,20 @@ mod tests {
             }
         };
 
-        assert!(send(update("ghu_first")).await.contains("\"ok\":true"));
-        assert_eq!(evaluate(&shared, "token ghu_chloeX").1, "token ghu_first");
-        assert!(send(update("ghu_second")).await.contains("\"ok\":true"));
-        assert_eq!(evaluate(&shared, "token ghu_chloeX").1, "token ghu_second");
+        assert!(injected(&shared, "token ghu_chloeA").is_empty());
+        assert!(send(update("ghu_chloeA")).await.contains("\"ok\":true"));
+        assert_eq!(
+            injected(&shared, "token ghu_chloeA"),
+            ["CHLOE_SECRET_GITHUB_TOKEN"]
+        );
 
-        // 壊れた更新は拒否し、今の方針を変えない。
-        let bad = serde_json::json!({ "policy": { "inject": [{ "name": "x", "placeholder": "p", "hosts": [], "header": "h", "secret_env": "CHLOE_TEST_UNSET_VAR" }] } });
-        assert!(send(bad.to_string()).await.contains("error"));
-        assert_eq!(evaluate(&shared, "token ghu_chloeX").1, "token ghu_second");
+        // 本物の値を含む更新は受け付けない (値は問い合わせで渡す)。
+        let with_secret = serde_json::json!({ "policy": {}, "secrets": { "X": "v" } });
+        assert!(send(with_secret.to_string()).await.contains("error"));
+        assert_eq!(
+            injected(&shared, "token ghu_chloeA"),
+            ["CHLOE_SECRET_GITHUB_TOKEN"]
+        );
         let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         std::fs::remove_dir_all(&dir).unwrap();

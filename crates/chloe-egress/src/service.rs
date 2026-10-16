@@ -28,6 +28,7 @@ pub struct EgressService<C> {
     pub client: C,
     pub logger: Arc<Logger>,
     pub ca_pem: Arc<str>,
+    pub secrets: crate::secrets::SecretSource,
 }
 
 impl<C> Service<Request> for EgressService<C>
@@ -98,13 +99,14 @@ where
             Some(query) => format!("{path}?{query}"),
             None => path.clone(),
         };
-        let decision = self.policy.current().evaluate(&mut PolicyRequest {
+        let policy = self.policy.current();
+        let (decision, substitutions) = policy.evaluate(&PolicyRequest {
             host: &host,
             sni: sni.as_deref(),
             tls: sni.is_some(),
             method: &method,
             path_and_query: &path_and_query,
-            headers: &mut headers,
+            headers: &headers,
             body: scanned_body.as_deref(),
         });
 
@@ -142,6 +144,33 @@ where
             }
             Decision::Allowed { injected } => injected,
         };
+
+        // 本物の値はここで取り出し、ヘッダーを書き換えたらすぐ捨てる。
+        if !substitutions.is_empty() {
+            let names = chloe_policy::Policy::secrets_needed(&substitutions);
+            let applied = match self.secrets.fetch(&names).await {
+                Ok(values) => policy
+                    .apply(&mut headers, &substitutions, |name| {
+                        values.get(name).cloned()
+                    })
+                    .map_err(|name| anyhow::anyhow!("no value for {name}")),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = applied {
+                tracing::warn!("failed to get a secret: {error:#}");
+                log(
+                    Some(503),
+                    "blocked:secret-unavailable",
+                    &injected,
+                    None,
+                    Some(format!("{error:#}")),
+                );
+                return Ok(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the secret for this request is not available",
+                ));
+            }
+        }
 
         // 差し替えたヘッダーを書き戻す。名前の順は元のまま保つ。
         parts.headers.clear();
