@@ -580,6 +580,20 @@ version = "0.1.0"
 [[package]]
 name = "chloe-controller"
 version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "chloe-agent-proto",
+ "chloe-policy",
+ "chloe-secrets",
+ "rand",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "chloe-egress"

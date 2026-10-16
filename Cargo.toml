@@ -11,7 +11,9 @@ publish = false
 
 [workspace.dependencies]
 chloe-agent-proto = { path = "crates/chloe-agent-proto" }
+chloe-controller = { path = "crates/chloe-controller" }
 chloe-policy = { path = "crates/chloe-policy" }
+chloe-secrets = { path = "crates/chloe-secrets" }
 
 aes-gcm = { version = "0.11.1", features = ["getrandom"] }
 anyhow = "1.0.104"
