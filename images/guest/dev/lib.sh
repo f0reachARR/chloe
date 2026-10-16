@@ -47,7 +47,7 @@ boot() {
     local log="$dev_logs/$name.log"
     start_vm
     "$runner" exec --user root -- \
-        sh -c "mount -o ro /dev/vdd /mnt && bash /mnt/$script $*" > "$log" 2>&1 || true
+        sh -c "mount -o ro /dev/vdd /mnt && bash /mnt/$script $*" < /dev/null > "$log" 2>&1 || true
     stop_vm
     grep -a '^==RESULT==' "$log"
 }
