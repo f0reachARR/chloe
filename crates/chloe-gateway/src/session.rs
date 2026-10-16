@@ -15,7 +15,7 @@ use chloe_agent_proto::{
 use chloe_controller::docker::DockerBackend;
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
 use chloe_controller::{Controller, Error as ControllerError};
-use chloe_secrets::Owner;
+use chloe_github::{DeviceCode, GitHubApp, Poll};
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Session};
 use russh::{Channel, ChannelId, Pty, Sig};
@@ -39,30 +39,14 @@ pub struct Shared {
     pub config: Config,
     pub keys: GitHubKeys,
     pub controller: Controller<DockerBackend>,
+    pub github: Option<Arc<GitHubApp>>,
 }
 
 impl Shared {
-    /// 利用者が入れるワークスペースの持ち主 (本人と、所属する team や Organization)。
-    pub fn owners_for(&self, login: &str) -> Vec<Owner> {
-        let mut owners = vec![Owner::User(login.to_ascii_lowercase())];
-        for (owner, members) in &self.config.memberships {
-            if members.iter().any(|m| m.eq_ignore_ascii_case(login))
-                && let Ok(owner) = owner.parse()
-            {
-                owners.push(owner);
-            }
-        }
-        owners
-    }
-
-    pub fn can_access(&self, login: &str, owner: &Owner) -> bool {
-        self.owners_for(login).contains(owner)
-    }
-
     /// 入るワークスペースを決める。指定がなければ個人の default を (なければ作って) 使う。
     async fn resolve_workspace(&self, login: &str, spec: Option<&str>) -> Result<Workspace> {
         let target = WorkspaceRef::parse(spec.unwrap_or(DEFAULT_WORKSPACE), login)?;
-        if !self.can_access(login, &target.owner) {
+        if !self.can_access(login, &target.owner).await? {
             bail!("no such workspace: {target}");
         }
         let store = self.controller.store();
@@ -105,6 +89,8 @@ pub struct Connection {
     peer: Option<std::net::SocketAddr>,
     user: Option<Authenticated>,
     channels: HashMap<ChannelId, ChannelState>,
+    /// keyboard-interactive で進めている Device Flow。
+    device: Option<(Authenticated, DeviceCode)>,
 }
 
 impl Connection {
@@ -114,18 +100,19 @@ impl Connection {
             peer,
             user: None,
             channels: HashMap::new(),
+            device: None,
         }
     }
 
-    async fn authorize(&self, user: &str, key: &PublicKey) -> Result<Option<Authenticated>> {
+    /// ログイン名とワークスペースだけで判断できる確認。鍵や Device Flow の前に行う。
+    async fn admit(&self, user: &str) -> Result<Option<Authenticated>> {
         let user = parse_user(user)?;
-        if !self.shared.config.is_allowed(&user.login) {
+        if !self.shared.is_allowed(&user.login).await? {
             return Ok(None);
         }
-        // ワークスペースを指定していれば、GitHub に問い合わせる前に存在と所属を確かめる。
         if let Some(spec) = &user.workspace {
             let target = WorkspaceRef::parse(spec, &user.login)?;
-            if !self.shared.can_access(&user.login, &target.owner)
+            if !self.shared.can_access(&user.login, &target.owner).await?
                 || self
                     .shared
                     .controller
@@ -137,13 +124,20 @@ impl Connection {
                 return Ok(None);
             }
         }
-        if !self.shared.keys.is_registered(&user.login, key).await? {
-            return Ok(None);
-        }
         Ok(Some(Authenticated {
             login: user.login.to_ascii_lowercase(),
             workspace: user.workspace,
         }))
+    }
+
+    async fn authorize(&self, user: &str, key: &PublicKey) -> Result<Option<Authenticated>> {
+        let Some(admitted) = self.admit(user).await? else {
+            return Ok(None);
+        };
+        if !self.shared.keys.is_registered(&admitted.login, key).await? {
+            return Ok(None);
+        }
+        Ok(Some(admitted))
     }
 
     async fn check_key(&self, user: &str, key: &PublicKey) -> Option<Authenticated> {
@@ -210,6 +204,13 @@ impl Connection {
         let shared = self.shared.clone();
         tokio::spawn(async move {
             info!(login = %user.login, command = ?args, "management command");
+            if args == ["github", "login"] {
+                let code = github_login_command(&shared, &user.login, &handle, channel).await;
+                let _ = handle.exit_status_request(channel, code).await;
+                let _ = handle.eof(channel).await;
+                let _ = handle.close(channel).await;
+                return;
+            }
             let output = commands::run(&shared, &user.login, &args, &stdin).await;
             let _ = handle.data(channel, output.stdout.into_bytes()).await;
             let _ = handle
@@ -257,6 +258,65 @@ impl russh::server::Handler for Connection {
             }
             None => {
                 info!(peer = ?self.peer, user, "rejected");
+                Ok(Auth::reject())
+            }
+        }
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<russh::server::Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        let Some(github) = self.shared.github.clone() else {
+            return Ok(Auth::reject());
+        };
+        let outcome = match (response, self.device.take()) {
+            // 最初の呼び出し。Device Flow を始めてコードを見せる。
+            (None, _) => match self.admit(user).await {
+                Ok(Some(admitted)) => match github.start_device_flow().await {
+                    Ok(device) => {
+                        let instructions = format!(
+                            "Sign in to GitHub as {}:\n  1. Open {}\n  2. Enter the code {}\n",
+                            admitted.login, device.verification_uri, device.user_code
+                        );
+                        self.device = Some((admitted, device));
+                        return Ok(device_prompt(instructions));
+                    }
+                    Err(error) => Err(anyhow::Error::from(error)),
+                },
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            },
+            // 利用者が Enter を押した。承認されるまで少し待つ。
+            (Some(_), Some((admitted, device))) => {
+                let deadline = tokio::time::Instant::now() + KI_POLL_WAIT;
+                match finish_device_flow(&self.shared, &github, &admitted.login, &device, deadline)
+                    .await
+                {
+                    Ok(true) => Ok(Some(admitted)),
+                    Ok(false) => {
+                        self.device = Some((admitted, device));
+                        return Ok(device_prompt(
+                            "Not authorized yet. Approve the code on GitHub, then press Enter.\n"
+                                .into(),
+                        ));
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Some(_), None) => Ok(None),
+        };
+        match outcome {
+            Ok(Some(authenticated)) => {
+                info!(peer = ?self.peer, login = %authenticated.login, "authenticated with GitHub Device Flow");
+                self.user = Some(authenticated);
+                Ok(Auth::Accept)
+            }
+            Ok(None) => Ok(Auth::reject()),
+            Err(error) => {
+                warn!(peer = ?self.peer, user, "Device Flow failed: {error:#}");
                 Ok(Auth::reject())
             }
         }
@@ -439,8 +499,18 @@ async fn relay(
         let workspace = shared
             .resolve_workspace(&user.login, user.workspace.as_deref())
             .await?;
+        let mut extra = Vec::new();
+        match shared.github_token_for(&workspace).await {
+            Ok(Some(token)) => extra.push(("github_token".to_string(), token)),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(workspace = %workspace.display_name(), "no GitHub token for the runner: {error:#}");
+                let message = format!("chloe: GitHub is not available in this session: {error:#}\r\n");
+                let _ = handle.extended_data(channel, 1, message.into_bytes()).await;
+            }
+        }
         // セッションを持っているあいだは、ランナーが止められない。
-        let session = shared.controller.open(&workspace).await?;
+        let session = shared.controller.open(&workspace, extra).await?;
         relay_inner(&handle, channel, &session.vsock, request, input).await
     }
     .await;
@@ -497,6 +567,95 @@ async fn relay_inner(
                 Some(AgentMessage::Error(message)) => bail!("guest-agent: {message}"),
                 None => bail!("guest-agent closed the connection"),
             },
+        }
+    }
+}
+
+/// keyboard-interactive で一度に承認を待つ時間。
+const KI_POLL_WAIT: Duration = Duration::from_secs(30);
+
+fn device_prompt(instructions: String) -> Auth {
+    Auth::Partial {
+        name: "chloe".into(),
+        instructions: instructions.into(),
+        prompts: vec![(
+            "Press Enter after you have approved the code: ".into(),
+            true,
+        )]
+        .into(),
+    }
+}
+
+/// Device Flow の承認を `deadline` まで待つ。承認されたら、トークンの持ち主が `login` であることを
+/// 確かめて保存し、`true` を返す。まだ承認されていなければ `false` を返す。
+async fn finish_device_flow(
+    shared: &Shared,
+    github: &GitHubApp,
+    login: &str,
+    device: &DeviceCode,
+    deadline: tokio::time::Instant,
+) -> Result<bool> {
+    loop {
+        match github.poll_device_flow(device).await? {
+            Poll::Token(token) => {
+                let owner = github.user_login(&token.access_token).await?;
+                if !owner.eq_ignore_ascii_case(login) {
+                    bail!("signed in to GitHub as {owner}, not {login}");
+                }
+                shared.store_user_token(login, &token).await?;
+                return Ok(true);
+            }
+            Poll::Pending { interval } => {
+                let next = tokio::time::Instant::now() + Duration::from_secs(interval);
+                if next > deadline {
+                    return Ok(false);
+                }
+                tokio::time::sleep_until(next).await;
+            }
+            Poll::Failed(message) => bail!("GitHub sign-in failed: {message}"),
+        }
+    }
+}
+
+/// `chloe github login`：Device Flow で GitHub のユーザートークンを得て保存する。
+async fn github_login_command(
+    shared: &Shared,
+    login: &str,
+    handle: &Handle,
+    channel: ChannelId,
+) -> u32 {
+    let say = |text: String| async move {
+        let _ = handle.data(channel, text.into_bytes()).await;
+    };
+    let Some(github) = &shared.github else {
+        say("chloe: the GitHub App is not configured\n".into()).await;
+        return 1;
+    };
+    let device = match github.start_device_flow().await {
+        Ok(device) => device,
+        Err(error) => {
+            say(format!("chloe: {error}\n")).await;
+            return 1;
+        }
+    };
+    say(format!(
+        "Sign in to GitHub as {login}:\n  1. Open {}\n  2. Enter the code {}\nWaiting for approval...\n",
+        device.verification_uri, device.user_code
+    ))
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(device.expires_in);
+    match finish_device_flow(shared, github, login, &device, deadline).await {
+        Ok(true) => {
+            say("Signed in. New and restarted workspaces get the GitHub token.\n".into()).await;
+            0
+        }
+        Ok(false) => {
+            say("chloe: the code expired before it was approved\n".into()).await;
+            1
+        }
+        Err(error) => {
+            say(format!("chloe: {error:#}\n")).await;
+            1
         }
     }
 }

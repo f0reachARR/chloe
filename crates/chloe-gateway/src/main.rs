@@ -3,6 +3,7 @@
 //! SSH ユーザー名の GitHub のログイン名と、GitHub に登録された公開鍵で利用者を認証し、
 //! ワークスペースの VM の guest-agent へシェルやコマンドを中継する。
 
+mod access;
 mod auth;
 mod commands;
 mod config;
@@ -50,7 +51,16 @@ async fn main() -> Result<()> {
 
     let host_key = load_or_generate_host_key(&config.host_key)?;
     let ssh_config = Arc::new(russh::server::Config {
-        methods: russh::MethodSet::from(&[russh::MethodKind::PublicKey][..]),
+        methods: if config.github_app.is_some() {
+            russh::MethodSet::from(
+                &[
+                    russh::MethodKind::PublicKey,
+                    russh::MethodKind::KeyboardInteractive,
+                ][..],
+            )
+        } else {
+            russh::MethodSet::from(&[russh::MethodKind::PublicKey][..])
+        },
         auth_rejection_time: Duration::from_secs(1),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
         keys: vec![host_key],
@@ -59,10 +69,21 @@ async fn main() -> Result<()> {
     });
 
     let controller = build_controller(&config).await?;
+    let github = match &config.github_app {
+        Some(path) => {
+            let app_config = chloe_github::AppConfig::load(&expand_home(path))?;
+            let resolver = chloe_secrets::Resolver { connect: None };
+            Some(Arc::new(
+                chloe_github::GitHubApp::new(app_config, &resolver).await?,
+            ))
+        }
+        None => None,
+    };
     let listen = config.listen;
     let shared = Arc::new(Shared {
         keys: GitHubKeys::new(&config.github_url)?,
         controller,
+        github,
         config,
     });
     tracing::info!(%listen, "listening");
@@ -113,6 +134,14 @@ impl russh::server::Server for Server {
 
     fn new_client(&mut self, peer: Option<std::net::SocketAddr>) -> Connection {
         Connection::new(self.shared.clone(), peer)
+    }
+}
+
+/// 先頭の `~/` をホームディレクトリに直す。
+fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => path.to_path_buf(),
     }
 }
 

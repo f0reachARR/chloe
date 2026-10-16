@@ -9,6 +9,9 @@
 //! chloe secret list
 //! chloe secret set KIND      (値は標準入力から読む)
 //! chloe secret rm KIND
+//! chloe github login         (Device Flow で GitHub のトークンを得る)
+//! chloe github status
+//! chloe github logout
 //! ```
 //!
 //! ワークスペースの NAME は SSH と同じ書き方 (`name`、`org/name`、`org/team/name`)。
@@ -16,7 +19,6 @@
 
 use chloe_controller::catalog;
 use chloe_controller::workspace::{RootMode, WorkspaceRef};
-use chloe_secrets::Owner;
 
 use crate::session::Shared;
 
@@ -76,6 +78,8 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
         ["secret", "list"] => secret_list(shared, login).await,
         ["secret", "set", kind] => secret_set(shared, login, kind, stdin).await,
         ["secret", "rm", kind] => secret_rm(shared, login, kind).await,
+        ["github", "status"] => github_status(shared, login).await,
+        ["github", "logout"] => github_logout(shared, login).await,
         [] | ["help"] => Ok(help()),
         _ => Err(format!(
             "unknown command: chloe {}\n{}",
@@ -92,7 +96,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds: Vec<&str> = catalog::KINDS.iter().map(|k| k.name).collect();
     format!(
-        "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list\n  chloe secret set KIND   (reads the value from stdin)\n  chloe secret rm KIND\nsecret kinds: {}\n",
+        "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list\n  chloe secret set KIND   (reads the value from stdin)\n  chloe secret rm KIND\n  chloe github login|status|logout\nsecret kinds: {}\n",
         kinds.join(", ")
     )
 }
@@ -101,7 +105,12 @@ async fn ws_list(shared: &Shared, login: &str) -> Result<String, String> {
     let workspaces = shared
         .controller
         .store()
-        .list(&shared.owners_for(login))
+        .list(
+            &shared
+                .owners_for(login)
+                .await
+                .map_err(|e| format!("{e:#}"))?,
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(workspaces
@@ -117,7 +126,11 @@ async fn ws_create(
     mode: RootMode,
 ) -> Result<String, String> {
     let target = WorkspaceRef::parse(name, login).map_err(|e| e.to_string())?;
-    if !shared.can_access(login, &target.owner) {
+    if !shared
+        .can_access(login, &target.owner)
+        .await
+        .map_err(|e| format!("{e:#}"))?
+    {
         return Err(format!("you are not a member of {}", target.owner));
     }
     let ws = shared
@@ -136,7 +149,11 @@ async fn find(
 ) -> Result<chloe_controller::workspace::Workspace, String> {
     let target = WorkspaceRef::parse(name, login).map_err(|e| e.to_string())?;
     let not_found = || format!("no such workspace: {name}");
-    if !shared.can_access(login, &target.owner) {
+    if !shared
+        .can_access(login, &target.owner)
+        .await
+        .map_err(|e| format!("{e:#}"))?
+    {
         return Err(not_found());
     }
     shared
@@ -199,8 +216,37 @@ async fn ws_rm(shared: &Shared, login: &str, name: &str) -> Result<String, Strin
     ))
 }
 
-fn personal(login: &str) -> Owner {
-    Owner::User(login.to_ascii_lowercase())
+use crate::access::personal;
+
+async fn github_status(shared: &Shared, login: &str) -> Result<String, String> {
+    if shared.github.is_none() {
+        return Ok("the GitHub App is not configured\n".into());
+    }
+    match shared
+        .load_user_token(login)
+        .await
+        .map_err(|e| format!("{e:#}"))?
+    {
+        Some(token) => Ok(match token.expires_at {
+            Some(at) => format!(
+                "signed in (the token is refreshed automatically; it expires at UNIX time {at})\n"
+            ),
+            None => "signed in\n".into(),
+        }),
+        None => Ok("not signed in (run `chloe github login`)\n".into()),
+    }
+}
+
+async fn github_logout(shared: &Shared, login: &str) -> Result<String, String> {
+    let removed = shared
+        .delete_user_token(login)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(if removed {
+        "signed out (running workspaces keep the old token until they stop)\n".into()
+    } else {
+        "not signed in\n".into()
+    })
 }
 
 fn known_kind(kind: &str) -> Result<(), String> {

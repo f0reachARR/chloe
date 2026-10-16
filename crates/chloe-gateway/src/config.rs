@@ -23,11 +23,15 @@ pub struct Config {
     /// 最後の接続が閉じてからランナーを止めるまでの秒数。
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
-    /// ログインを許す GitHub のログイン名。GitHub App による Organization の所属の確認を
-    /// 入れるまでは、ここで絞る。
+    /// GitHub App の設定 (`github-app.toml`)。あれば、アプリの Organization のメンバーが
+    /// ログインでき、Device Flow と所属の確認が使える。
+    #[serde(default)]
+    pub github_app: Option<PathBuf>,
+    /// ログインを許す GitHub のログイン名。GitHub App の Organization のメンバーに加えて許す。
+    #[serde(default)]
     pub allowed_users: Vec<String>,
     /// team と Organization のワークスペースに入れる利用者 (持ち主 → ログイン名)。
-    /// GitHub App による所属の確認を入れるまでの仮のもの。
+    /// GitHub 上の所属に加えて許す (開発用)。
     #[serde(default)]
     pub memberships: BTreeMap<String, Vec<String>>,
     /// すべてのワークスペースに共通の許可リスト。
