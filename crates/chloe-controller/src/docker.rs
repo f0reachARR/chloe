@@ -122,6 +122,29 @@ impl RunnerBackend for DockerBackend {
         Ok(())
     }
 
+    async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let secrets: std::collections::BTreeMap<&str, &str> = spec
+            .secrets
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.expose_secret()))
+            .collect();
+        let line = serde_json::json!({ "policy": spec.policy, "secrets": secrets }).to_string();
+        let socket = self.state_dir(&spec.key).join("egress.sock");
+        let mut stream = tokio::net::UnixStream::connect(&socket).await?;
+        stream.write_all(format!("{line}\n").as_bytes()).await?;
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).await?;
+        if response.contains("\"ok\":true") {
+            Ok(())
+        } else {
+            Err(Error::Runner(format!(
+                "egress rejected the update: {}",
+                response.trim()
+            )))
+        }
+    }
+
     async fn is_running(&self, key: &str) -> Result<bool, Error> {
         let output = Command::new("docker")
             .args(["inspect", "-f", "{{.State.Running}}", &self.container(key)])

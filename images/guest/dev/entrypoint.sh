@@ -86,6 +86,7 @@ EOF
         --policy "${CHLOE_POLICY:-/opt/chloe/policy.dev.json}" \
         --ca-dir /state/egress \
         --log "$logs/requests.jsonl" \
+        --control /state/egress.sock \
         > "$logs/egress.log" 2>&1 &
     proxy_pid=$!
     # 待ち受けを始めるまで待つ。設定の読み込みに失敗するとプロキシは終了する。

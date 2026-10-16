@@ -30,6 +30,9 @@ pub trait RunnerBackend: Send + Sync + 'static {
     /// ランナーを止める。VM の中のファイルシステムは、先に VM を止めて閉じておく。
     fn stop(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
     fn is_running(&self, key: &str) -> impl Future<Output = Result<bool, Error>> + Send;
+    /// 動いているランナーのプロキシの方針と本物の値を入れ替える。VM の環境変数
+    /// (プレースホルダー) は変えないので、新しい種類のシークレットには再起動が要る。
+    fn update(&self, spec: RunnerSpec) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// すべてのワークスペースに共通の許可リスト。

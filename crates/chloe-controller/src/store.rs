@@ -77,6 +77,14 @@ impl Store {
         row.map(|row| workspace_from_row(&row)).transpose()
     }
 
+    pub async fn get(&self, id: i64) -> Result<Option<Workspace>, Error> {
+        let row = sqlx::query("SELECT id, owner, name, root_mode FROM workspaces WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| workspace_from_row(&row)).transpose()
+    }
+
     /// 持ち主のどれかに属するワークスペースの一覧。
     pub async fn list(&self, owners: &[Owner]) -> Result<Vec<Workspace>, Error> {
         let mut workspaces = Vec::new();

@@ -157,17 +157,63 @@ impl<B: RunnerBackend> Controller<B> {
         {
             return Ok(vsock.clone());
         }
+        let spec = self.build(workspace, extra).await?;
+        info!(workspace = %workspace.display_name(), key, "starting runner");
+        let vsock = self.inner.backend.start(spec).await?;
+        *running = Some(vsock.clone());
+        Ok(vsock)
+    }
+
+    /// 動いているランナーのワークスペースの一覧。
+    pub async fn running(&self) -> Result<Vec<Workspace>, Error> {
+        let ids: Vec<i64> = self.inner.runners.lock().unwrap().keys().copied().collect();
+        let mut workspaces = Vec::new();
+        for id in ids {
+            let state = self.state(id);
+            if state.lifecycle.lock().await.is_some()
+                && let Some(ws) = self.inner.store.get(id).await?
+            {
+                workspaces.push(ws);
+            }
+        }
+        Ok(workspaces)
+    }
+
+    /// 動いているランナーの方針と本物の値を作り直して送る。動いていなければ何もせず
+    /// `false` を返す。`extra` は [`Controller::open`] と同じ。
+    pub async fn refresh(
+        &self,
+        workspace: &Workspace,
+        extra: Vec<(String, chloe_secrets::SecretString)>,
+    ) -> Result<bool, Error> {
+        let state = self.state(workspace.id);
+        let running = state.lifecycle.lock().await;
+        if running.is_none() {
+            return Ok(false);
+        }
+        let spec = self.build(workspace, extra).await?;
+        self.inner.backend.update(spec).await?;
+        info!(workspace = %workspace.display_name(), "runner policy refreshed");
+        Ok(true)
+    }
+
+    async fn build(
+        &self,
+        workspace: &Workspace,
+        extra: Vec<(String, chloe_secrets::SecretString)>,
+    ) -> Result<crate::runner::RunnerSpec, Error> {
         let placeholders = self.inner.store.placeholders(workspace.id).await?;
         let mut secrets = self.owner_secrets(&workspace.owner).await?;
         for (name, value) in extra {
             secrets.retain(|(existing, _)| *existing != name);
             secrets.push((name, value));
         }
-        let spec = build_spec(workspace, &self.inner.base, &placeholders, secrets);
-        info!(workspace = %workspace.display_name(), key, "starting runner");
-        let vsock = self.inner.backend.start(spec).await?;
-        *running = Some(vsock.clone());
-        Ok(vsock)
+        Ok(build_spec(
+            workspace,
+            &self.inner.base,
+            &placeholders,
+            secrets,
+        ))
     }
 
     async fn owner_secrets(
@@ -300,6 +346,19 @@ mod tests {
         async fn is_running(&self, key: &str) -> Result<bool, Error> {
             Ok(self.running.lock().unwrap().contains_key(key))
         }
+
+        async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
+            let secrets = spec
+                .secrets
+                .iter()
+                .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
+                .collect();
+            self.running
+                .lock()
+                .unwrap()
+                .insert(spec.key.clone(), secrets);
+            Ok(())
+        }
     }
 
     async fn controller(idle: Duration) -> (Controller<Arc<FakeBackend>>, Arc<FakeBackend>) {
@@ -357,6 +416,29 @@ mod tests {
 
         let _again = controller.open(&ws, vec![]).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn refreshes_only_running_runners() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let ws = controller
+            .store()
+            .create(
+                &WorkspaceRef::parse("api", "alice").unwrap(),
+                RootMode::Ephemeral,
+                "alice",
+            )
+            .await
+            .unwrap();
+        let token = |v: &str| vec![("github_token".to_string(), v.to_string().into())];
+        assert!(!controller.refresh(&ws, token("old")).await.unwrap());
+        let _session = controller.open(&ws, token("old")).await.unwrap();
+        assert_eq!(controller.running().await.unwrap(), [ws.clone()]);
+        assert!(controller.refresh(&ws, token("new")).await.unwrap());
+        assert_eq!(
+            backend.running.lock().unwrap()[&ws.key()],
+            [("CHLOE_SECRET_GITHUB_TOKEN".to_string(), "new".to_string())]
+        );
     }
 
     #[tokio::test]
