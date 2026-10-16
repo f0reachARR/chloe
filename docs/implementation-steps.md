@@ -70,6 +70,26 @@
 - `claude --version` と `codex --version` が動く。
 - 再起動してもワークスペースと Docker のイメージに書いた内容が残る。
 
+### 段階 1 の結果（2026-10-16）
+
+終了条件はすべて満たした。
+手順は次のとおりである。
+
+```sh
+images/guest/kernel/build.sh      # build/guest/kernel/vmlinux
+images/guest/rootfs/build.sh      # build/guest/rootfs.ext4
+images/guest/dev/run.sh           # VM を起動してシリアルコンソールにつなぐ
+images/guest/dev/smoke-test.sh    # 終了条件の自動確認 (2 回起動する)
+```
+
+当初の手順から変えた点と、分かったことを記録する。
+
+- **開発用の起動はコンテナの中で行う**：開発機では sudo にパスワードが要り、AppArmor が非特権のユーザー namespace を禁止しているので、tap を作れない。そこで Docker の特権コンテナの中に tap0 と nftables の NAT を作り、その中で Firecracker を動かす。構成は Kubernetes の特権 Pod で動かすランナーと同じ形になる。
+- **containerd のデータもディスクイメージに置く**：Docker 29 は containerd のイメージストアを使い、そのデータを `/var/lib/containerd` に置く。ここが overlayfs のルート上にあると overlay を重ねられずにコンテナが起動しないので、Docker 用のイメージを `/var/lib/docker` と `/var/lib/containerd` の両方に bind する。
+- **Ubuntu 26.04 では `pivot_root` が util-linux-extra に移っている**。
+- **シリアルコンソールに長い行を流すと文字が落ちることがある**ので、確認用のスクリプトは読み取り専用のドライブとして渡す。
+- **カーネル**：moby の check-config.sh の必須項目はすべて満たす。足りないのは任意の項目（AppArmor、SCTP、暗号化オーバーレイネットワーク、btrfs など）だけである。
+
 ## 段階 2：ネットワークの検証
 
 段階 1 の VM を使い、計画書の PoC 確認項目を順に確かめる。
