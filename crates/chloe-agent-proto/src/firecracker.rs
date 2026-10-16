@@ -4,7 +4,9 @@
 //! ゲストのそのポートにつながり、`OK <ホスト側のポート>\n` が返る。
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
