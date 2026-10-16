@@ -2,6 +2,7 @@
 # 読み取り専用のルートに tmpfs を重ねてから systemd を起動する。
 # カーネルの引数で init=/sbin/overlay-init を指定して PID 1 として動かす。
 set -e
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 mount -t tmpfs -o mode=0755 tmpfs /mnt
 mkdir -p /mnt/upper /mnt/work /mnt/root

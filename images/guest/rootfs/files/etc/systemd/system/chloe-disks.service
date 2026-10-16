@@ -1,0 +1,14 @@
+[Unit]
+Description=Mount chloe workspace and Docker images
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Before=containerd.service docker.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/chloe-mount-disks
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=containerd.service docker.service

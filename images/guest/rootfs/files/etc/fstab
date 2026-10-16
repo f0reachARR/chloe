@@ -1,2 +1,0 @@
-# ルートは読み取り専用で付き、overlay-init が tmpfs を重ねる。
-/dev/vdc  /var/lib/docker  ext4  defaults,nofail,x-systemd.device-timeout=5s  0  2

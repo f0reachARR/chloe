@@ -13,7 +13,7 @@ RUN apt-get update \
         iproute2 iptables nftables iputils-ping \
         ca-certificates curl gnupg jq zstd \
         git openssh-client tmux less vim-tiny sudo locales bash-completion \
-        bubblewrap e2fsprogs \
+        bubblewrap e2fsprogs util-linux-extra \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker の公式パッケージ
@@ -43,10 +43,10 @@ RUN curl -fsSL "https://github.com/openai/codex/releases/download/$CODEX_VERSION
 RUN locale-gen en_US.UTF-8 \
     && useradd --create-home --shell /bin/bash --groups docker,sudo user \
     && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
-    && mkdir -p /workspace /var/lib/chloe/workspace \
+    && mkdir -p /workspace /var/lib/chloe \
     && chown user:user /workspace
 
 COPY files/ /
-RUN chmod 0755 /usr/sbin/overlay-init /usr/local/sbin/chloe-mount-workspace \
-    && systemctl enable systemd-networkd systemd-resolved docker chloe-workspace.service \
+RUN chmod 0755 /usr/sbin/overlay-init /usr/local/sbin/chloe-mount-disks \
+    && systemctl enable systemd-networkd systemd-resolved docker chloe-disks.service \
     && systemctl mask systemd-firstboot.service systemd-timesyncd.service

@@ -1,0 +1,38 @@
+#!/bin/sh
+# ワークスペース (/dev/vdb) と Docker (/dev/vdc) のイメージをマウントする。
+#
+# ワークスペースの中は home/ と workspace/ に分け、/home/user と /workspace に bind する。
+# Docker の中は docker/ と containerd/ に分け、/var/lib/docker と /var/lib/containerd に bind する。
+# ルートは overlayfs なので、overlay を使う Docker と containerd のデータは必ずこちらに置く。
+set -eu
+
+mount_image() {
+    dev="$1" mnt="$2"
+    mkdir -p "$mnt"
+    mount "$dev" "$mnt"
+}
+
+bind_subdir() {
+    src="$1" dst="$2"
+    mkdir -p "$src" "$dst"
+    mount --bind "$src" "$dst"
+}
+
+if [ -b /dev/vdb ]; then
+    ws=/var/lib/chloe/workspace
+    mount_image /dev/vdb "$ws"
+    if [ ! -d "$ws/home" ]; then
+        mkdir -p "$ws/home" "$ws/workspace"
+        cp -a /etc/skel/. "$ws/home/"
+        chown -R user:user "$ws/home" "$ws/workspace"
+    fi
+    bind_subdir "$ws/home" /home/user
+    bind_subdir "$ws/workspace" /workspace
+fi
+
+if [ -b /dev/vdc ]; then
+    dk=/var/lib/chloe/docker
+    mount_image /dev/vdc "$dk"
+    bind_subdir "$dk/docker" /var/lib/docker
+    bind_subdir "$dk/containerd" /var/lib/containerd
+fi
