@@ -51,7 +51,6 @@ fi
 exec docker run --rm "${run_flags[@]}" \
     --name "${CHLOE_DEV_NAME:-chloe-dev}" \
     -e CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}" \
-    -e CHLOE_PROXY="${CHLOE_PROXY:-egress}" \
     -e VCPUS="${VCPUS:-4}" \
     -e MEM_MIB="${MEM_MIB:-4096}" \
     --privileged \

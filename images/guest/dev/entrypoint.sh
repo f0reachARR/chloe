@@ -3,7 +3,7 @@
 #
 # CHLOE_NET_MODE で出口の作り方を選ぶ。
 #   nat   : VM からの通信をそのまま NAT する (段階 1)。
-#   proxy : 80 番と 443 番を mitmproxy の transparent モードへ転送し、それ以外を遮断する (段階 2)。
+#   proxy : 80 番と 443 番を chloe-egress へ転送し、それ以外を遮断する。
 # どちらのモードでも、VM の DNS はこのコンテナの dnsmasq (172.29.0.1) が答える。
 set -eu
 
@@ -42,13 +42,7 @@ EOF
     echo 1 > /proc/sys/net/ipv4/ip_forward
     ;;
 proxy)
-    # CHLOE_PROXY でプロキシの実装を選ぶ。egress は 80 番と 443 番を別のポートで受ける。
-    CHLOE_PROXY="${CHLOE_PROXY:-egress}"
-    case "$CHLOE_PROXY" in
-    egress) http_port=8080 https_port=8443 ;;
-    mitmproxy) http_port=8080 https_port=8080 ;;
-    *) echo "unknown CHLOE_PROXY: $CHLOE_PROXY" >&2; exit 1 ;;
-    esac
+    http_port=8080 https_port=8443
     nft -f - <<EOF
 table inet chloe {
     chain prerouting {
@@ -77,41 +71,23 @@ EOF
     export CHLOE_SECRET_ANTHROPIC="${CHLOE_SECRET_ANTHROPIC:-sk-ant-api03-not-a-real-key}"
     export CHLOE_SECRET_OPENAI="${CHLOE_SECRET_OPENAI:-sk-proj-not-a-real-key}"
 
-    policy="${CHLOE_POLICY:-/opt/chloe/proxy/policy.dev.json}"
-    if [ "$CHLOE_PROXY" = egress ]; then
-        /opt/chloe/bin/chloe-egress \
-            --http-listen "0.0.0.0:$http_port" \
-            --https-listen "0.0.0.0:$https_port" \
-            --policy "$policy" \
-            --ca-dir /state/egress \
-            --log "$logs/requests.jsonl" \
-            > "$logs/egress.log" 2>&1 &
-        proxy_pid=$!
-        proxy_log="$logs/egress.log"
-    else
-    mkdir -p /state/mitmproxy
-    /opt/mitmproxy/bin/mitmdump \
-        --mode transparent \
-        --listen-port 8080 \
-        --set confdir=/state/mitmproxy \
-        --set connection_strategy=lazy \
-        --set block_global=false \
-        -s /opt/chloe/proxy/chloe_policy.py \
-        --set chloe_policy="$policy" \
-        --set chloe_log="$logs/requests.jsonl" \
-        > "$logs/mitmdump.log" 2>&1 &
+    /opt/chloe/bin/chloe-egress \
+        --http-listen "0.0.0.0:$http_port" \
+        --https-listen "0.0.0.0:$https_port" \
+        --policy "${CHLOE_POLICY:-/opt/chloe/policy.dev.json}" \
+        --ca-dir /state/egress \
+        --log "$logs/requests.jsonl" \
+        > "$logs/egress.log" 2>&1 &
     proxy_pid=$!
-    proxy_log="$logs/mitmdump.log"
-    fi
     # 待ち受けを始めるまで待つ。設定の読み込みに失敗するとプロキシは終了する。
     for _ in $(seq 100); do
-        grep -qi "listening" "$proxy_log" 2>/dev/null && break
+        grep -qi "listening" "$logs/egress.log" 2>/dev/null && break
         sleep 0.1
     done
     sleep 0.5
     if ! kill -0 "$proxy_pid" 2>/dev/null; then
-        echo "$CHLOE_PROXY failed to start:" >&2
-        cat "$proxy_log" >&2
+        echo "chloe-egress failed to start:" >&2
+        cat "$logs/egress.log" >&2
         exit 1
     fi
     ;;
