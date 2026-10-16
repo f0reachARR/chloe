@@ -95,6 +95,25 @@ async fn main() -> Result<()> {
         github,
         config,
     });
+    // ゲートウェイの再起動の前から動いているランナーを引き取り、そのあとも定期的に突き合わせる。
+    let report = shared.controller.reconcile().await?;
+    tracing::info!(?report, "reconciled runners");
+    let reconciler = shared.clone();
+    let interval = Duration::from_secs(shared.config.reconcile_interval_secs.max(5));
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match reconciler.controller.reconcile().await {
+                Ok(report) if report != chloe_controller::ReconcileReport::default() => {
+                    tracing::info!(?report, "reconciled runners");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!("failed to reconcile runners: {error:#}"),
+            }
+        }
+    });
     tracing::info!(%listen, "listening");
     let mut server = Server { shared };
     server.run_on_address(ssh_config, listen).await?;
@@ -132,6 +151,10 @@ async fn build_controller(config: &Config) -> Result<(Controller<DockerBackend>,
         backend,
         config.policy.clone(),
         Duration::from_secs(config.idle_timeout_secs),
+    )
+    .with_activity_wait(
+        Duration::from_secs(config.activity_poll_secs.max(1)),
+        Duration::from_secs(config.max_busy_wait_secs),
     );
     Ok((controller, secrets))
 }

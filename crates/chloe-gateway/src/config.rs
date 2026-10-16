@@ -23,6 +23,15 @@ pub struct Config {
     /// 最後の接続が閉じてからランナーを止めるまでの秒数。
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
+    /// エージェントが作業中のとき、止める前に作業中かを尋ね直す間隔の秒数。
+    #[serde(default = "default_activity_poll")]
+    pub activity_poll_secs: u64,
+    /// エージェントが作業中でも、接続がなくなってからこれだけ経ったら止める秒数。
+    #[serde(default = "default_max_busy_wait")]
+    pub max_busy_wait_secs: u64,
+    /// 保存しているランナーの記録と実際に動いているランナーを突き合わせる間隔の秒数。
+    #[serde(default = "default_reconcile_interval")]
+    pub reconcile_interval_secs: u64,
     /// GitHub App の設定 (`github-app.toml`)。あれば、アプリの Organization のメンバーが
     /// ログインでき、Device Flow と所属の確認が使える。
     #[serde(default)]
@@ -67,6 +76,18 @@ fn default_github_url() -> String {
 
 fn default_idle_timeout() -> u64 {
     30 * 60
+}
+
+fn default_activity_poll() -> u64 {
+    60
+}
+
+fn default_max_busy_wait() -> u64 {
+    12 * 60 * 60
+}
+
+fn default_reconcile_interval() -> u64 {
+    60
 }
 
 fn default_runner_image() -> String {

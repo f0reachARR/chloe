@@ -113,9 +113,25 @@ async fn ws_list(shared: &Shared, login: &str) -> Result<String, String> {
         )
         .await
         .map_err(|e| e.to_string())?;
+    let running = shared
+        .controller
+        .running()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(workspaces
         .iter()
-        .map(|ws| format!("{}\t{}\n", ws.display_name(), ws.root_mode.as_str()))
+        .map(|ws| {
+            let state = if running.iter().any(|r| r.id == ws.id) {
+                "running"
+            } else {
+                "stopped"
+            };
+            format!(
+                "{}\t{}\t{state}\n",
+                ws.display_name(),
+                ws.root_mode.as_str()
+            )
+        })
         .collect())
 }
 
