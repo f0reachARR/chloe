@@ -11,6 +11,7 @@ mod ca;
 mod log;
 mod service;
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,12 +23,22 @@ use rama::error::BoxError;
 use rama::extensions::ExtensionsRef;
 use rama::graceful::Shutdown;
 use rama::http::client::EasyHttpWebClient;
+use rama::http::layer::remove_header::{RemoveRequestHeaderLayer, RemoveResponseHeaderLayer};
+use rama::http::layer::upgrade::mitm::HttpUpgradeMitmRelayLayer;
 use rama::http::server::HttpServer;
+use rama::http::ws::handshake::matcher::{
+    HttpWebSocketRelayServiceRequestMatcher, WebSocketMatcher,
+};
+use rama::http::ws::handshake::mitm::{
+    WebSocketRelayInput, WebSocketRelayOutput, WebSocketRelayService,
+};
 use rama::io::Io;
+use rama::layer::HijackLayer;
 use rama::net::Protocol;
 use rama::net::address::HostWithPort;
 use rama::net::proxy::IoForwardService;
 use rama::rt::Executor;
+use rama::service::service_fn;
 use rama::tcp::proxy::IoToProxyBridgeIoLayer;
 use rama::tcp::server::TcpListener;
 use rama::tls::boring::server::{
@@ -82,7 +93,7 @@ async fn main() -> Result<()> {
     let shutdown = Shutdown::default();
     let exec = Executor::graceful(shutdown.guard());
 
-    let client = EasyHttpWebClient::connector_builder()
+    let web_client = EasyHttpWebClient::connector_builder()
         .with_default_transport_connector()
         .with_default_dns_connector()
         .without_tls_proxy_support()
@@ -91,6 +102,25 @@ async fn main() -> Result<()> {
         .with_default_http_connector(exec.clone())
         .with_default_connection_pool()
         .build_client();
+    // WebSocket の要求は Upgrade のヘッダーを残したまま送り、確立後のストリームを中継する。
+    // それ以外の要求では hop-by-hop のヘッダーを取り除く。
+    let client = HijackLayer::new(
+        WebSocketMatcher::new(),
+        HttpUpgradeMitmRelayLayer::new(
+            exec.clone(),
+            HttpWebSocketRelayServiceRequestMatcher::new(WebSocketRelayService::new(service_fn(
+                relay_websocket_message,
+            ))),
+        )
+        .into_layer(web_client.clone()),
+    )
+    .into_layer(
+        (
+            RemoveResponseHeaderLayer::hop_by_hop(),
+            RemoveRequestHeaderLayer::hop_by_hop(),
+        )
+            .into_layer(web_client),
+    );
     let http_svc = Arc::new(EgressService {
         policy: policy.clone(),
         client,
@@ -130,6 +160,16 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("shutdown: {e}"))?;
     Ok(())
+}
+
+/// WebSocket のメッセージはそのまま反対側へ送る。
+async fn relay_websocket_message(
+    input: WebSocketRelayInput,
+) -> Result<WebSocketRelayOutput, Infallible> {
+    Ok(WebSocketRelayOutput {
+        messages: vec![input.message],
+        extensions: input.extensions,
+    })
 }
 
 /// SNI を見て、復号するか中継するかを決める。

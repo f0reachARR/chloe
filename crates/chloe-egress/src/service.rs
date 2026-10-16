@@ -9,9 +9,10 @@ use rama::error::{BoxError, ErrorContext as _};
 use rama::extensions::{Extension, ExtensionsRef as _};
 use rama::http::body::StreamingBody as _;
 use rama::http::body::util::BodyExt as _;
-use rama::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST};
-use rama::http::{Body, HeaderName, HeaderValue, Request, Response, StatusCode};
+use rama::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, UPGRADE};
+use rama::http::{Body, HeaderName, HeaderValue, Request, Response, StatusCode, Version};
 use rama::net::address::Domain;
+use rama::net::http::TargetHttpVersion;
 
 use crate::log::{Event, Logger, query_keys};
 
@@ -154,6 +155,10 @@ where
             (None, Some(body)) => body,
             (None, None) => Body::empty(),
         };
+        // Upgrade (WebSocket) は HTTP/1.1 でしか送れないので、上流との ALPN を HTTP/1.1 に固定する。
+        if parts.headers.contains_key(UPGRADE) {
+            parts.extensions.insert(TargetHttpVersion(Version::HTTP_11));
+        }
         let req = Request::from_parts(parts, body);
 
         match self.client.serve(req).await {
