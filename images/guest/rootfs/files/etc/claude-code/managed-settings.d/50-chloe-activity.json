@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity begin claude" }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity touch claude" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity touch claude" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity touch claude" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity end claude" }] }],
+    "StopFailure": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity end claude" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity end claude" }] }]
+  }
+}

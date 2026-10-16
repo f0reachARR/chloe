@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity begin codex" }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity touch codex" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity touch codex" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/chloe-activity end codex" }] }]
+  }
+}

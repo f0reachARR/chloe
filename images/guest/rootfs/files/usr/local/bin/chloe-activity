@@ -1,0 +1,26 @@
+#!/bin/sh
+# Claude Code と Codex のフックから呼ばれ、エージェントが作業中であることを記録する。
+#
+#   chloe-activity begin|touch|end <tool>
+#
+# 標準入力にフックの JSON (session_id を含む) が来る。印は /run/chloe/activity/<tool>-<session_id>。
+# begin と touch は印を作るか更新し、end は消す。guest-agent は、最近更新された印があれば
+# 作業中と答え、ランナーは接続がなくなっても止まらない。
+# UserPromptSubmit のフックの標準出力は会話に加わるので、何も出力しない。フックを失敗させない
+# よう、常に 0 で終わる。
+action="$1"
+tool="${2:-agent}"
+dir=/run/chloe/activity
+session="$(jq -r '.session_id // .sessionId // empty' 2>/dev/null | tr -c 'A-Za-z0-9._\n-' '_' | head -c 128)"
+[ -n "$session" ] || session=unknown
+file="$dir/$tool-$session"
+case "$action" in
+begin | touch)
+    mkdir -p "$dir" 2>/dev/null
+    touch "$file" 2>/dev/null
+    ;;
+end)
+    rm -f "$file" 2>/dev/null
+    ;;
+esac
+exit 0

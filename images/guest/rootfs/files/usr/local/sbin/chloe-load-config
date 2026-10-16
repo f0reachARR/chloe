@@ -9,6 +9,9 @@ set -eu
 
 mkdir -p /run/chloe
 : > /run/chloe/env
+# エージェントの作業中の印 (chloe-activity)。フックは利用者の権限で動くので、誰でも書けるようにする。
+mkdir -p /run/chloe/activity
+chmod 1777 /run/chloe/activity
 chmod 0644 /run/chloe/env
 
 [ -b /dev/vdd ] || exit 0
