@@ -1,31 +1,13 @@
 #!/usr/bin/env bash
 # VM を起動して段階 1 の終了条件を確かめる。
 #
-# 確認用のスクリプトを読み取り専用のドライブ (/dev/vdd) として渡し、シリアルコンソールには
-# 短いコマンドだけを流す (長い行を流すと文字が落ちることがある)。
 # 1 回目の起動でワークスペースと Docker のイメージに書き込み、2 回目の起動で残っていることを確かめる。
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$here/../../.." && pwd)"
-state="$root/build/dev"
-logs="$state/logs"
-mkdir -p "$logs"
-export CHLOE_DEV_NAME=chloe-dev-smoke
-
-scripts="$(mktemp -d)"
-trap 'rm -rf "$scripts" "$state/test.ext4"; docker kill "$CHLOE_DEV_NAME" >/dev/null 2>&1 || true' EXIT
-
-cat > "$scripts/check.sh" <<'EOF'
+cat > "$dev_scripts/smoke.sh" <<'EOF'
 #!/bin/bash
-# 結果は ==RESULT== で始まる行に出す。最後に VM を止める。
-result() { printf '\n==RESULT== %s: %s\n' "$1" "$2"; }
-check() {
-    local name="$1"; shift
-    if out="$("$@" 2>&1)"; then result "$name" "ok ${out//$'\n'/ | }"; else result "$name" "FAIL ${out//$'\n'/ | }"; fi
-}
-
-systemctl is-system-running --wait >/dev/null
+source /mnt/lib.sh
 case "$1" in
 first)
     check system systemctl is-system-running
@@ -47,22 +29,10 @@ esac
 result done ok
 systemctl reboot
 EOF
+make_test_drive
 
-docker run --rm --user "$(id -u):$(id -g)" -v "$scripts:/src:ro" -v "$state:/state" chloe-guest-tools \
-    sh -c 'truncate -s 16M /state/test.ext4 && mkfs.ext4 -q -d /src /state/test.ext4'
-
-boot() {
-    local name="$1"
-    # プロセス置換にして、VM が止まったら入力側を待たずに戻るようにする。
-    timeout 300 "$here/run.sh" > "$logs/$name.log" 2>&1 < <(
-        sleep 25
-        echo "mount -o ro /dev/vdd /mnt && bash /mnt/check.sh $name"
-        sleep 300
-    ) || true
-    grep -a '^==RESULT==' "$logs/$name.log" | sed 's/\r$//'
-}
-
+export CHLOE_NET_MODE=nat
 echo "--- first boot"
-boot first
+boot smoke-first smoke.sh first
 echo "--- second boot"
-boot second
+boot smoke-second smoke.sh second

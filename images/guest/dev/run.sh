@@ -40,6 +40,9 @@ tty_flags=(-i)
 
 exec docker run --rm "${tty_flags[@]}" \
     --name "${CHLOE_DEV_NAME:-chloe-dev}" \
+    -e CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}" \
+    -e VCPUS="${VCPUS:-4}" \
+    -e MEM_MIB="${MEM_MIB:-4096}" \
     --privileged \
     --device /dev/kvm \
     --device /dev/net/tun \
