@@ -124,6 +124,15 @@ last_anthropic_request() { egress_log "$1" | grep '"host":"api.anthropic.com"' |
 check alice-injected '"injected":["anthropic_api_key-0"]' last_anthropic_request "$alice_key"
 check bob-not-injected '"injected":[]' last_anthropic_request "$bob_key"
 
+echo "--- updating a running workspace"
+check live-update "1 running workspace(s) use the new value" sh -c 'echo real-secret-A2 | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set anthropic_api_key
+check egress-updated "1" grep -c "policy updated" "$mvp/workspaces/$alice_key/logs/egress.log"
+check bob-untouched "0" sh -c 'grep -c "policy updated" "$0" || true' "$mvp/workspaces/$bob_key/logs/egress.log"
+check alice-still-injected "401" anthropic alice "$alice_ph"
+sleep 1
+check alice-injected-after-update '"injected":["anthropic_api_key-0"]' last_anthropic_request "$alice_key"
+
 echo "--- workspaces"
 check ws-list "default" as alice chloe ws list
 check ws-create-org "created acme/proj" as alice chloe ws create acme/proj --root persistent
