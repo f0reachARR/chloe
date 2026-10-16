@@ -7,6 +7,7 @@ mod access;
 mod auth;
 mod commands;
 mod config;
+mod github_token;
 mod session;
 
 use std::path::{Path, PathBuf};
@@ -68,7 +69,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     });
 
-    let controller = build_controller(&config).await?;
+    let (controller, secrets) = build_controller(&config).await?;
     let github = match &config.github_app {
         Some(path) => {
             let app_config = chloe_github::AppConfig::load(&expand_home(path))?;
@@ -79,6 +80,14 @@ async fn main() -> Result<()> {
         }
         None => None,
     };
+    // ランナーのプロキシが GitHub のトークンを問い合わせたら、ここで発行して答える。
+    let controller = match &github {
+        Some(github) => controller.with_dynamic_secrets(Arc::new(github_token::GitHubTokens::new(
+            github.clone(),
+            secrets,
+        ))),
+        None => controller,
+    };
     let listen = config.listen;
     let shared = Arc::new(Shared {
         keys: GitHubKeys::new(&config.github_url)?,
@@ -86,25 +95,13 @@ async fn main() -> Result<()> {
         github,
         config,
     });
-    // 動いているランナーの GitHub のトークンを、失効する前に作り直して送る。
-    let refresher = shared.clone();
-    let interval = Duration::from_secs(shared.config.refresh_interval_secs.max(30));
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let refreshed = refresher.refresh_running(None).await;
-            tracing::debug!(refreshed, "refreshed running runners");
-        }
-    });
     tracing::info!(%listen, "listening");
     let mut server = Server { shared };
     server.run_on_address(ssh_config, listen).await?;
     Ok(())
 }
 
-async fn build_controller(config: &Config) -> Result<Controller<DockerBackend>> {
+async fn build_controller(config: &Config) -> Result<(Controller<DockerBackend>, SecretDb)> {
     if let Some(dir) = config.database.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -128,13 +125,15 @@ async fn build_controller(config: &Config) -> Result<Controller<DockerBackend>> 
         state_root: std::path::absolute(&config.runner.state_root)?,
         name_prefix: config.runner.name_prefix.clone(),
     };
-    Ok(Controller::new(
-        Store::new(pool.clone()),
-        SecretDb::new(pool, master),
+    let secrets = SecretDb::new(pool.clone(), master);
+    let controller = Controller::new(
+        Store::new(pool),
+        secrets.clone(),
         backend,
         config.policy.clone(),
         Duration::from_secs(config.idle_timeout_secs),
-    ))
+    );
+    Ok((controller, secrets))
 }
 
 struct Server {

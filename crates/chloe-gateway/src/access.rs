@@ -1,23 +1,17 @@
-//! 誰がログインでき、どのワークスペースに入れるか。GitHub のトークンをどう用意するか。
+//! 誰がログインでき、どのワークスペースに入れるか。
 //!
 //! GitHub App を設定していれば、アプリの Organization のメンバーがログインでき、
 //! Organization と team のワークスペースには GitHub 上の所属で入れる。
 //! 設定の `allowed_users` と `memberships` は、それに加えて許す (開発用)。
 
-use std::time::Duration;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chloe_controller::workspace::Workspace;
 use chloe_github::UserToken;
-use chloe_secrets::{ExposeSecret, Owner, SecretString};
-use tracing::info;
+use chloe_secrets::Owner;
 
+pub use crate::github_token::personal;
+use crate::github_token::{USER_TOKEN_SECRET, load_user_token, store_user_token};
 use crate::session::Shared;
-
-/// 個人のユーザートークンを置くシークレットの名前。値は [`UserToken`] の JSON。
-pub const USER_TOKEN_SECRET: &str = "github_user_token";
-/// ユーザートークンは、失効までこれより短くなったら更新してから渡す。
-const USER_TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60 * 60);
 
 impl Shared {
     pub async fn is_allowed(&self, login: &str) -> Result<bool> {
@@ -83,56 +77,12 @@ impl Shared {
         })
     }
 
-    /// ワークスペースのランナーに渡す GitHub のトークン。
-    ///
-    /// 個人のワークスペースには Device Flow で得たユーザートークンを (期限が近ければ更新して)、
-    /// team と Organization のワークスペースにはアプリのインストールトークンを渡す。
-    pub async fn github_token_for(&self, workspace: &Workspace) -> Result<Option<SecretString>> {
-        let Some(github) = &self.github else {
-            return Ok(None);
-        };
-        match &workspace.owner {
-            Owner::User(login) => {
-                let Some(mut token) = self.load_user_token(login).await? else {
-                    return Ok(None);
-                };
-                if token.expires_within(USER_TOKEN_REFRESH_MARGIN) {
-                    let refresh = token
-                        .refresh_token
-                        .clone()
-                        .context("the GitHub token expired and cannot be refreshed; run `chloe github login`")?;
-                    token = github.refresh_user_token(&refresh).await.context(
-                        "refresh the GitHub token (run `chloe github login` if this keeps failing)",
-                    )?;
-                    self.store_user_token(login, &token).await?;
-                    info!(login, "refreshed the GitHub user token");
-                }
-                Ok(Some(token.access_token.into()))
-            }
-            Owner::Org(org) | Owner::Team { org, .. }
-                if org.eq_ignore_ascii_case(github.organization()) =>
-            {
-                Ok(Some(github.installation_token().await?))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// ランナーに渡す、接続のたびに発行し直すシークレット (今は GitHub のトークン)。
-    pub async fn extras_for(&self, workspace: &Workspace) -> Result<Vec<(String, SecretString)>> {
-        Ok(match self.github_token_for(workspace).await? {
-            Some(token) => vec![("github_token".to_string(), token)],
-            None => vec![],
-        })
-    }
-
-    /// 動いているランナーの方針と本物の値を作り直して送る。
+    /// 動いているランナーの方針を作り直して送る (使えるシークレットの種類が変わったとき)。
     pub async fn refresh_workspace(&self, workspace: &Workspace) -> Result<bool> {
-        let extra = self.extras_for(workspace).await?;
-        Ok(self.controller.refresh(workspace, extra).await?)
+        Ok(self.controller.refresh(workspace).await?)
     }
 
-    /// 動いているランナーのうち、`owner` のもの (`None` ならすべて) を作り直す。
+    /// 動いているランナーのうち、`owner` のもの (`None` ならすべて) の方針を作り直す。
     /// 失敗したワークスペースはログに残して続ける。
     pub async fn refresh_running(&self, owner: Option<&Owner>) -> usize {
         let workspaces = match self.controller.running().await {
@@ -160,27 +110,11 @@ impl Shared {
     }
 
     pub async fn load_user_token(&self, login: &str) -> Result<Option<UserToken>> {
-        let Some(value) = self
-            .controller
-            .secrets()
-            .get(&personal(login), USER_TOKEN_SECRET)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(
-            serde_json::from_str(value.expose_secret())
-                .context("the stored GitHub token is broken")?,
-        ))
+        load_user_token(self.controller.secrets(), login).await
     }
 
     pub async fn store_user_token(&self, login: &str, token: &UserToken) -> Result<()> {
-        let value = serde_json::to_string(token)?;
-        self.controller
-            .secrets()
-            .set(&personal(login), USER_TOKEN_SECRET, &value.into())
-            .await?;
-        Ok(())
+        store_user_token(self.controller.secrets(), login, token).await
     }
 
     pub async fn delete_user_token(&self, login: &str) -> Result<bool> {
@@ -190,8 +124,4 @@ impl Shared {
             .delete(&personal(login), USER_TOKEN_SECRET)
             .await?)
     }
-}
-
-pub fn personal(login: &str) -> Owner {
-    Owner::User(login.to_ascii_lowercase())
 }

@@ -23,10 +23,6 @@ pub struct Config {
     /// 最後の接続が閉じてからランナーを止めるまでの秒数。
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
-    /// 動いているランナーの GitHub のトークンなどを作り直して送る間隔の秒数。
-    /// インストールトークンの有効期間 (1 時間) より十分短くする。
-    #[serde(default = "default_refresh_interval")]
-    pub refresh_interval_secs: u64,
     /// GitHub App の設定 (`github-app.toml`)。あれば、アプリの Organization のメンバーが
     /// ログインでき、Device Flow と所属の確認が使える。
     #[serde(default)]
@@ -71,10 +67,6 @@ fn default_github_url() -> String {
 
 fn default_idle_timeout() -> u64 {
     30 * 60
-}
-
-fn default_refresh_interval() -> u64 {
-    10 * 60
 }
 
 fn default_runner_image() -> String {

@@ -285,9 +285,9 @@ async fn secret_set(
         .set(&personal(login), kind, &value.to_string().into())
         .await
         .map_err(|e| e.to_string())?;
-    let refreshed = shared.refresh_running(Some(&personal(login))).await;
+    shared.refresh_running(Some(&personal(login))).await;
     Ok(format!(
-        "saved {kind} ({refreshed} running workspace(s) use the new value now; a kind that was not set when a workspace started needs `chloe ws stop` first)\n"
+        "saved {kind} (used from the next request; a workspace started before {kind} was set needs `chloe ws stop` once to get its placeholder)\n"
     ))
 }
 

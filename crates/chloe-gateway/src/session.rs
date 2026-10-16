@@ -499,17 +499,8 @@ async fn relay(
         let workspace = shared
             .resolve_workspace(&user.login, user.workspace.as_deref())
             .await?;
-        let extra = match shared.extras_for(&workspace).await {
-            Ok(extra) => extra,
-            Err(error) => {
-                warn!(workspace = %workspace.display_name(), "no GitHub token for the runner: {error:#}");
-                let message = format!("chloe: GitHub is not available in this session: {error:#}\r\n");
-                let _ = handle.extended_data(channel, 1, message.into_bytes()).await;
-                vec![]
-            }
-        };
         // セッションを持っているあいだは、ランナーが止められない。
-        let session = shared.controller.open(&workspace, extra).await?;
+        let session = shared.controller.open(&workspace).await?;
         relay_inner(&handle, channel, &session.vsock, request, input).await
     }
     .await;
@@ -649,7 +640,7 @@ async fn github_login_command(
                 .refresh_running(Some(&crate::access::personal(login)))
                 .await;
             say(format!(
-                "Signed in. Workspaces get the GitHub token from their next start ({refreshed} running workspace(s) updated now; those started before you set up GitHub need `chloe ws stop` once).\n"
+                "Signed in. {refreshed} running workspace(s) can use GitHub now; a workspace started before you signed in needs `chloe ws stop` once to get the GH_TOKEN placeholder.\n"
             ))
             .await;
             0

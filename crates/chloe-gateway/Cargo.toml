@@ -18,6 +18,7 @@ chloe-secrets.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
+futures.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 russh.workspace = true
