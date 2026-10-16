@@ -25,6 +25,10 @@ use crate::workspace::Workspace;
 
 /// VM を止めるときに、VM の中で再起動を頼んでから待つ時間の既定値。
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// エージェントが作業中のとき、止める前に作業中かを尋ね直す間隔の既定値。
+const ACTIVITY_POLL: Duration = Duration::from_secs(60);
+/// エージェントが作業中でも、接続がなくなってからこれだけ経ったら止める (既定値)。
+const MAX_BUSY_WAIT: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// データベースの外で作るシークレット (GitHub のトークンなど)。問い合わせのたびに尋ねる。
 /// `kinds` に挙げた種類は、データベースの同じ種類より優先する。
@@ -100,6 +104,8 @@ struct Inner<B> {
     base: BasePolicy,
     idle_timeout: Duration,
     stop_timeout: Duration,
+    activity_poll: Duration,
+    max_busy_wait: Duration,
     runners: Mutex<HashMap<i64, Arc<RunnerState>>>,
 }
 
@@ -121,6 +127,17 @@ struct SessionCount {
     open: usize,
     /// 最後の接続が閉じるたびに増やし、古い停止の予約を無効にする。
     generation: u64,
+}
+
+/// [`Controller::reconcile`] で直したランナーの識別子。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// 動いていたので引き取ったもの。
+    pub adopted: Vec<String>,
+    /// 持ち主がいないので止めたもの。
+    pub stopped: Vec<String>,
+    /// 止まっていたので把握を消したもの。
+    pub cleared: Vec<String>,
 }
 
 /// 開いている接続。drop すると接続を閉じたことになる。
@@ -149,6 +166,8 @@ impl<B: RunnerBackend> Controller<B> {
                 base,
                 idle_timeout,
                 stop_timeout: GRACEFUL_STOP_TIMEOUT,
+                activity_poll: ACTIVITY_POLL,
+                max_busy_wait: MAX_BUSY_WAIT,
                 runners: Mutex::new(HashMap::new()),
             }),
         }
@@ -166,6 +185,14 @@ impl<B: RunnerBackend> Controller<B> {
     /// VM の中で再起動を頼んでから、ランナーが止まるのを待つ時間を変える。
     pub fn with_stop_timeout(self, stop_timeout: Duration) -> Self {
         self.configure(|inner| inner.stop_timeout = stop_timeout)
+    }
+
+    /// エージェントが作業中のときに尋ね直す間隔と、待つ長さの上限を変える。
+    pub fn with_activity_wait(self, poll: Duration, max: Duration) -> Self {
+        self.configure(|inner| {
+            inner.activity_poll = poll;
+            inner.max_busy_wait = max;
+        })
     }
 
     /// データベースの外で作るシークレットの出どころを足す。
@@ -235,6 +262,10 @@ impl<B: RunnerBackend> Controller<B> {
                     vsock: vsock.clone(),
                     broker,
                 });
+                self.inner
+                    .store
+                    .record_runner(workspace.id, self.inner.backend.node())
+                    .await?;
                 Ok(vsock)
             }
             Err(error) => {
@@ -286,28 +317,167 @@ impl<B: RunnerBackend> Controller<B> {
 
     fn close(&self, workspace_id: i64) {
         let state = self.state(workspace_id);
-        let generation = {
+        {
             let mut sessions = state.sessions.lock().unwrap();
             sessions.open = sessions.open.saturating_sub(1);
+            if sessions.open > 0 {
+                return;
+            }
+        }
+        self.schedule_idle_stop(workspace_id);
+    }
+
+    /// 接続がないまま `idle_timeout` が経ったらランナーを止める予約をする。
+    /// 止める前に VM の中のエージェントに作業中かを尋ね、作業中なら `max_busy_wait` までは
+    /// `activity_poll` ごとに尋ね直して待つ。そのあいだに接続されたら予約を取り消す。
+    fn schedule_idle_stop(&self, workspace_id: i64) {
+        let state = self.state(workspace_id);
+        let generation = {
+            let mut sessions = state.sessions.lock().unwrap();
             if sessions.open > 0 {
                 return;
             }
             sessions.generation += 1;
             sessions.generation
         };
+        let still_idle = {
+            let state = state.clone();
+            move || {
+                let sessions = state.sessions.lock().unwrap();
+                sessions.open == 0 && sessions.generation == generation
+            }
+        };
         let controller = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(controller.inner.idle_timeout).await;
-            {
-                let sessions = state.sessions.lock().unwrap();
-                if sessions.open > 0 || sessions.generation != generation {
+            let inner = &controller.inner;
+            tokio::time::sleep(inner.idle_timeout).await;
+            let busy_since = tokio::time::Instant::now();
+            loop {
+                if !still_idle() {
                     return;
                 }
+                let busy = controller.activity(&state).await;
+                if busy.is_empty() {
+                    break;
+                }
+                if busy_since.elapsed() >= inner.max_busy_wait {
+                    warn!(
+                        workspace_id,
+                        ?busy,
+                        "stopping although an agent still looks busy"
+                    );
+                    break;
+                }
+                info!(
+                    workspace_id,
+                    ?busy,
+                    "an agent is working; the runner keeps running"
+                );
+                tokio::time::sleep(inner.activity_poll).await;
+            }
+            if !still_idle() {
+                return;
             }
             if let Err(error) = controller.stop_runner(workspace_id, &state).await {
                 warn!(workspace_id, "failed to stop the runner: {error}");
             }
         });
+    }
+
+    /// VM の中で作業中のエージェントの印。尋ねられなければ作業中のものはないとみなす。
+    async fn activity(&self, state: &RunnerState) -> Vec<String> {
+        let vsock = match state.lifecycle.lock().await.as_ref() {
+            Some(running) => running.vsock.clone(),
+            None => return vec![],
+        };
+        match tokio::time::timeout(Duration::from_secs(10), query_activity(&vsock)).await {
+            Ok(Ok(busy)) => busy,
+            Ok(Err(error)) => {
+                warn!("failed to ask the VM about agent activity: {error}");
+                vec![]
+            }
+            Err(_) => {
+                warn!("the VM did not answer about agent activity in time");
+                vec![]
+            }
+        }
+    }
+
+    /// 保存しているランナーの記録と、実際に動いているランナーを突き合わせて直す。
+    ///
+    /// - 動いているが controller が把握していないランナー (ゲートウェイの再起動の前に起動したもの)
+    ///   は引き取り、問い合わせ用ソケットを張り直して、接続がなければ停止を予約する。
+    /// - 持ち主のワークスペースがないランナーは止める。
+    /// - 止まっているのに把握や記録が残っていれば消す。
+    pub async fn reconcile(&self) -> Result<ReconcileReport, Error> {
+        let mut report = ReconcileReport::default();
+        let actual = self.inner.backend.list().await?;
+        for key in &actual {
+            let workspace = match key
+                .strip_prefix("ws-")
+                .and_then(|id| id.parse::<i64>().ok())
+            {
+                Some(id) => self.inner.store.get(id).await?,
+                None => None,
+            };
+            let Some(workspace) = workspace else {
+                warn!(key, "stopping a runner without a workspace");
+                self.inner.backend.stop(key).await?;
+                let _ = std::fs::remove_file(self.inner.backend.broker_socket(key));
+                report.stopped.push(key.clone());
+                continue;
+            };
+            let state = self.state(workspace.id);
+            let mut running = state.lifecycle.lock().await;
+            if running.is_some() {
+                continue;
+            }
+            let broker = crate::broker::serve(
+                &self.inner.backend.broker_socket(key),
+                workspace.clone(),
+                self.inner.resolver.clone(),
+            )?;
+            *running = Some(Running {
+                vsock: self.inner.backend.vsock_path(key),
+                broker,
+            });
+            drop(running);
+            self.inner
+                .store
+                .record_runner(workspace.id, self.inner.backend.node())
+                .await?;
+            info!(workspace = %workspace.display_name(), key, "adopted a running runner");
+            report.adopted.push(key.clone());
+            self.schedule_idle_stop(workspace.id);
+        }
+
+        let known: Vec<(i64, Arc<RunnerState>)> = self
+            .inner
+            .runners
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, state)| (*id, state.clone()))
+            .collect();
+        for (id, state) in known {
+            let key = format!("ws-{id}");
+            if actual.contains(&key) {
+                continue;
+            }
+            let mut running = state.lifecycle.lock().await;
+            if let Some(current) = running.take() {
+                current.broker.abort();
+                let _ = std::fs::remove_file(self.inner.backend.broker_socket(&key));
+                warn!(key, "a runner stopped without the controller");
+                report.cleared.push(key);
+            }
+        }
+        for id in self.inner.store.recorded_runners().await? {
+            if !actual.contains(&format!("ws-{id}")) {
+                self.inner.store.remove_runner(id).await?;
+            }
+        }
+        Ok(report)
     }
 
     /// ランナーを止める。接続が残っていても止める。
@@ -334,6 +504,9 @@ impl<B: RunnerBackend> Controller<B> {
         let result = self.inner.backend.stop(&key).await;
         current.broker.abort();
         let _ = std::fs::remove_file(self.inner.backend.broker_socket(&key));
+        if result.is_ok() {
+            self.inner.store.remove_runner(workspace_id).await?;
+        }
         result
     }
 }
@@ -341,6 +514,19 @@ impl<B: RunnerBackend> Controller<B> {
 impl<B: RunnerBackend> Drop for Session<B> {
     fn drop(&mut self) {
         self.controller.close(self.workspace_id);
+    }
+}
+
+async fn query_activity(vsock: &std::path::Path) -> Result<Vec<String>, Error> {
+    let stream = firecracker::connect(vsock, AGENT_PORT, Duration::from_secs(2)).await?;
+    let mut conn = Connection::new(stream);
+    conn.send(&ClientMessage::Activity)
+        .await
+        .map_err(|e| Error::Runner(e.to_string()))?;
+    match conn.recv::<AgentMessage>().await {
+        Ok(Some(AgentMessage::Activity { busy })) => Ok(busy),
+        Ok(other) => Err(Error::Runner(format!("unexpected answer: {other:?}"))),
+        Err(e) => Err(Error::Runner(e.to_string())),
     }
 }
 
@@ -366,9 +552,10 @@ async fn request_reboot(vsock: &std::path::Path, wait: Duration) -> Result<(), E
 mod tests {
     use super::*;
     use crate::workspace::{RootMode, WorkspaceRef};
+    use chloe_agent_proto::ExitStatus;
     use chloe_secrets::{MasterKey, Owner};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     struct FakeBackend {
         dir: tempfile::TempDir,
@@ -377,16 +564,49 @@ mod tests {
         updates: AtomicUsize,
         /// 動いているランナーの識別子と、その方針の差し替えの規則の数。
         running: Mutex<HashMap<String, usize>>,
+        /// 偽の guest-agent が答える、作業中のエージェントの印。
+        busy: Arc<Mutex<Vec<String>>>,
+    }
+
+    /// Firecracker の vsock の握手と guest-agent の応答をまねる。
+    async fn fake_agent(path: PathBuf, busy: Arc<Mutex<Vec<String>>>) {
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let busy = busy.clone();
+                tokio::spawn(async move {
+                    while stream.read_u8().await.ok() != Some(b'\n') {}
+                    stream.write_all(b"OK 1\n").await.unwrap();
+                    let mut conn = chloe_agent_proto::Connection::new(stream);
+                    let _ = match conn.recv::<ClientMessage>().await {
+                        Ok(Some(ClientMessage::Activity)) => {
+                            let busy = busy.lock().unwrap().clone();
+                            conn.send(&AgentMessage::Activity { busy }).await
+                        }
+                        Ok(Some(ClientMessage::Exec(_))) => {
+                            let status = ExitStatus {
+                                code: Some(0),
+                                signal: None,
+                            };
+                            conn.send(&AgentMessage::Exited(status)).await
+                        }
+                        _ => Ok(()),
+                    };
+                });
+            }
+        });
     }
 
     impl RunnerBackend for Arc<FakeBackend> {
         async fn start(&self, spec: RunnerSpec) -> Result<PathBuf, Error> {
             self.starts.fetch_add(1, Ordering::SeqCst);
+            fake_agent(self.vsock_path(&spec.key), self.busy.clone()).await;
             self.running
                 .lock()
                 .unwrap()
                 .insert(spec.key.clone(), spec.policy.inject.len());
-            Ok(self.dir.path().join(format!("{}.vsock", spec.key)))
+            Ok(self.vsock_path(&spec.key))
         }
 
         async fn stop(&self, key: &str) -> Result<(), Error> {
@@ -410,6 +630,14 @@ mod tests {
 
         fn broker_socket(&self, key: &str) -> PathBuf {
             self.dir.path().join(format!("{key}.broker.sock"))
+        }
+
+        fn vsock_path(&self, key: &str) -> PathBuf {
+            self.dir.path().join(format!("{key}.vsock"))
+        }
+
+        async fn list(&self) -> Result<Vec<String>, Error> {
+            Ok(self.running.lock().unwrap().keys().cloned().collect())
         }
     }
 
@@ -435,27 +663,39 @@ mod tests {
         }
     }
 
-    async fn controller(idle: Duration) -> (Controller<Arc<FakeBackend>>, Arc<FakeBackend>) {
-        let pool = crate::store::tests::pool().await;
-        let secrets = SecretDb::new(pool.clone(), MasterKey::from_bytes("t", &[3; 32]).unwrap());
-        let backend = Arc::new(FakeBackend {
+    fn backend() -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
             dir: tempfile::tempdir().unwrap(),
             starts: AtomicUsize::new(0),
             stops: AtomicUsize::new(0),
             updates: AtomicUsize::new(0),
             running: Mutex::new(HashMap::new()),
-        });
-        // 偽の実装は VM を持たないので、再起動を頼めない。待つ時間を短くしておく。
-        let controller = Controller::new(
+            busy: Arc::new(Mutex::new(vec![])),
+        })
+    }
+
+    fn controller_on(
+        pool: sqlx::SqlitePool,
+        backend: Arc<FakeBackend>,
+        idle: Duration,
+    ) -> Controller<Arc<FakeBackend>> {
+        let secrets = SecretDb::new(pool.clone(), MasterKey::from_bytes("t", &[3; 32]).unwrap());
+        Controller::new(
             Store::new(pool),
             secrets,
-            backend.clone(),
+            backend,
             BasePolicy::default(),
             idle,
         )
         .with_stop_timeout(Duration::from_millis(50))
-        .with_dynamic_secrets(Arc::new(FakeGitHub));
-        (controller, backend)
+        .with_activity_wait(Duration::from_millis(100), Duration::from_secs(60))
+        .with_dynamic_secrets(Arc::new(FakeGitHub))
+    }
+
+    async fn controller(idle: Duration) -> (Controller<Arc<FakeBackend>>, Arc<FakeBackend>) {
+        let backend = backend();
+        let pool = crate::store::tests::pool().await;
+        (controller_on(pool, backend.clone(), idle), backend)
     }
 
     async fn ask(socket: &std::path::Path, secret: &str) -> String {
@@ -469,19 +709,127 @@ mod tests {
         line
     }
 
+    async fn workspace(
+        controller: &Controller<Arc<FakeBackend>>,
+        name: &str,
+        login: &str,
+    ) -> Workspace {
+        controller
+            .store()
+            .create(
+                &WorkspaceRef::parse(name, login).unwrap(),
+                RootMode::Ephemeral,
+                login,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn waits_while_an_agent_is_working() {
+        let ms = Duration::from_millis;
+        let (controller, backend) = controller(ms(200)).await;
+        let ws = workspace(&controller, "api", "alice").await;
+        *backend.busy.lock().unwrap() = vec!["claude-s1".into()];
+        drop(controller.open(&ws).await.unwrap());
+        tokio::time::sleep(ms(900)).await;
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            0,
+            "the agent is still working"
+        );
+
+        backend.busy.lock().unwrap().clear();
+        tokio::time::sleep(ms(600)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stops_a_busy_runner_after_the_limit() {
+        let ms = Duration::from_millis;
+        let backend = backend();
+        let pool = crate::store::tests::pool().await;
+        let controller =
+            controller_on(pool, backend.clone(), ms(100)).with_activity_wait(ms(50), ms(300));
+        let ws = workspace(&controller, "api", "alice").await;
+        *backend.busy.lock().unwrap() = vec!["codex-s1".into()];
+        drop(controller.open(&ws).await.unwrap());
+        tokio::time::sleep(ms(900)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_adopts_stops_orphans_and_clears() {
+        let ms = Duration::from_millis;
+        let backend = backend();
+        let pool = crate::store::tests::pool().await;
+        let before = controller_on(pool.clone(), backend.clone(), Duration::from_secs(60));
+        let alice = Owner::User("alice".into());
+        before
+            .secrets()
+            .set(&alice, "anthropic_api_key", &"alice-key".to_string().into())
+            .await
+            .unwrap();
+        let ws = workspace(&before, "api", "alice").await;
+        let other = workspace(&before, "other", "alice").await;
+        let session = before.open(&ws).await.unwrap();
+        // ゲートウェイの再起動: 前の controller は消え、ランナーは動き続ける。
+        std::mem::forget(session);
+        drop(before);
+        backend.running.lock().unwrap().insert("ws-999".into(), 0);
+        Store::new(pool.clone())
+            .record_runner(other.id, "local")
+            .await
+            .unwrap();
+
+        let after = controller_on(pool.clone(), backend.clone(), ms(200));
+        let report = after.reconcile().await.unwrap();
+        assert_eq!(report.adopted, [ws.key()]);
+        assert_eq!(report.stopped, ["ws-999"]);
+        assert!(report.cleared.is_empty());
+        assert_eq!(after.store().recorded_runners().await.unwrap(), [ws.id]);
+        // 引き取ったランナーの問い合わせに、新しい controller が答える。
+        assert!(
+            ask(
+                &backend.broker_socket(&ws.key()),
+                "CHLOE_SECRET_ANTHROPIC_API_KEY"
+            )
+            .await
+            .contains("alice-key")
+        );
+        assert_eq!(after.running().await.unwrap(), std::slice::from_ref(&ws));
+        // 二度目の reconcile では何も変わらない。
+        assert_eq!(after.reconcile().await.unwrap(), ReconcileReport::default());
+
+        // controller の知らないうちにランナーが止まった。
+        backend.running.lock().unwrap().remove(&ws.key());
+        let report = after.reconcile().await.unwrap();
+        assert_eq!(report.cleared, [ws.key()]);
+        assert!(after.store().recorded_runners().await.unwrap().is_empty());
+        assert!(!backend.broker_socket(&ws.key()).exists());
+    }
+
+    #[tokio::test]
+    async fn adopted_runner_stops_when_idle() {
+        let ms = Duration::from_millis;
+        let backend = backend();
+        let pool = crate::store::tests::pool().await;
+        let before = controller_on(pool.clone(), backend.clone(), Duration::from_secs(60));
+        let ws = workspace(&before, "api", "alice").await;
+        std::mem::forget(before.open(&ws).await.unwrap());
+        drop(before);
+
+        let after = controller_on(pool, backend.clone(), ms(200));
+        after.reconcile().await.unwrap();
+        tokio::time::sleep(ms(700)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn starts_once_and_stops_after_idle() {
         let ms = Duration::from_millis;
         let (controller, backend) = controller(ms(300)).await;
-        let ws = controller
-            .store()
-            .create(
-                &WorkspaceRef::parse("api", "alice").unwrap(),
-                RootMode::Ephemeral,
-                "alice",
-            )
-            .await
-            .unwrap();
+        let ws = workspace(&controller, "api", "alice").await;
         let first = controller.open(&ws).await.unwrap();
         let second = controller.open(&ws).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 1);

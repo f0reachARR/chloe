@@ -96,7 +96,7 @@ impl RunnerBackend for DockerBackend {
             container = self.container(&spec.key),
             "runner container started"
         );
-        Ok(state.join("vsock.sock"))
+        Ok(self.vsock_path(&spec.key))
     }
 
     async fn stop(&self, key: &str) -> Result<(), Error> {
@@ -136,6 +136,34 @@ impl RunnerBackend for DockerBackend {
 
     fn broker_socket(&self, key: &str) -> PathBuf {
         self.state_dir(key).join("broker.sock")
+    }
+
+    fn vsock_path(&self, key: &str) -> PathBuf {
+        self.state_dir(key).join("vsock.sock")
+    }
+
+    async fn list(&self) -> Result<Vec<String>, Error> {
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "--filter",
+                &format!("name=^{}", self.name_prefix),
+                "--format",
+                "{{.Names}}",
+            ])
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(Error::Runner(format!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|name| name.strip_prefix(&self.name_prefix))
+            .map(str::to_string)
+            .collect())
     }
 
     async fn is_running(&self, key: &str) -> Result<bool, Error> {

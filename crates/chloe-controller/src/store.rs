@@ -134,6 +134,38 @@ impl Store {
         Ok(())
     }
 
+    /// ランナーが動き始めたことを記録する。
+    pub async fn record_runner(&self, workspace_id: i64, node: &str) -> Result<(), Error> {
+        sqlx::query(
+            "INSERT INTO runners (workspace_id, node, started_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (workspace_id) DO UPDATE SET node = excluded.node, started_at = excluded.started_at",
+        )
+        .bind(workspace_id)
+        .bind(node)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_runner(&self, workspace_id: i64) -> Result<(), Error> {
+        sqlx::query("DELETE FROM runners WHERE workspace_id = ?1")
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 動いていると記録したランナーのワークスペースの ID。
+    pub async fn recorded_runners(&self) -> Result<Vec<i64>, Error> {
+        let rows = sqlx::query("SELECT workspace_id FROM runners ORDER BY workspace_id")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| row.try_get("workspace_id").map_err(Into::into))
+            .collect()
+    }
+
     /// シークレットの名前からプレースホルダーへの対応。
     pub async fn placeholders(&self, id: i64) -> Result<BTreeMap<String, String>, Error> {
         let rows = sqlx::query(

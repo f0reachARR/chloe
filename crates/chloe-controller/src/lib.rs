@@ -10,7 +10,7 @@ pub mod runner;
 pub mod store;
 pub mod workspace;
 
-pub use controller::{Controller, DynamicSecrets, Session};
+pub use controller::{Controller, DynamicSecrets, ReconcileReport, Session};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

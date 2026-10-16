@@ -36,6 +36,14 @@ pub trait RunnerBackend: Send + Sync + 'static {
     fn update(&self, spec: RunnerSpec) -> impl Future<Output = Result<(), Error>> + Send;
     /// ランナーのプロキシが本物の値を問い合わせる Unix ソケットの置き場所。
     fn broker_socket(&self, key: &str) -> PathBuf;
+    /// 動いているランナーの guest-agent につながる vsock の Unix ソケット。
+    fn vsock_path(&self, key: &str) -> PathBuf;
+    /// 実際に動いているランナーの識別子の一覧。reconcile で記録と突き合わせる。
+    fn list(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+    /// ランナーが動くホストの名前。段階 9 で、複数のホストを区別するのに使う。
+    fn node(&self) -> &str {
+        "local"
+    }
 }
 
 /// すべてのワークスペースに共通の許可リスト。
