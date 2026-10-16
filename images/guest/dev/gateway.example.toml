@@ -6,6 +6,7 @@
 #   target/debug/chloe-gateway --config images/guest/dev/gateway.example.toml
 #
 # 接続は ssh -p 2222 <GitHub のログイン名>@127.0.0.1 。公開鍵は GitHub に登録したものを使う。
+# GitHub App を設定すると、公開鍵を登録していない利用者は Device Flow でログインできる。
 
 listen = "127.0.0.1:2222"
 host_key = "build/dev/gateway/host_key"
@@ -13,7 +14,10 @@ database = "build/dev/gateway/chloe.db"
 master_key = "build/dev/gateway/master.key"
 idle_timeout_secs = 1800
 
-# ログインを許す GitHub のログイン名。
+# GitHub App の設定 (docs/github-app.md)。アプリの Organization のメンバーがログインできる。
+# github_app = "~/.config/chloe/github-app.toml"
+
+# ログインを許す GitHub のログイン名 (GitHub App の Organization のメンバーに加えて許す)。
 allowed_users = ["your-github-login"]
 
 # team と Organization のワークスペースに入れる利用者 (GitHub App による確認を入れるまでの仮のもの)。
@@ -48,6 +52,35 @@ passthrough = [
     "*.docker.com",
     "*.ubuntu.com",
 ]
+
+# 宛先、メソッド、パスの規則。上から順に評価し、最初に一致した規則で決める。
+# どれにも一致しなければ許可リストだけで判定する。パスの * は一つの階層の中、** は 0 個以上の
+# 階層に一致し、大文字と小文字は区別しない。中継のみ (passthrough) の宛先には効かない。
+[[policy.rules]]
+name = "github-no-delete"
+hosts = ["api.github.com"]
+methods = ["DELETE"]
+paths = ["/repos/**"]
+action = "deny"
+
+# [[policy.rules]]
+# name = "github-org-only"
+# hosts = ["api.github.com"]
+# paths = ["/repos/your-org/**", "/user", "/user/**", "/graphql", "/rate_limit"]
+# action = "allow"
+#
+# [[policy.rules]]
+# name = "github-default-deny"
+# hosts = ["api.github.com"]
+# action = "deny"
+
+# git の push を拒否する (clone と fetch は通す)。
+# [[policy.rules]]
+# name = "no-push"
+# hosts = ["github.com"]
+# methods = ["POST"]
+# paths = ["/*/*/git-receive-pack", "/*/*.git/git-receive-pack"]
+# action = "deny"
 
 [runner]
 guest_dir = "build/guest"
