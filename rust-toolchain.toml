@@ -1,3 +1,5 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
+# ゲストに入れるバイナリは musl で静的にリンクする。
+targets = ["x86_64-unknown-linux-musl"]

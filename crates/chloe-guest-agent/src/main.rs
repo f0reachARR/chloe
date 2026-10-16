@@ -1,1 +1,284 @@
-fn main() {}
+//! ゲスト内常駐のエージェント。
+//!
+//! vsock で待ち受け、ホストからの要求ごとにプロセスを起動して、その入出力を中継する。
+//! 接続を受けるのはホスト (CID 2) からだけで、ゲスト内のプロセスからの接続は拒否する。
+
+use std::process::Stdio;
+
+use anyhow::{Context, Result, bail};
+use chloe_agent_proto::{
+    AGENT_PORT, AgentMessage, ClientMessage, Connection, ExecRequest, ExitStatus, PROTOCOL_VERSION,
+    Receiver, Sender, TtyRequest,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::process::Child;
+use tokio_vsock::{VMADDR_CID_ANY, VMADDR_CID_HOST, VsockAddr, VsockListener, VsockStream};
+use tracing::{info, warn};
+
+/// 利用者を指定しない要求を実行する利用者。
+const DEFAULT_USER: &str = "user";
+const READ_BUF_LEN: usize = 32 * 1024;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, AGENT_PORT))
+        .context("failed to listen on vsock")?;
+    info!(port = AGENT_PORT, "listening");
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        if peer.cid() != VMADDR_CID_HOST {
+            warn!(cid = peer.cid(), "rejected connection from a non-host peer");
+            continue;
+        }
+        tokio::spawn(async move {
+            if let Err(error) = handle(stream).await {
+                warn!("session failed: {error:#}");
+            }
+        });
+    }
+}
+
+async fn handle(stream: VsockStream) -> Result<()> {
+    let mut conn = Connection::new(stream);
+    let Some(ClientMessage::Exec(request)) = conn.recv().await? else {
+        bail!("the first message must be Exec");
+    };
+    let (mut tx, rx) = conn.split();
+    if request.version != PROTOCOL_VERSION {
+        let message = format!(
+            "unsupported protocol version {} (agent speaks {PROTOCOL_VERSION})",
+            request.version
+        );
+        tx.send(&AgentMessage::Error(message)).await?;
+        return Ok(());
+    }
+    info!(command = ?request.command, user = ?request.user, tty = request.tty.is_some(), "exec");
+
+    let result = match request.tty.clone() {
+        Some(tty) => run_with_tty(&mut tx, rx, &request, tty).await,
+        None => run_with_pipes(&mut tx, rx, &request).await,
+    };
+    match result {
+        Ok(status) => tx.send(&AgentMessage::Exited(status)).await?,
+        Err(error) => tx.send(&AgentMessage::Error(format!("{error:#}"))).await?,
+    }
+    Ok(())
+}
+
+/// 実行するプログラムと引数。root 以外の利用者には runuser で切り替える。
+fn command_line(request: &ExecRequest) -> (String, Vec<String>) {
+    let user = request.user.as_deref().unwrap_or(DEFAULT_USER);
+    let command = &request.command;
+    match (command.is_empty(), user == "root") {
+        (true, true) => ("/bin/bash".into(), vec!["--login".into()]),
+        (true, false) => (
+            "/usr/sbin/runuser".into(),
+            vec!["--login".into(), user.into()],
+        ),
+        (false, true) => (command[0].clone(), command[1..].to_vec()),
+        (false, false) => {
+            let mut args = vec!["-u".into(), user.into(), "--".into()];
+            args.extend(command.iter().cloned());
+            ("/usr/sbin/runuser".into(), args)
+        }
+    }
+}
+
+fn working_dir(request: &ExecRequest) -> String {
+    match (&request.cwd, request.user.as_deref()) {
+        (Some(cwd), _) => cwd.clone(),
+        (None, Some("root")) => "/root".into(),
+        (None, _) => "/workspace".into(),
+    }
+}
+
+async fn run_with_tty(
+    tx: &mut Sender<VsockStream>,
+    mut rx: Receiver<VsockStream>,
+    request: &ExecRequest,
+    tty: TtyRequest,
+) -> Result<ExitStatus> {
+    let (pty, pts) = pty_process::open().context("failed to open a pty")?;
+    pty.resize(pty_process::Size::new(tty.size.rows, tty.size.cols))?;
+    let (program, args) = command_line(request);
+    let mut child = pty_process::Command::new(&program)
+        .args(&args)
+        .env("TERM", &tty.term)
+        .envs(request.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(working_dir(request))
+        .spawn(pts)
+        .with_context(|| format!("failed to spawn {program}"))?;
+    send_started(tx, &child).await?;
+
+    let (mut output, mut input) = pty.into_split();
+    let mut buf = vec![0; READ_BUF_LEN];
+    let mut output_open = true;
+    let mut status = None;
+    loop {
+        tokio::select! {
+            read = output.read(&mut buf), if output_open => match read {
+                // プロセスが終わって端末が閉じると EIO になる。
+                Ok(0) | Err(_) => output_open = false,
+                Ok(n) => tx.send(&AgentMessage::Stdout(buf[..n].to_vec())).await?,
+            },
+            message = rx.recv::<ClientMessage>() => match message? {
+                Some(ClientMessage::Stdin(data)) => input.write_all(&data).await?,
+                Some(ClientMessage::Resize(size)) => {
+                    input.resize(pty_process::Size::new(size.rows, size.cols))?;
+                }
+                Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
+                Some(ClientMessage::CloseStdin) => {}
+                Some(ClientMessage::Exec(_)) => bail!("unexpected Exec"),
+                // ホストが切断した。端末を閉じてプロセスに SIGHUP を届ける。
+                None => {
+                    drop(input);
+                    let _ = child.start_kill();
+                    return Ok(exit_status(child.wait().await?));
+                }
+            },
+            exited = child.wait(), if status.is_none() => status = Some(exited?),
+        }
+        if let (false, Some(status)) = (output_open, status) {
+            return Ok(exit_status(status));
+        }
+    }
+}
+
+async fn run_with_pipes(
+    tx: &mut Sender<VsockStream>,
+    mut rx: Receiver<VsockStream>,
+    request: &ExecRequest,
+) -> Result<ExitStatus> {
+    let (program, args) = command_line(request);
+    let mut child = tokio::process::Command::new(&program)
+        .args(&args)
+        .envs(request.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(working_dir(request))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to spawn {program}"))?;
+    send_started(tx, &child).await?;
+
+    let mut stdin = child.stdin.take();
+    let mut stdout = child.stdout.take().context("missing stdout")?;
+    let mut stderr = child.stderr.take().context("missing stderr")?;
+    let mut out_buf = vec![0; READ_BUF_LEN];
+    let mut err_buf = vec![0; READ_BUF_LEN];
+    let (mut stdout_open, mut stderr_open, mut client_open) = (true, true, true);
+    let mut status = None;
+    loop {
+        tokio::select! {
+            read = read_some(&mut stdout, &mut out_buf), if stdout_open => match read {
+                Some(data) => tx.send(&AgentMessage::Stdout(data)).await?,
+                None => stdout_open = false,
+            },
+            read = read_some(&mut stderr, &mut err_buf), if stderr_open => match read {
+                Some(data) => tx.send(&AgentMessage::Stderr(data)).await?,
+                None => stderr_open = false,
+            },
+            message = rx.recv::<ClientMessage>(), if client_open => match message? {
+                Some(ClientMessage::Stdin(data)) => {
+                    if let Some(stdin) = stdin.as_mut() {
+                        // プロセスが標準入力を閉じていても、要求全体は失敗させない。
+                        let _ = stdin.write_all(&data).await;
+                    }
+                }
+                Some(ClientMessage::CloseStdin) => stdin = None,
+                Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
+                Some(ClientMessage::Resize(_)) => {}
+                Some(ClientMessage::Exec(_)) => bail!("unexpected Exec"),
+                None => {
+                    client_open = false;
+                    let _ = child.start_kill();
+                }
+            },
+            exited = child.wait(), if status.is_none() => status = Some(exited?),
+        }
+        if let (false, false, Some(status)) = (stdout_open, stderr_open, status) {
+            return Ok(exit_status(status));
+        }
+    }
+}
+
+async fn read_some(reader: &mut (impl AsyncRead + Unpin), buf: &mut [u8]) -> Option<Vec<u8>> {
+    match reader.read(buf).await {
+        Ok(0) | Err(_) => None,
+        Ok(n) => Some(buf[..n].to_vec()),
+    }
+}
+
+async fn send_started(tx: &mut Sender<VsockStream>, child: &Child) -> Result<()> {
+    let pid = child.id().unwrap_or_default();
+    tx.send(&AgentMessage::Started { pid }).await?;
+    Ok(())
+}
+
+fn send_signal(child: &Child, signal: i32) {
+    let (Some(pid), Some(signal)) = (
+        child
+            .id()
+            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32)),
+        rustix::process::Signal::from_named_raw(signal),
+    ) else {
+        return;
+    };
+    if let Err(error) = rustix::process::kill_process(pid, signal) {
+        warn!("failed to send signal: {error}");
+    }
+}
+
+fn exit_status(status: std::process::ExitStatus) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    ExitStatus {
+        code: status.code(),
+        signal: status.signal(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(command: &[&str], user: Option<&str>) -> ExecRequest {
+        ExecRequest {
+            version: PROTOCOL_VERSION,
+            command: command.iter().map(|s| s.to_string()).collect(),
+            user: user.map(Into::into),
+            env: vec![],
+            cwd: None,
+            tty: None,
+        }
+    }
+
+    #[test]
+    fn login_shell_for_default_user() {
+        let (program, args) = command_line(&request(&[], None));
+        assert_eq!(program, "/usr/sbin/runuser");
+        assert_eq!(args, ["--login", "user"]);
+    }
+
+    #[test]
+    fn command_as_user_goes_through_runuser() {
+        let (program, args) = command_line(&request(&["ls", "-l"], Some("user")));
+        assert_eq!(program, "/usr/sbin/runuser");
+        assert_eq!(args, ["-u", "user", "--", "ls", "-l"]);
+    }
+
+    #[test]
+    fn command_as_root_runs_directly() {
+        let (program, args) = command_line(&request(&["ls", "-l"], Some("root")));
+        assert_eq!(program, "ls");
+        assert_eq!(args, ["-l"]);
+        assert_eq!(working_dir(&request(&[], Some("root"))), "/root");
+    }
+}
