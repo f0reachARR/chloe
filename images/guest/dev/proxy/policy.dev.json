@@ -1,0 +1,49 @@
+{
+  "allow": [
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "sentry.io",
+    "*.sentry.io",
+    "api.openai.com",
+    "auth.openai.com",
+    "chatgpt.com",
+    "*.chatgpt.com",
+    "github.com",
+    "api.github.com",
+    "*.githubusercontent.com",
+    "httpbin.org",
+    "example.org"
+  ],
+  "passthrough": [
+    "registry-1.docker.io",
+    "auth.docker.io",
+    "*.docker.com",
+    "*.ubuntu.com"
+  ],
+  "inject": [
+    {
+      "name": "test",
+      "placeholder": "chloe-ph-test-4f1d2c9a7b",
+      "hosts": ["httpbin.org"],
+      "header": "authorization",
+      "format": "replace",
+      "secret_env": "CHLOE_SECRET_TEST"
+    },
+    {
+      "name": "anthropic",
+      "placeholder": "sk-ant-api03-chloe-ph-8e2a6f0c31d94b7a",
+      "hosts": ["api.anthropic.com"],
+      "header": "x-api-key",
+      "format": "replace",
+      "secret_env": "CHLOE_SECRET_ANTHROPIC"
+    },
+    {
+      "name": "openai",
+      "placeholder": "sk-proj-chloe-ph-5b7d3e1f9a2c4068",
+      "hosts": ["api.openai.com"],
+      "header": "authorization",
+      "format": "replace",
+      "secret_env": "CHLOE_SECRET_OPENAI"
+    }
+  ]
+}

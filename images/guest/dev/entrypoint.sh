@@ -1,30 +1,110 @@
 #!/bin/sh
-# コンテナのネットワーク namespace に tap0 を作り、VM からの通信をコンテナの外へ NAT する。
-# 段階 1 では宛先を絞らない。段階 2 でプロキシへの転送と遮断に置き換える。
+# コンテナのネットワーク namespace に tap0 を作り、VM の通信の出口を用意してから Firecracker を起動する。
+#
+# CHLOE_NET_MODE で出口の作り方を選ぶ。
+#   nat   : VM からの通信をそのまま NAT する (段階 1)。
+#   proxy : 80 番と 443 番を mitmproxy の transparent モードへ転送し、それ以外を遮断する (段階 2)。
+# どちらのモードでも、VM の DNS はこのコンテナの dnsmasq (172.29.0.1) が答える。
 set -eu
 
+CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}"
 VCPUS="${VCPUS:-4}"
 MEM_MIB="${MEM_MIB:-4096}"
+logs=/state/logs
+mkdir -p "$logs"
 
 ip tuntap add tap0 mode tap
-ip addr add 10.0.0.1/30 dev tap0
+ip addr add 172.29.0.1/30 dev tap0
 ip link set tap0 up
 
 uplink="$(ip -o route show default | awk '{ print $5 }')"
-nft -f - <<EOF
-table ip chloe {
+upstream_dns="$(awk '/^nameserver/ { print $2; exit }' /etc/resolv.conf)"
+
+case "$CHLOE_NET_MODE" in
+nat)
+    nft -f - <<EOF
+table inet chloe {
+    chain prerouting {
+        type nat hook prerouting priority dstnat;
+        iifname "tap0" meta l4proto { tcp, udp } th dport 53 dnat ip to 172.29.0.1:53
+    }
     chain forward {
         type filter hook forward priority 0; policy drop;
         iifname "tap0" oifname "$uplink" accept
         iifname "$uplink" oifname "tap0" ct state established,related accept
     }
     chain postrouting {
-        type nat hook postrouting priority 100;
+        type nat hook postrouting priority srcnat;
         iifname "tap0" oifname "$uplink" masquerade
     }
 }
 EOF
-echo 1 > /proc/sys/net/ipv4/ip_forward
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    ;;
+proxy)
+    nft -f - <<EOF
+table inet chloe {
+    chain prerouting {
+        type nat hook prerouting priority dstnat;
+        iifname "tap0" meta l4proto { tcp, udp } th dport 53 dnat ip to 172.29.0.1:53
+        iifname "tap0" tcp dport { 80, 443 } redirect to :8080
+    }
+    chain input {
+        type filter hook input priority 0; policy accept;
+        iifname "tap0" ct state established,related accept
+        iifname "tap0" meta l4proto { tcp, udp } th dport 53 accept
+        iifname "tap0" tcp dport 8080 accept
+        iifname "tap0" counter drop
+    }
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        iifname "tap0" counter drop
+    }
+}
+EOF
+    echo 0 > /proc/sys/net/ipv4/ip_forward
+
+    # 検証用の偽の秘密情報。本物の API キーは使わない。
+    export CHLOE_SECRET_TEST="${CHLOE_SECRET_TEST:-real-secret-for-test}"
+    export CHLOE_SECRET_ANTHROPIC="${CHLOE_SECRET_ANTHROPIC:-sk-ant-api03-not-a-real-key}"
+    export CHLOE_SECRET_OPENAI="${CHLOE_SECRET_OPENAI:-sk-proj-not-a-real-key}"
+
+    mkdir -p /state/mitmproxy
+    /opt/mitmproxy/bin/mitmdump \
+        --mode transparent \
+        --listen-port 8080 \
+        --set confdir=/state/mitmproxy \
+        --set connection_strategy=lazy \
+        --set block_global=false \
+        -s /opt/chloe/proxy/chloe_policy.py \
+        --set chloe_policy="${CHLOE_POLICY:-/opt/chloe/proxy/policy.dev.json}" \
+        --set chloe_log="$logs/requests.jsonl" \
+        > "$logs/mitmdump.log" 2>&1 &
+    proxy_pid=$!
+    # 待ち受けを始めるまで待つ。アドオンの読み込みに失敗すると mitmdump は終了する。
+    for _ in $(seq 100); do
+        grep -q "listening at" "$logs/mitmdump.log" 2>/dev/null && break
+        sleep 0.1
+    done
+    sleep 0.5
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+        echo "mitmdump failed to start:" >&2
+        cat "$logs/mitmdump.log" >&2
+        exit 1
+    fi
+    ;;
+*)
+    echo "unknown CHLOE_NET_MODE: $CHLOE_NET_MODE" >&2
+    exit 1
+    ;;
+esac
+
+dnsmasq \
+    --keep-in-foreground --no-resolv --no-hosts \
+    --listen-address=172.29.0.1 --bind-interfaces \
+    --server="$upstream_dns" \
+    --address="/ca.chloe.internal/172.29.0.1" \
+    --log-facility="$logs/dnsmasq.log" --log-queries &
 
 # 確認用のドライブ (/dev/vdd) があれば読み取り専用で付ける。
 extra_drive=""
@@ -46,7 +126,7 @@ cat > /tmp/vm.json <<EOF
   ],
   "machine-config": { "vcpu_count": $VCPUS, "mem_size_mib": $MEM_MIB },
   "network-interfaces": [
-    { "iface_id": "eth0", "guest_mac": "06:00:0a:00:00:02", "host_dev_name": "tap0" }
+    { "iface_id": "eth0", "guest_mac": "06:00:ac:1d:00:02", "host_dev_name": "tap0" }
   ],
   "vsock": { "guest_cid": 3, "uds_path": "/state/vsock.sock" }
 }
