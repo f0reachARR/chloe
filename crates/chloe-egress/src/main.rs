@@ -8,6 +8,7 @@
 //! - 上流の接続先は SNI (平文なら Host) から決め、VM が接続しようとした IP アドレスは使わない。
 
 mod ca;
+mod control;
 mod log;
 mod service;
 
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chloe_policy::{Policy, PolicyConfig, TlsDecision};
+use chloe_policy::{PolicyConfig, TlsDecision};
 use clap::Parser;
 use rama::error::BoxError;
 use rama::extensions::ExtensionsRef;
@@ -69,6 +70,9 @@ struct Cli {
     /// 要求のログ (JSON Lines)。
     #[arg(long)]
     log: Option<PathBuf>,
+    /// 方針と本物の値を動いたまま入れ替えるための制御用の Unix ソケット。
+    #[arg(long)]
+    control: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -83,10 +87,8 @@ async fn main() -> Result<()> {
     let config: PolicyConfig = serde_json::from_slice(
         &std::fs::read(&cli.policy).with_context(|| format!("read {}", cli.policy.display()))?,
     )?;
-    let policy = Arc::new(Policy::new(config, |rule| {
-        // 検証用なので、本物の値はランナーの環境変数から読む。
-        std::env::var(&rule.secret_env).map_err(|e| format!("{}: {e}", rule.secret_env))
-    })?);
+    // 起動時の本物の値は、ランナーの環境変数から読む。
+    let policy = control::SharedPolicy::new(control::build_policy(config, &Default::default())?);
     let ca = ca::load_or_generate(&cli.ca_dir)?;
     let logger = Arc::new(Logger::open(cli.log.as_deref())?);
 
@@ -147,6 +149,14 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("bind https listener: {e}"))?;
     tracing::info!(http = %cli.http_listen, https = %cli.https_listen, "listening");
 
+    if let Some(path) = cli.control.clone() {
+        let policy = policy.clone();
+        shutdown.spawn_task(async move {
+            if let Err(error) = control::serve(&path, policy).await {
+                tracing::error!("control socket failed: {error:#}");
+            }
+        });
+    }
     shutdown.spawn_task(http_listener.serve(HttpServer::auto(exec.clone()).service(http_svc)));
     shutdown.spawn_task(https_listener.serve(SniRouter::new(SniRouterService {
         policy,
@@ -175,7 +185,7 @@ async fn relay_websocket_message(
 /// SNI を見て、復号するか中継するかを決める。
 #[derive(Clone)]
 struct SniRouterService<T> {
-    policy: Arc<Policy>,
+    policy: control::SharedPolicy,
     logger: Arc<Logger>,
     https_svc: T,
     exec: Executor,
@@ -191,9 +201,10 @@ where
 
     async fn serve(&self, SniRequest { sni, stream }: SniRequest<S>) -> Result<(), BoxError> {
         let sni_str = sni.as_ref().map(|d| d.to_string());
-        if let (Some(sni), TlsDecision::Passthrough) =
-            (sni.clone(), self.policy.tls_decision(sni_str.as_deref()))
-        {
+        if let (Some(sni), TlsDecision::Passthrough) = (
+            sni.clone(),
+            self.policy.current().tls_decision(sni_str.as_deref()),
+        ) {
             self.logger.log(Event::Passthrough { host: sni.as_ref() });
             return IoToProxyBridgeIoLayer::new(HostWithPort {
                 host: sni.clone().into(),

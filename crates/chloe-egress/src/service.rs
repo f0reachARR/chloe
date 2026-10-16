@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use chloe_policy::{Decision, Policy, Request as PolicyRequest};
+use chloe_policy::{Decision, Request as PolicyRequest};
 use rama::Service;
 use rama::error::{BoxError, ErrorContext as _};
 use rama::extensions::{Extension, ExtensionsRef as _};
@@ -24,7 +24,7 @@ pub const BODY_SCAN_LIMIT: u64 = 1 << 20;
 pub struct IngressSni(pub Domain);
 
 pub struct EgressService<C> {
-    pub policy: Arc<Policy>,
+    pub policy: crate::control::SharedPolicy,
     pub client: C,
     pub logger: Arc<Logger>,
     pub ca_pem: Arc<str>,
@@ -98,7 +98,7 @@ where
             Some(query) => format!("{path}?{query}"),
             None => path.clone(),
         };
-        let decision = self.policy.evaluate(&mut PolicyRequest {
+        let decision = self.policy.current().evaluate(&mut PolicyRequest {
             host: &host,
             sni: sni.as_deref(),
             tls: sni.is_some(),
