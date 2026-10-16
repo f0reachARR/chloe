@@ -1,0 +1,8 @@
+# GitHub には HTTPS でつなぐ (22 番は遮断している)。認証には GH_TOKEN のプレースホルダーを渡し、
+# ランナーのプロキシが github.com 宛ての Basic 認証のパスワードを本物のトークンに差し替える。
+[url "https://github.com/"]
+	insteadOf = git@github.com:
+	insteadOf = ssh://git@github.com/
+[credential "https://github.com"]
+	helper =
+	helper = "!f() { test \"$1\" = get && test -n \"$GH_TOKEN\" && echo username=x-access-token && echo \"password=$GH_TOKEN\"; }; f"
