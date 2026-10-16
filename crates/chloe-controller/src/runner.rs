@@ -39,6 +39,9 @@ pub struct BasePolicy {
     pub allow: Vec<String>,
     #[serde(default)]
     pub passthrough: Vec<String>,
+    /// 宛先、メソッド、パスの規則。上から順に評価する。
+    #[serde(default)]
+    pub rules: Vec<chloe_policy::PathRuleConfig>,
 }
 
 /// ワークスペースのランナーの起動に必要なものを組み立てる。
@@ -56,6 +59,7 @@ pub fn build_spec(
         allow: base.allow.clone(),
         passthrough: base.passthrough.clone(),
         inject: vec![],
+        rules: base.rules.clone(),
     };
     let mut guest_env = Vec::new();
     let mut runner_secrets = Vec::new();
@@ -118,6 +122,7 @@ mod tests {
         let base = BasePolicy {
             allow: vec!["api.anthropic.com".into()],
             passthrough: vec!["registry-1.docker.io".into()],
+            rules: vec![],
         };
         let spec = build_spec(
             &ws,
