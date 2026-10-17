@@ -7,7 +7,7 @@ use chloe_controller::catalog::{self, SecretInput, SecretSpec};
 use chloe_controller::runner::{PolicyLayer, most_specific};
 use chloe_controller::store::{ApiToken, SshKey};
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
-use chloe_secrets::Owner;
+use chloe_secrets::{ExposeSecret, Owner};
 use serde::Serialize;
 
 use crate::access::personal;
@@ -294,6 +294,52 @@ pub async fn set_secret(
         .set_with_spec(owner, name, &value.into(), spec.as_deref())
         .await?;
     shared.refresh_running_under(owner).await;
+    Ok(())
+}
+
+/// 値を書かなかった欄を、登録してある今の値で埋める。値を入れ直さずに定義だけを変えるとき
+/// (管理の TUI) に使う。値は呼び出し側に見せずに、そのまま登録し直すためだけに読む。
+pub async fn keep_secret_values(
+    shared: &Shared,
+    login: &str,
+    owner: &Owner,
+    name: &str,
+    input: &mut SecretInput,
+) -> Result<()> {
+    let single_missing = input.fields.is_empty() && input.value.is_none();
+    let missing: Vec<String> = input
+        .fields
+        .iter()
+        .filter(|(_, f)| f.value.is_empty())
+        .map(|(n, _)| n.clone())
+        .collect();
+    if !single_missing && missing.is_empty() {
+        return Ok(());
+    }
+    check_secret_name(name)?;
+    check_secret_manager(shared, login, owner).await?;
+    let Some((stored_value, stored)) = shared
+        .controller
+        .secrets()
+        .get_with_spec(owner, name)
+        .await?
+    else {
+        return Err(Error::Invalid("enter the value".into()));
+    };
+    let spec = stored_spec(name, stored.as_deref(), shared.controller.preset(name))?;
+    let current = |field: &str| {
+        spec.field_value(stored_value.expose_secret(), field)
+            .ok_or_else(|| Error::Invalid(format!("enter the value of {field}")))
+    };
+    if single_missing {
+        input.value = Some(current(catalog::VALUE)?);
+    }
+    for field in missing {
+        let value = current(&field)?;
+        if let Some(input) = input.fields.get_mut(&field) {
+            input.value = value;
+        }
+    }
     Ok(())
 }
 
