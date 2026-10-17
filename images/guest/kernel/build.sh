@@ -12,14 +12,23 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
 out="$root/build/guest/kernel"
 cache="$root/build/cache"
+# カーネルのソースとビルドの途中のファイル。残しておき、次のビルドを差分で済ませる。
+src="$cache/kernel-$KERNEL_VERSION"
 mkdir -p "$out" "$cache"
+# shellcheck source=../build-lib.sh
+source "$here/../build-lib.sh"
+steps 6
 
 major="${KERNEL_VERSION%%.*}"
 tarball="linux-$KERNEL_VERSION.tar.xz"
 base_config="microvm-kernel-ci-x86_64-${KERNEL_VERSION%.*}.config"
 
-if [[ ! -f "$cache/$tarball" ]]; then
-    curl -fsSL --output "$cache/$tarball.part" \
+step "download Linux $KERNEL_VERSION"
+if [[ -f "$cache/$tarball" ]]; then
+    echo "      using $cache/$tarball" >&2
+else
+    # shellcheck disable=SC2046
+    curl -fL $(curl_progress) --output "$cache/$tarball.part" \
         "https://cdn.kernel.org/pub/linux/kernel/v$major.x/$tarball"
     curl -fsSL --output "$cache/sha256sums.asc" \
         "https://cdn.kernel.org/pub/linux/kernel/v$major.x/sha256sums.asc"
@@ -32,26 +41,36 @@ if [[ ! -f "$cache/$tarball" ]]; then
     mv "$cache/$tarball.part" "$cache/$tarball"
 fi
 
+step "download the base configuration (Firecracker $FIRECRACKER_VERSION)"
 curl -fsSL --output "$cache/$base_config" \
     "https://raw.githubusercontent.com/firecracker-microvm/firecracker/$FIRECRACKER_VERSION/resources/guest_configs/$base_config"
 curl -fsSL --output "$cache/check-config.sh" \
     "https://raw.githubusercontent.com/moby/moby/master/contrib/check-config.sh"
 
+step "prepare the build container"
 docker build -q -t chloe-kernel-builder -f "$here/builder.Dockerfile" "$here" >/dev/null
 
-docker run --rm \
-    --user "$(id -u):$(id -g)" \
-    -v "$cache:/cache:ro" \
-    -v "$here:/chloe:ro" \
-    -v "$out:/out" \
-    -e KERNEL_VERSION="$KERNEL_VERSION" \
-    -e BASE_CONFIG="$base_config" \
-    chloe-kernel-builder bash -euo pipefail -c '
-        work=/tmp/build
-        mkdir -p "$work"
-        tar -C "$work" -xf "/cache/linux-$KERNEL_VERSION.tar.xz"
-        cd "$work/linux-$KERNEL_VERSION"
+# ビルド用のコンテナで実行する。作業ディレクトリはカーネルのソース (なければ /cache)。
+builder() {
+    local workdir="/cache/kernel-$KERNEL_VERSION"
+    [[ -d "$src" ]] || workdir=/cache
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -v "$cache:/cache" \
+        -v "$here:/chloe:ro" \
+        -v "$out:/out" \
+        -e KERNEL_VERSION="$KERNEL_VERSION" \
+        -e BASE_CONFIG="$base_config" \
+        -w "$workdir" \
+        chloe-kernel-builder bash -euo pipefail -c "$1"
+}
 
+step "extract and configure"
+if [[ ! -f "$src/Makefile" ]]; then
+    rm -rf "$src"
+    builder 'tar -xf "linux-$KERNEL_VERSION.tar.xz" && mv "linux-$KERNEL_VERSION" "kernel-$KERNEL_VERSION"'
+fi
+builder '
         cp "/cache/$BASE_CONFIG" .config
         scripts/kconfig/merge_config.sh -m .config /chloe/chloe.config >/dev/null
         make olddefconfig >/dev/null
@@ -66,12 +85,14 @@ docker run --rm \
             fi
         done < /chloe/chloe.config
         [[ "$missing" == 0 ]]
-
-        make -j"$(nproc)" vmlinux >/dev/null
-        cp vmlinux /out/vmlinux
-        cp .config /out/config
     '
 
+step "compile (the full log is in $out/build.log)"
+with_count "$out/build.log" '^  (CC|AS|LD|AR) ' "files compiled" \
+    builder 'make -j"$(nproc)" vmlinux && cp vmlinux /out/vmlinux && cp .config /out/config'
+
+step "check the Docker requirements"
 bash "$cache/check-config.sh" "$out/config" > "$out/check-config.txt" || true
+finish
 echo "kernel: $out/vmlinux"
 echo "docker check: $out/check-config.txt"

@@ -46,6 +46,10 @@ docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/gu
 cargo build --release -p chloe-gateway -p chloe-egress -p chloe-node
 ```
 
+どちらのスクリプトも、手順ごとに番号と所要時間を表示する。
+カーネルのコンパイルは数分かかり、そのあいだはコンパイルしたファイルの数を表示する（全体のログは `build/guest/kernel/build.log`）。
+カーネルのソースとビルドの途中のファイルは `build/cache/` に残り（約 2GB）、二回目からは差分だけをビルドする。
+
 ルートファイルシステムには、ビルドしたときの最新の Claude Code（stable）と、`rootfs/Dockerfile` で版を決めた Codex が入る。
 更新するときはビルドし直す（「更新」を参照）。
 
