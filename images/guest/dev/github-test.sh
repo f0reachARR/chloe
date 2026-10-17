@@ -155,8 +155,9 @@ idle_timeout_secs = 5
 github_app = "$work/github-app.toml"
 allowed_users = ["bob"]
 
-[policy]
-allow = ["httpbin.org"]
+[[policy.rules]]
+hosts = ["httpbin.org"]
+action = "allow"
 
 [runner]
 guest_dir = "$root/build/guest"
@@ -275,12 +276,12 @@ check beta-api "401" as dave+beta/app "curl -s -o /dev/null -w '%{http_code}' -H
 check beta-token-served "secret served" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "secret served" | grep "beta/app" | grep -o "secret served.*github_token" | tail -1' "$logs/gateway.log"
 
 section "organization settings"
-check policy-not-admin "only the administrators" sh -c 'printf "allow = [\"example.org\"]\n" | "$@"' _ \
+check policy-not-admin "only the administrators" sh -c 'printf "[[rules]]\nhosts = [\"example.org\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/dave" dave@127.0.0.1 chloe policy set beta
 check policy-maintainer-not-admin "only the administrators" sh -c 'printf "root = \"persistent\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe policy set acme/dev
 check org-blocked-before "000" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
-check policy-set "saved the settings of acme" sh -c 'printf "allow = [\"example.org\"]\n" | "$@"' _ \
+check policy-set "saved the settings of acme" sh -c 'printf "[[rules]]\nhosts = [\"example.org\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
 check policy-show "example.org" as erin chloe policy show acme
 check org-allowed-after "200" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
@@ -290,7 +291,7 @@ check team-root-default "saved the settings of acme/dev" sh -c 'printf "root = \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme/dev
 as alice chloe ws create acme/dev/new >/dev/null
 check team-root-applied "acme/dev/new	persistent" as alice chloe ws list
-check policy-invalid "invalid settings" sh -c 'printf "allow = 1\n" | "$@"' _ \
+check policy-invalid "invalid settings" sh -c 'printf "rules = 1\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
 
 section "installation token scope"

@@ -52,8 +52,9 @@ idle_timeout_secs = 5
 reconcile_interval_secs = 2
 allowed_users = ["alice", "bob"]
 
-[policy]
-allow = ["httpbin.org"]
+[[policy.rules]]
+hosts = ["httpbin.org"]
+action = "allow"
 
 [cluster]
 listen = "127.0.0.1:$internal_port"

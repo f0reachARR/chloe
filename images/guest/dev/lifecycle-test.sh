@@ -54,8 +54,9 @@ activity_poll_secs = 1
 reconcile_interval_secs = 2
 allowed_users = ["alice"]
 
-[policy]
-allow = ["httpbin.org", "statsig.anthropic.com"]
+[[policy.rules]]
+hosts = ["httpbin.org", "statsig.anthropic.com"]
+action = "allow"
 
 [runner]
 guest_dir = "$root/build/guest"
