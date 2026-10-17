@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chloe_policy::InjectFormat;
+use secrecy::zeroize::Zeroize as _;
 use serde::{Deserialize, Serialize};
 
 /// 欄が一つのシークレットの欄の名前。
@@ -93,7 +94,12 @@ impl SecretSpec {
             return (field == VALUE).then(|| stored.to_string());
         }
         let mut values: BTreeMap<String, String> = serde_json::from_str(stored).ok()?;
-        values.remove(field)
+        let value = values.remove(field);
+        // 使わない欄の値も、捨てる前に消す。
+        for other in values.values_mut() {
+            other.zeroize();
+        }
+        value
     }
 
     /// 欄ごとの値を保存する形にする。欄が定義と合わなければ失敗にする。
