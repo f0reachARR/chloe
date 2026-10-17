@@ -202,6 +202,11 @@ check ws-create-not-member "not a member" as bob chloe ws create acme/proj2
 check ws-org-member "user" as alice+acme/proj 'id -un'
 check ws-org-not-member "Permission denied" as bob+acme/proj true
 check ws-org-list "acme/proj	persistent" as alice chloe ws list
+check ws-disk-grow "30G workspace disk and a 40G Docker disk from the next start" as alice chloe ws disk acme/proj --workspace 30G
+check ws-disk-no-shrink "cannot be shrunk" as alice chloe ws disk acme/proj --workspace 25G
+check ws-disk-limit "between 1 and 400 GiB" as alice chloe ws disk acme/proj --docker 401G
+check ws-disk-stop "stopped acme/proj" as alice chloe ws stop acme/proj
+check ws-disk-grown "30G" as alice+acme/proj 'df -BG --output=size /workspace | tail -1'
 check admin-policy "saved the settings of acme" sh -c 'printf "[[rules]]\nhosts = [\"example.org\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
 check not-admin-policy "only the administrators" sh -c 'printf "rules = []\n" | "$@"' _ \
@@ -261,7 +266,7 @@ check api-no-token "401" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.
 check api-wrong-token "401" api chloe_wrong GET /v1/me
 check api-me '"login":"alice"' api "$alice_token" GET /v1/me
 check api-list '"name":"default"' api "$alice_token" GET /v1/workspaces
-check api-create '"name":"acme/from-api","root":"ephemeral","running":false} 201' \
+check api-create '"name":"acme/from-api","root":"ephemeral","running":false,"workspace_disk_gib":20,"docker_disk_gib":40} 201' \
     api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
 check api-create-visible-by-ssh "acme/from-api" as alice chloe ws list
 check api-create-not-member "not a member of org:acme" api "$bob_token" POST /v1/workspaces -d '{"name":"acme/bob"}'
