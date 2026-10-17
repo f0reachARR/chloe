@@ -125,6 +125,22 @@ impl RunnerBackend for DockerBackend {
         let mut response = String::new();
         BufReader::new(stream).read_line(&mut response).await?;
         if response.contains("\"ok\":true") {
+            // VM の DNS が問い合わせる名前の一覧も、新しい方針から作り直す。
+            let policy = self.state_dir(&spec.key).join("config/policy.json");
+            let json = serde_json::to_vec_pretty(&spec.policy)
+                .map_err(|e| Error::Runner(e.to_string()))?;
+            tokio::fs::write(&policy, json).await?;
+            let output = Command::new("docker")
+                .args(["exec", &self.container(&spec.key)])
+                .args(["/opt/chloe/dns-update.sh", "/state/config/policy.json"])
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Err(Error::Runner(format!(
+                    "failed to update the DNS allowlist: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
             Ok(())
         } else {
             Err(Error::Runner(format!(

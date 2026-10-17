@@ -1,0 +1,19 @@
+#!/bin/sh
+# 方針 (policy.json) の許可リストから、dnsmasq が上流に問い合わせる名前の一覧を作り直す。
+#
+#   dns-update.sh <policy.json> [--no-reload]
+#
+# "*.example.com" は dnsmasq では example.com とそのサブドメインに一致する (少し広い)。
+# --no-reload がなければ、dnsmasq に SIGHUP を送って一覧を読み直させる。
+set -eu
+policy="$1"
+upstream="$(cat /run/chloe-upstream-dns)"
+tmp=/run/dnsmasq-servers.conf.tmp
+: > "$tmp"
+for name in $(jq -r '(.allow + .passthrough)[] | ltrimstr("*.")' "$policy"); do
+    echo "server=/$name/$upstream" >> "$tmp"
+done
+mv "$tmp" /run/dnsmasq-servers.conf
+if [ "${2:-}" != --no-reload ]; then
+    kill -HUP "$(cat /run/dnsmasq.pid)"
+fi

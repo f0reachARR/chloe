@@ -116,13 +116,12 @@ esac
 
 # proxy モードでは、許可リストにある名前だけを上流に問い合わせ、それ以外は NXDOMAIN を返す。
 # DNS の問い合わせ名に情報を載せて持ち出す経路を塞ぐためである。
-# "*.example.com" は dnsmasq では example.com とそのサブドメインに一致する (少し広い)。
+# 上流の一覧は --servers-file に書き、方針が変わったら dns-update.sh で書き直して読み直させる。
+echo "$upstream_dns" > /run/chloe-upstream-dns
 dns_servers="--server=$upstream_dns"
 if [ "$CHLOE_NET_MODE" = proxy ]; then
-    dns_servers="--address=/#/"
-    for name in $(jq -r '(.allow + .passthrough)[] | ltrimstr("*.")' "${CHLOE_POLICY:-/opt/chloe/policy.dev.json}"); do
-        dns_servers="$dns_servers --server=/$name/$upstream_dns"
-    done
+    /opt/chloe/dns-update.sh "${CHLOE_POLICY:-/opt/chloe/policy.dev.json}" --no-reload
+    dns_servers="--address=/#/ --servers-file=/run/dnsmasq-servers.conf"
 fi
 # shellcheck disable=SC2086
 dnsmasq \
@@ -131,6 +130,7 @@ dnsmasq \
     $dns_servers \
     --address="/ca.chloe.internal/172.29.0.1" \
     --log-facility="$logs/dnsmasq.log" --log-queries &
+echo $! > /run/dnsmasq.pid
 
 # ワークスペースと Docker のディスクがなければ作る。持ち主は状態のディレクトリに合わせる。
 for pair in "workspace:${WORKSPACE_SIZE:-20G}" "docker:${DOCKER_SIZE:-40G}"; do
