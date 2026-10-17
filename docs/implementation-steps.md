@@ -414,6 +414,24 @@ VM の環境変数（プレースホルダー）は起動時に決まるので�
 - **複数の Organization**：一つの GitHub App を複数の Organization にインストールして使う。今の `organization` の一つだけを前提にしている部分（所属の確認、インストールトークン）を、インストールごとに扱うように広げる。
 - **シークレット**：Organization と team のシークレットを、その管理者が登録できるようにする。
 
+### 決めたこと（2026-10-17）
+
+- **使える Organization**：GitHub App をインストールしたすべての Organization。そのどれかのメンバーであればログインできる。だれでもアプリをインストールできると、だれでも chloe を使えてしまうので、GitHub App は非公開（持ち主のアカウントだけがインストールできる）にしておく。
+- **設定を変えられる人**：Organization と、その team の設定は、GitHub でその Organization の管理者（`admin` の役割）である利用者だけが変えられる。
+- **シークレットを登録できる人**：Organization のシークレットは Organization の管理者が、team のシークレットは Organization の管理者と team の maintainer が登録、変更、削除できる。メンバーはワークスペースの中で使えるが、値は読めない（プレースホルダーだけが見える）。
+- **インストールトークンの範囲**：既定では、アプリのインストールのすべてのリポジトリと権限のトークンを渡す。Organization の管理者は、Organization や team ごとに、リポジトリの一覧と権限（たとえば `contents: read`）に絞れる。
+- **個人のワークスペース**：全体の設定だけを使う。所属する Organization の設定は重ねない（どの Organization の設定を使うかが決まらないため）。
+
+### 進め方
+
+1. **8a 複数の Organization**：`chloe-github` を、インストールごとにインストールトークンを持ち、Organization を指定して所属を確かめる形にする。ゲートウェイのログインとワークスペースの所属の確認を、インストールしたすべての Organization に広げる。
+2. **8b 役割**：Organization の管理者と team の maintainer を GitHub に問い合わせる（`/orgs/{org}/memberships/{user}` の `role`、`/orgs/{org}/teams/{team}/memberships/{user}` の `role`）。
+3. **8c 設定の層**：データベースに Organization と team の設定（許可リスト、中継のみの宛先、パスの規則、ルートの扱いの既定）を置き、全体、Organization、team の順に重ねて方針を作る。`chloe policy show|set|rm <持ち主>` で読み書きし、変えたら動いているランナーに送る。
+4. **8d Organization と team のシークレット**：`chloe secret set|rm|list --owner <持ち主>` を、8b の役割で許す。
+5. **8e インストールトークンの範囲**：設定の層に、リポジトリと権限を足し、インストールトークンを発行するときに指定する。範囲ごとにトークンをキャッシュする。
+
+各段階の確認は、GitHub のふりをするサーバーに Organization を二つ置いて、`github-test.sh` に足す。
+
 ## 段階 9：複数台の物理サーバー
 
 今はゲートウェイ、controller、ランナーが一台のホストにあり、Unix ソケットと Docker の CLI でつながっている。
