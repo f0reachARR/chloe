@@ -17,6 +17,7 @@ ssh chloe@chloe.example.com
 承認したときに使っていた公開鍵は、その利用者に結び付く。
 次からは、同じ鍵で Device Flow なしに入れる。
 鍵を持っていなければ、毎回 Device Flow になる。
+ssh-agent に鍵がいくつもあるときは、クライアントが最初に出した鍵が結び付く（`-i` と `IdentitiesOnly yes` で鍵を決めておくとよい）。
 
 GitHub のログイン名をユーザー名にしても入れる（`ssh alice@chloe.example.com`）。
 GitHub に登録した公開鍵か、結び付けた鍵で入れるが、一度は Device Flow を済ませる必要がある。
@@ -223,6 +224,42 @@ ssh -N -L 8080:127.0.0.1:3000 chloe@chloe.example.com
 `-L` の接続先は、VM の中から見た宛先である。
 手元から VM の外へ抜ける経路にはならない（VM の中からつなげる宛先にしかつながらない）。
 リモートの転送（`-R`）はまだできない。
+
+## 管理の画面
+
+端末を割り当てて `chloe` だけを実行すると、管理の画面（TUI）が開く。
+
+```sh
+ssh -t chloe@chloe.example.com chloe
+```
+
+ワークスペース、シークレット、Organization と team の設定、管理 API のトークン、結び付けた SSH の鍵、GitHub のサインインを、タブごとに扱える。
+シークレットと設定は、TOML を書かずに欄ごとのフォームで編集する。
+シークレットは、`deploy/secrets/` の例を雛形にして作れる。
+登録したシークレットの定義を変えるとき、値の欄を空のままにすると今の値を使い続ける。
+
+| キー | 操作 |
+| --- | --- |
+| `←` `→`、`1`〜`6` | タブを切り替える |
+| `↑` `↓` | 一覧で選ぶ |
+| `n`、`Enter`、`d` | 作る、編集する、消す（タブの下に、そのタブで使えるキーが出る） |
+| `Tab`、`↑` `↓` | フォームの欄を移る |
+| `←` `→` | フォームの選択の欄を切り替える |
+| `Enter` | フォームの規則の一覧を開く（一覧では `a` で足し、`d` で消し、`Esc` で戻る） |
+| `Ctrl+S`、`Esc` | フォームを保存する、閉じる |
+| `q`、`Ctrl+C` | 終わる |
+
+`~/.ssh/config` に次のように書いておくと、`ssh chloe-admin` で開ける。
+
+```text
+Host chloe-admin
+    HostName chloe.example.com
+    User chloe
+    RequestTTY yes
+    RemoteCommand chloe
+```
+
+端末を割り当てないとき（`ssh chloe@chloe.example.com chloe`）は、コマンドの一覧を出す。
 
 ## `chloe` コマンド
 
