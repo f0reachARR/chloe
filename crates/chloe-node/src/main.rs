@@ -141,3 +141,15 @@ async fn run(path: &Path) -> Result<()> {
     chloe_mtls::serve(listener, tls, api::router(state)).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// リポジトリに置いた設定の例が読めること。
+    #[test]
+    fn parses_shipped_example() {
+        let config: Config = toml::from_str(include_str!("../../../deploy/node.toml")).unwrap();
+        assert_eq!(config.runner.image, "chloe-dev-runner");
+    }
+}

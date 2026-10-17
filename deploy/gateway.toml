@@ -1,0 +1,84 @@
+# ゲートウェイの設定の例 (/etc/chloe/gateway.toml)。配置は docs/install.md の「配置」に合わせてある。
+#
+#   sudo install -m 644 deploy/gateway.toml /etc/chloe/gateway.toml
+#   sudo systemctl enable --now chloe-gateway
+#
+# 接続は ssh <GitHub のログイン名>@<ホスト> 。公開鍵は GitHub に登録したものを使う。
+# GitHub App を設定すると、公開鍵を登録していない利用者は Device Flow でログインできる。
+
+# ホストの sshd が 22 番を使っているなら、sshd を別のポートに移すか、ここを別のポートにする。
+listen = "0.0.0.0:22"
+# ホスト鍵、データベース、マスター鍵は、なければ作る。
+host_key = "/var/lib/chloe/host_key"
+database = "/var/lib/chloe/chloe.db"
+master_key = "/var/lib/chloe/master.key"
+# 監査ログ (JSON Lines)。ログイン、セッション、ポート転送、ランナー、シークレットの問い合わせを記録する。
+audit_log = "/var/log/chloe/audit.jsonl"
+idle_timeout_secs = 1800
+
+# GitHub App の設定 (docs/github-app.md)。アプリをインストールした Organization のメンバーがログインできる。
+# github_app = "/etc/chloe/github-app.toml"
+
+# ログインを許す GitHub のログイン名 (GitHub App の Organization のメンバーに加えて許す)。
+allowed_users = ["your-github-login"]
+# サーバーの運用者。どの Organization と team の設定 (chloe policy) とシークレットも変えられる。
+# GitHub で Organization の管理者である利用者は、ここに書かなくてもその Organization のものを変えられる。
+admins = ["your-github-login"]
+
+# すべてのワークスペースに共通の許可リスト。シークレットの差し替え先 (api.anthropic.com など) は
+# シークレットを登録すると自動で加わる。
+[policy]
+allow = [
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "claude.ai",
+    "platform.claude.com",
+    "api.openai.com",
+    "auth.openai.com",
+    "chatgpt.com",
+    "github.com",
+    "api.github.com",
+    "*.githubusercontent.com",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+]
+passthrough = [
+    "registry-1.docker.io",
+    "auth.docker.io",
+    "*.docker.com",
+    "*.ubuntu.com",
+]
+
+# 宛先、メソッド、パスの規則。上から順に評価し、最初に一致した規則で決める。
+# どれにも一致しなければ許可リストだけで判定する。書き方は docs/configuration.md にある。
+[[policy.rules]]
+name = "github-no-delete"
+hosts = ["api.github.com"]
+methods = ["DELETE"]
+paths = ["/repos/**"]
+action = "deny"
+
+# 同じホストの Docker でランナーを動かす。
+[runner]
+guest_dir = "/usr/local/lib/chloe/guest"
+egress_bin = "/usr/local/lib/chloe/chloe-egress"
+state_root = "/var/lib/chloe/workspaces"
+
+# 複数のホストにランナーを置くときは、[runner] の代わりに [cluster] を書く。
+# sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add <名前> --url https://<host>:8445
+# で参加用のトークンを作り、そのホストで chloe-node join を実行する (deploy/node.toml)。
+# [cluster]
+# listen = "0.0.0.0:8444"            # chloe-node から受ける内部 API (相互 TLS)
+# server_names = ["cp.example.com"]  # chloe-node がつなぐ名前 (証明書に入れる)
+# pki_dir = "/var/lib/chloe/pki"     # CA の証明書と鍵
+
+# HTTP(S) の管理 API。chloe token create で作ったトークンを Bearer で渡す。
+# tls_cert と tls_key を書けば HTTPS、なければ HTTP (リバースプロキシの後ろかローカル向け)。
+# [api]
+# listen = "127.0.0.1:8080"
+# tls_cert = "/etc/chloe/api.crt"
+# tls_key = "/etc/chloe/api.key"

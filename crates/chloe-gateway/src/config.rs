@@ -159,4 +159,16 @@ mod tests {
         assert!(!config.is_allowed("bob"));
         assert_eq!(config.runner.unwrap().image, "chloe-dev-runner");
     }
+
+    /// リポジトリに置いた設定の例が読めること。
+    #[test]
+    fn parses_shipped_examples() {
+        for example in [
+            include_str!("../../../deploy/gateway.toml"),
+            include_str!("../../../images/guest/dev/gateway.example.toml"),
+        ] {
+            let config: Config = toml::from_str(example).unwrap();
+            assert!(config.runner.is_some());
+        }
+    }
 }

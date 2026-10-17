@@ -1,0 +1,23 @@
+[Unit]
+Description=chloe gateway
+Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+# docker グループの利用者で動かす (ランナーのコンテナを起動するため)。root で動かすなら User= と
+# Group= と AmbientCapabilities= を消す。
+User=chloe
+Group=chloe
+# 1024 未満のポート (22 番) で待ち受けるため。
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+StateDirectory=chloe
+StateDirectoryMode=0700
+LogsDirectory=chloe
+LogsDirectoryMode=0750
+ExecStart=/usr/local/bin/chloe-gateway --config /etc/chloe/gateway.toml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

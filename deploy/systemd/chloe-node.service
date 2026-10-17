@@ -1,0 +1,19 @@
+[Unit]
+Description=chloe node
+Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+# docker グループの利用者で動かす (ランナーのコンテナを起動するため)。root で動かすなら User= と
+# Group= を消す。
+User=chloe
+Group=chloe
+StateDirectory=chloe-node
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/chloe-node run --config /etc/chloe/node.toml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
