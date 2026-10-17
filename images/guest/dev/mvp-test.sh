@@ -123,6 +123,17 @@ check bob-untouched "0" sh -c 'grep -c "policy updated" "$0" || true' "$mvp/work
 check alice-still-injected "401" anthropic alice "$alice_ph"
 sleep 1
 check alice-injected-after-update '"injected":["anthropic_api_key-0"]' last_anthropic_request "$alice_key"
+# 動いているランナーでも、新しい種類のプレースホルダーは次のシェルから入り、消すと抜ける。
+started_at() { docker inspect -f '{{.State.StartedAt}}' "$prefix$alice_key"; }
+alice_started="$(started_at)"
+check new-kind-absent "absent" as alice 'printenv OPENAI_API_KEY || echo absent'
+echo real-secret-O | as alice chloe secret set openai_api_key >/dev/null
+check new-kind-in-new-shell "sk-proj-chloe" as alice 'printenv OPENAI_API_KEY'
+check new-kind-same-runner "$alice_started" started_at
+# 新しい種類の宛先も、動いたまま名前を引けて差し替えられる (VM の DNS の許可リストも入れ替わる)。
+check new-kind-reachable "401" as alice "curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$OPENAI_API_KEY\" https://api.openai.com/v1/models"
+as alice chloe secret rm openai_api_key >/dev/null
+check removed-kind-gone "absent" as alice 'printenv OPENAI_API_KEY || echo absent'
 
 section "workspaces"
 check ws-list "default" as alice chloe ws list

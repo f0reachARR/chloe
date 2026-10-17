@@ -150,20 +150,29 @@ check allowed-user "ok" as bob 'echo ok'
 check outsider "Permission denied" as carol true
 
 section "chloe github login"
+# ログインの前から動いているランナーを、接続をつないだまま保つ。
+ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 'sleep 120' &
+alice_holder=$!
+wait_until 60 as alice true
+check gh-before-login "absent" as alice 'printenv GH_TOKEN || echo absent'
 check status-before "not signed in" as alice chloe github status
 check login "Signed in" as alice chloe github login
 check status-after "signed in" as alice chloe github status
 check token-not-logged "clean" sh -c '! grep -q ghu_stub_alice "$0" && echo clean' "$logs/gateway.log"
 
 section "personal workspace gets the user token"
-# ログインする前に起動したランナーは止めてから使う。
-as alice chloe ws stop default >/dev/null
+# ログインする前から動いているランナーでも、新しいシェルには GH_TOKEN が入る (起動し直さない)。
 alice_ph="$(as alice 'printenv GH_TOKEN')"
 check gh-placeholder "ghu_chloe" echo "$alice_ph"
+# ログインの前に起動したランナーには、設定用ドライブにこのプレースホルダーがない。
+# 方針を動いたまま入れ替えたランナー (egress.log に記録がある) が、alice のランナーである。
+alice_key="$(basename "$(dirname "$(dirname "$(grep -l "policy updated" "$state"/workspaces/*/logs/egress.log)")")")"
+check gh-not-restarted "ws-" echo "$alice_key"
+kill "$alice_holder" 2>/dev/null || true
 check git-helper "password=ghu_chloe" as alice 'printf "protocol=https\nhost=github.com\n\n" | git credential fill'
 check api-user "401" as alice "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: token $alice_ph' https://api.github.com/user"
 sleep 1
-check api-injected '"injected":["github_token-1"]' last_github_request "$(runner_key "$alice_ph")"
+check api-injected '"injected":["github_token-1"]' last_github_request "$alice_key"
 
 section "organization and team workspaces"
 check create-org "created acme/proj" as alice chloe ws create acme/proj
