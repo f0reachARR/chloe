@@ -16,7 +16,7 @@ master_key = "build/dev/gateway/master.key"
 audit_log = "build/dev/gateway/audit.jsonl"
 idle_timeout_secs = 1800
 
-# GitHub App の設定 (docs/github-app.md)。アプリの Organization のメンバーがログインできる。
+# GitHub App の設定 (docs/github-app.md)。アプリをインストールした Organization のメンバーがログインできる。
 # github_app = "~/.config/chloe/github-app.toml"
 
 # ログインを許す GitHub のログイン名 (GitHub App の Organization のメンバーに加えて許す)。

@@ -100,7 +100,7 @@ github_app = "~/.config/chloe/github-app.toml"
 - アプリをインストールしたいずれかの Organization のメンバーがログインできる。`allowed_users` は、それに加えて許す利用者になる。
 - Organization のワークスペース（`org/name`）にはそのメンバーが、team のワークスペース（`org/team/name`）にはその team のメンバーが入れる。確かめられるのはアプリをインストールした Organization だけである。
 - GitHub に公開鍵を登録していない利用者は、SSH の keyboard-interactive で Device Flow を行ってログインできる。
-- 個人のワークスペースで GitHub を使うには、一度 `ssh <host> chloe github login` を実行してユーザートークンを得る。トークンは chloe のデータベースに暗号化して置き、ランナーを起動するときに、失効まで 1 時間を切っていれば更新して渡す。
+- 個人のワークスペースで GitHub を使うには、一度 `ssh <host> chloe github login` を実行してユーザートークンを得る。トークンは chloe のデータベースに暗号化して置き、ランナーのプロキシが差し替えのたびに問い合わせたとき、失効まで 5 分を切っていれば更新してから答える。VM にはプレースホルダーだけを入れる。
 - team と Organization のワークスペースには、その Organization へのインストールのトークンを渡す。範囲は Organization と team の設定（`chloe policy set`）の `[github]` で絞れる。
 - GitHub で Organization の管理者（`admin` の役割）である利用者は、その Organization と team の設定とシークレットを変えられる。team の maintainer は、その team のシークレットを変えられる。
 
