@@ -2,6 +2,7 @@
 # 段階 6 のゲスト側の確認。
 #
 # - ランナーが渡した環境変数が、guest-agent の起動するプロセスとログインシェルに入る。
+# - ランナーが渡したホスト名になる。
 # - ルートを保持するモードでは apt で入れたパッケージやルートに置いたファイルが残り、
 #   使い捨てのモードでは消える。
 set -euo pipefail
@@ -11,7 +12,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # ワークスペースのディスクを作り直す (ランナーが起動時に作る)。
 rm -f "$dev_state/workspace.ext4"
 mkdir -p "$dev_state/config"
-echo "CHLOE_TEST_PLACEHOLDER=sk-test-chloe-placeholder" > "$dev_state/config/guest.env"
+printf 'CHLOE_TEST_PLACEHOLDER=sk-test-chloe-placeholder\nCHLOE_HOSTNAME=acme-dev-api\n' > "$dev_state/config/guest.env"
 export CHLOE_GUEST_ENV=/state/config/guest.env
 
 cat > "$dev_scripts/root.sh" <<'EOF'
@@ -20,6 +21,7 @@ source /mnt/lib.sh
 check exec-env sh -c 'runuser -u user -- printenv CHLOE_TEST_PLACEHOLDER'
 check login-env sh -c 'runuser -u user -- bash -lc "printenv CHLOE_TEST_PLACEHOLDER"'
 check ca-env sh -c 'runuser -u user -- printenv SSL_CERT_FILE'
+check hostname sh -c 'test "$(hostname)" = acme-dev-api && grep -qx "127.0.1.1 acme-dev-api" /etc/hosts && echo acme-dev-api'
 case "$1" in
 persistent-first)
     check root-layer findmnt -no OPTIONS /

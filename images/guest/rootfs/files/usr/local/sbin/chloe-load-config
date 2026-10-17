@@ -3,7 +3,7 @@
 #
 # - guest.env：プレースホルダーなどの環境変数。/run/chloe/env に置き、guest-agent と
 #   ログインシェル (/etc/profile.d/chloe.sh) が読む。プレースホルダーは宛先に束縛されて
-#   いて漏れても害がないので、すべての利用者が読めてよい。
+#   いて漏れても害がないので、すべての利用者が読めてよい。CHLOE_HOSTNAME はホスト名にする。
 # - ca.pem：ランナーのプロキシの CA 証明書。システムの信頼ストアに入れる。
 set -eu
 
@@ -28,3 +28,15 @@ if [ -f "$mnt/ca.pem" ]; then
 fi
 umount "$mnt"
 rmdir "$mnt"
+
+# ホスト名をワークスペースの名前にする (プロンプトに出る)。ランナーが英小文字、数字、
+# `-` だけにして渡すが、念のため確かめる。
+name=$(sed -n 's/^CHLOE_HOSTNAME=//p' /run/chloe/env | head -n 1)
+case "$name" in
+    '' | *[!a-z0-9-]*) ;;
+    *)
+        echo "$name" > /etc/hostname
+        sed -i "s/^127\.0\.1\.1 .*/127.0.1.1 $name/" /etc/hosts
+        hostname "$name"
+        ;;
+esac
