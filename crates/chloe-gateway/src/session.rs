@@ -15,7 +15,7 @@ use chloe_agent_proto::{
 };
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
 use chloe_controller::{Controller, Error as ControllerError};
-use chloe_github::{DeviceCode, GitHubApp, Poll, UserToken};
+use chloe_github::{DeviceCode, GitHubApp, UserToken};
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelOpenFailure, Pty, Sig};
@@ -27,6 +27,7 @@ use crate::auth::{
 };
 use crate::backend::Backend;
 use crate::commands;
+use crate::device_flow;
 use crate::config::Config;
 
 /// ワークスペースを指定しなかったときに入る、個人のワークスペースの名前。
@@ -476,7 +477,7 @@ impl russh::server::Handler for Connection {
                 }),
             ) => {
                 let deadline = tokio::time::Instant::now() + KI_POLL_WAIT;
-                match finish_device_flow(&github, &device, deadline).await {
+                match device_flow::wait_for_token(&github, &device, deadline).await {
                     Ok(Some((owner, token))) => {
                         match self
                             .finish_device_login(expected, workspace, owner, token)
@@ -888,31 +889,6 @@ fn failure_prompt(error: &anyhow::Error) -> Auth {
     }
 }
 
-/// Device Flow の承認を `deadline` まで待つ。承認されたら、トークンの持ち主のログイン名と
-/// トークンを返す (保存はしない)。まだ承認されていなければ `None` を返す。
-async fn finish_device_flow(
-    github: &GitHubApp,
-    device: &DeviceCode,
-    deadline: tokio::time::Instant,
-) -> Result<Option<(String, UserToken)>> {
-    loop {
-        match github.poll_device_flow(device).await? {
-            Poll::Token(token) => {
-                let owner = github.user_login(&token.access_token).await?;
-                return Ok(Some((owner, token)));
-            }
-            Poll::Pending { interval } => {
-                let next = tokio::time::Instant::now() + Duration::from_secs(interval);
-                if next > deadline {
-                    return Ok(None);
-                }
-                tokio::time::sleep_until(next).await;
-            }
-            Poll::Failed(message) => bail!("GitHub sign-in failed: {message}"),
-        }
-    }
-}
-
 /// `chloe github login`：Device Flow で GitHub のユーザートークンを得て保存する。
 async fn github_login_command(
     shared: &Shared,
@@ -939,27 +915,15 @@ async fn github_login_command(
         device.verification_uri, device.user_code
     ))
     .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(device.expires_in);
-    let result = match finish_device_flow(github, &device, deadline).await {
-        Ok(Some((owner, _))) if !owner.eq_ignore_ascii_case(login) => Err(anyhow::anyhow!(
-            "signed in to GitHub as {owner}, not {login}"
-        )),
-        Ok(Some((_, token))) => shared.store_user_token(login, &token).await.map(|()| true),
-        Ok(None) => Ok(false),
-        Err(error) => Err(error),
-    };
-    match result {
-        Ok(true) => {
-            let refreshed = shared
-                .refresh_running(Some(&crate::access::personal(login)))
-                .await;
+    match device_flow::renew(shared, github, login, &device).await {
+        Ok(Some(refreshed)) => {
             say(format!(
                 "Signed in. {refreshed} running workspace(s) can use GitHub now; shells opened from now on get GH_TOKEN.\n"
             ))
             .await;
             0
         }
-        Ok(false) => {
+        Ok(None) => {
             say("chloe: the code expired before it was approved\n".into()).await;
             1
         }

@@ -9,6 +9,7 @@ mod auth;
 mod backend;
 mod commands;
 mod config;
+mod device_flow;
 mod github_token;
 mod internal;
 mod ops;
