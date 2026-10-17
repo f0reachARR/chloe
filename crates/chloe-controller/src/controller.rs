@@ -457,7 +457,8 @@ impl<B: RunnerBackend> Controller<B> {
             };
             let state = self.state(workspace.id);
             let mut running = state.lifecycle.lock().await;
-            if running.is_some() {
+            // 一覧を取ってから錠を得るまでに、止めたかもしれない。
+            if running.is_some() || !self.inner.backend.is_running(key).await? {
                 continue;
             }
             let broker = crate::broker::serve(
@@ -493,6 +494,12 @@ impl<B: RunnerBackend> Controller<B> {
                 continue;
             }
             let mut running = state.lifecycle.lock().await;
+            // 一覧を取ってから錠を得るまでに、起動したかもしれない (起動は錠を持って進む)。
+            // 起動したばかりのランナーの問い合わせ用ソケットを消すと、プロキシが本物の値を
+            // 問い合わせられなくなる。
+            if self.inner.backend.is_running(&key).await? {
+                continue;
+            }
             if let Some(current) = running.take() {
                 current.broker.abort();
                 let _ = std::fs::remove_file(self.inner.backend.broker_socket(&key));
@@ -501,7 +508,8 @@ impl<B: RunnerBackend> Controller<B> {
             }
         }
         for id in self.inner.store.recorded_runners().await? {
-            if !actual.contains(&format!("ws-{id}")) {
+            let key = format!("ws-{id}");
+            if !actual.contains(&key) && !self.inner.backend.is_running(&key).await? {
                 self.inner.store.remove_runner(id).await?;
             }
         }
@@ -631,6 +639,8 @@ mod tests {
         env: PushedEnv,
         /// ランナーごとの、最後に渡した方針の許可リスト。
         allow: Mutex<HashMap<String, Vec<String>>>,
+        /// あれば、`list` はこの (古い) 一覧を返す。一覧を取ったあとに起動した場合をまねる。
+        stale_list: Mutex<Option<Vec<String>>>,
     }
 
     /// Firecracker の vsock の握手と guest-agent の応答をまねる。
@@ -743,6 +753,9 @@ mod tests {
         }
 
         async fn list(&self) -> Result<Vec<String>, Error> {
+            if let Some(stale) = self.stale_list.lock().unwrap().clone() {
+                return Ok(stale);
+            }
             Ok(self.running.lock().unwrap().keys().cloned().collect())
         }
     }
@@ -780,6 +793,7 @@ mod tests {
             reboots: Arc::new(AtomicUsize::new(0)),
             env: Arc::new(Mutex::new(None)),
             allow: Mutex::new(HashMap::new()),
+            stale_list: Mutex::new(None),
         })
     }
 
@@ -916,6 +930,27 @@ mod tests {
         assert_eq!(report.cleared, [ws.key()]);
         assert!(after.store().recorded_runners().await.unwrap().is_empty());
         assert!(!backend.broker_socket(&ws.key()).exists());
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_a_runner_started_after_listing() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let ws = workspace(&controller, "api", "alice").await;
+        let _session = controller.open(&ws).await.unwrap();
+        // 一覧を取ったときにはまだ動いていなかった。
+        *backend.stale_list.lock().unwrap() = Some(vec![]);
+        let report = controller.reconcile().await.unwrap();
+        assert!(report.cleared.is_empty(), "{report:?}");
+        assert!(backend.broker_socket(&ws.key()).exists());
+        assert_eq!(
+            controller.store().recorded_runners().await.unwrap(),
+            [ws.id]
+        );
+        // 一覧にあっても、もう止まっていれば引き取らない。
+        let other = workspace(&controller, "other", "alice").await;
+        *backend.stale_list.lock().unwrap() = Some(vec![other.key()]);
+        let report = controller.reconcile().await.unwrap();
+        assert!(report.adopted.is_empty(), "{report:?}");
     }
 
     #[tokio::test]
