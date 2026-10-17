@@ -12,8 +12,9 @@
 //! PATCH  /v1/workspaces/{name}          {"root": "ephemeral"} か {"running": false}
 //! DELETE /v1/workspaces/{name}
 //! GET    /v1/secrets[?owner=acme]       シークレットの名前の一覧
-//! PUT    /v1/secrets/{kind}[?owner=..]  {"value": "..."}
-//! DELETE /v1/secrets/{kind}[?owner=..]
+//! GET    /v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
+//! PUT    /v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
+//! DELETE /v1/secrets/{name}[?owner=..]
 //! GET    /v1/policies/{owner}           Organization か team の設定
 //! PUT    /v1/policies/{owner}           設定 (JSON)
 //! DELETE /v1/policies/{owner}
@@ -28,8 +29,9 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, put};
+use axum::routing::{delete, get};
 use axum::{Extension, Json, Router};
+use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::PolicyLayer;
 use chloe_controller::workspace::RootMode;
 use serde::Deserialize;
@@ -59,7 +61,10 @@ pub fn router(shared: Arc<Shared>) -> Router {
                 .delete(remove_workspace),
         )
         .route("/v1/secrets", get(list_secrets))
-        .route("/v1/secrets/{kind}", put(set_secret).delete(remove_secret))
+        .route(
+            "/v1/secrets/{name}",
+            get(show_secret).put(set_secret).delete(remove_secret),
+        )
         .route(
             "/v1/policies/{*owner}",
             get(show_policy).put(set_policy).delete(remove_policy),
@@ -246,32 +251,37 @@ async fn list_secrets(
     Ok(Json(serde_json::json!({ "owner": owner_arg(&owner), "names": names })).into_response())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SecretValue {
-    value: String,
+async fn show_secret(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+    Query(query): Query<OwnerQuery>,
+) -> Result<Response, ops::Error> {
+    let owner = secret_owner(&caller.login, query.owner.as_deref())?;
+    let view = ops::show_secret(&shared, &caller.login, &owner, &name).await?;
+    Ok(Json(view).into_response())
 }
 
 async fn set_secret(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
-    Path(kind): Path<String>,
+    Path(name): Path<String>,
     Query(query): Query<OwnerQuery>,
-    Json(body): Json<SecretValue>,
+    Json(body): Json<SecretInput>,
 ) -> Result<Response, ops::Error> {
     let owner = secret_owner(&caller.login, query.owner.as_deref())?;
-    ops::set_secret(&shared, &caller.login, &owner, &kind, &body.value).await?;
+    ops::set_secret(&shared, &caller.login, &owner, &name, body).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn remove_secret(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
-    Path(kind): Path<String>,
+    Path(name): Path<String>,
     Query(query): Query<OwnerQuery>,
 ) -> Result<Response, ops::Error> {
     let owner = secret_owner(&caller.login, query.owner.as_deref())?;
-    ops::remove_secret(&shared, &caller.login, &owner, &kind).await?;
+    ops::remove_secret(&shared, &caller.login, &owner, &name).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

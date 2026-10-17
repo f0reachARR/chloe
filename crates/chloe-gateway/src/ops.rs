@@ -3,7 +3,7 @@
 //! SSH の `chloe` コマンド ([`crate::commands`]) と HTTP の管理 API ([`crate::api`]) の両方から
 //! 使う。権限の確認はここで行い、結果は型のある値で返す (表示は呼ぶ側が決める)。
 
-use chloe_controller::catalog;
+use chloe_controller::catalog::{self, SecretInput, SecretSpec};
 use chloe_controller::runner::{PolicyLayer, most_specific};
 use chloe_controller::store::ApiToken;
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
@@ -11,6 +11,7 @@ use chloe_secrets::Owner;
 use serde::Serialize;
 
 use crate::access::personal;
+use crate::github_token::USER_TOKEN_SECRET;
 use crate::session::Shared;
 
 /// 操作の失敗。HTTP の API では種類からステータスを決める。
@@ -200,11 +201,15 @@ pub fn owner_arg(owner: &Owner) -> String {
     }
 }
 
-pub fn known_kind(kind: &str) -> Result<()> {
-    match catalog::preset(kind) {
-        Some(_) => Ok(()),
-        None => Err(Error::Invalid(format!("unknown secret kind: {kind}"))),
+/// 利用者が登録や削除をできるシークレットの名前か。
+pub fn check_secret_name(name: &str) -> Result<()> {
+    catalog::check_name(name).map_err(Error::Invalid)?;
+    if name == USER_TOKEN_SECRET {
+        return Err(Error::Invalid(format!(
+            "{name} is managed by chloe github login"
+        )));
     }
+    Ok(())
 }
 
 /// シークレットの名前の一覧。名前だけなので、その持ち主のワークスペースに入れる人は見られる。
@@ -229,32 +234,121 @@ pub async fn check_secret_manager(shared: &Shared, login: &str, owner: &Owner) -
     }
 }
 
+/// 登録したシークレットの定義。組み込みの種類なら `builtin` が真になる。
+#[derive(Debug, Serialize)]
+pub struct SecretView {
+    pub name: String,
+    pub owner: String,
+    pub builtin: bool,
+    pub spec: SecretSpec,
+}
+
+/// シークレットの定義を見る。値は返さないので、その持ち主のワークスペースに入れる人は見られる。
+pub async fn show_secret(
+    shared: &Shared,
+    login: &str,
+    owner: &Owner,
+    name: &str,
+) -> Result<SecretView> {
+    check_secret_name(name)?;
+    if !shared.can_access(login, owner).await? {
+        return Err(Error::Forbidden(format!(
+            "you are not a member of {}",
+            owner_arg(owner)
+        )));
+    }
+    let Some((_, stored)) = shared
+        .controller
+        .secrets()
+        .get_with_spec(owner, name)
+        .await?
+    else {
+        return Err(Error::NotFound(format!("no such secret: {name}")));
+    };
+    let spec = stored_spec(name, stored.as_deref())?;
+    Ok(SecretView {
+        name: name.to_string(),
+        owner: owner_arg(owner),
+        builtin: stored.is_none(),
+        spec,
+    })
+}
+
 pub async fn set_secret(
     shared: &Shared,
     login: &str,
     owner: &Owner,
-    kind: &str,
-    value: &str,
+    name: &str,
+    input: SecretInput,
 ) -> Result<()> {
-    known_kind(kind)?;
+    check_secret_name(name)?;
     check_secret_manager(shared, login, owner).await?;
-    if value.is_empty() {
-        return Err(Error::Invalid("the value is empty".into()));
-    }
-    shared
-        .controller
-        .secrets()
-        .set(owner, kind, &value.to_string().into())
+    let secrets = shared.controller.secrets();
+    // 値だけを変えるときは、同じ持ち主に置いた定義を使う。
+    let existing = secrets
+        .get_with_spec(owner, name)
+        .await?
+        .map(|(_, stored)| stored);
+    let (value, spec) = prepare_secret(name, input, existing)?;
+    secrets
+        .set_with_spec(owner, name, &value.into(), spec.as_deref())
         .await?;
     shared.refresh_running_under(owner).await;
     Ok(())
 }
 
-pub async fn remove_secret(shared: &Shared, login: &str, owner: &Owner, kind: &str) -> Result<()> {
-    known_kind(kind)?;
+/// 登録する値 (保存する形) と定義の文字列を決める。
+///
+/// `existing` は同じ持ち主にある行の定義 (行がなければ `None`、組み込みの種類なら `Some(None)`)。
+/// 定義を渡さなければ、ある行の定義をそのままの文字列で使い続ける (定義は追加認証データに入るため)。
+fn prepare_secret(
+    name: &str,
+    input: SecretInput,
+    existing: Option<Option<String>>,
+) -> Result<(String, Option<String>)> {
+    let (spec, values) = input.into_parts().map_err(Error::Invalid)?;
+    let (spec, text) = match spec {
+        Some(_) if catalog::preset(name).is_some() => {
+            return Err(Error::Invalid(format!(
+                "{name} is a built-in secret; it takes only a value"
+            )));
+        }
+        Some(spec) => {
+            spec.validate().map_err(Error::Invalid)?;
+            let text = serde_json::to_string(&spec).map_err(|e| Error::Invalid(e.to_string()))?;
+            (spec, Some(text))
+        }
+        None => match existing {
+            Some(stored) => (stored_spec(name, stored.as_deref())?, stored),
+            None => match catalog::preset(name) {
+                Some(spec) => (spec, None),
+                None => {
+                    return Err(Error::Invalid(format!(
+                        "{name} has no definition for this owner yet; pass one with --spec"
+                    )));
+                }
+            },
+        },
+    };
+    let value = spec.encode_values(&values).map_err(Error::Invalid)?;
+    Ok((value, text))
+}
+
+fn stored_spec(name: &str, stored: Option<&str>) -> Result<SecretSpec> {
+    match stored {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| Error::Invalid(format!("the definition of {name} is broken: {e}"))),
+        None => {
+            catalog::preset(name).ok_or_else(|| Error::Invalid(format!("{name} has no definition")))
+        }
+    }
+}
+
+pub async fn remove_secret(shared: &Shared, login: &str, owner: &Owner, name: &str) -> Result<()> {
+    check_secret_name(name)?;
     check_secret_manager(shared, login, owner).await?;
-    if !shared.controller.secrets().delete(owner, kind).await? {
-        return Err(Error::NotFound(format!("no such secret: {kind}")));
+    if !shared.controller.secrets().delete(owner, name).await? {
+        return Err(Error::NotFound(format!("no such secret: {name}")));
     }
     shared.refresh_running_under(owner).await;
     Ok(())
@@ -390,5 +484,72 @@ mod tests {
         assert!(parse_duration("0d").is_err());
         assert!(parse_duration("5m").is_err());
         assert!(parse_duration("d").is_err());
+    }
+
+    const HF: &str = r#"
+        env = ["HF_TOKEN"]
+        placeholder = "hf_{id}"
+        value = "hf-real"
+        [[inject]]
+        hosts = ["huggingface.co"]
+        header = "authorization"
+    "#;
+
+    fn input(text: &str) -> SecretInput {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn prepares_secrets() {
+        // 組み込みの種類は値だけで登録できる。
+        let (value, spec) =
+            prepare_secret("anthropic_api_key", SecretInput::value("sk"), None).unwrap();
+        assert_eq!((value.as_str(), spec), ("sk", None));
+        // 組み込みの種類には定義を渡せない。
+        assert!(prepare_secret("anthropic_api_key", input(HF), None).is_err());
+        // 定義のない名前は、値だけでは登録できない。
+        assert!(prepare_secret("hf_token", SecretInput::value("x"), None).is_err());
+
+        let (value, spec) = prepare_secret("hf_token", input(HF), None).unwrap();
+        assert_eq!(value, "hf-real");
+        let spec = spec.unwrap();
+        // 値だけを変えるときは、ある定義をそのままの文字列で使う。
+        let (value, kept) = prepare_secret(
+            "hf_token",
+            SecretInput::value("hf-new"),
+            Some(Some(spec.clone())),
+        )
+        .unwrap();
+        assert_eq!((value.as_str(), kept), ("hf-new", Some(spec)));
+
+        // 欄がいくつもあるシークレットの値だけを変える。
+        let aws = r#"
+            [fields.access_key_id]
+            env = ["AWS_ACCESS_KEY_ID"]
+            value = "AKID"
+            [fields.secret_access_key]
+            value = "s"
+            [[sign]]
+            scheme = "aws-sigv4"
+            hosts = ["*.amazonaws.com"]
+        "#;
+        let (_, spec) = prepare_secret("aws", input(aws), None).unwrap();
+        let values_only = r#"
+            [fields.access_key_id]
+            value = "AKID2"
+            [fields.secret_access_key]
+            value = "s2"
+        "#;
+        let (value, kept) = prepare_secret("aws", input(values_only), Some(spec.clone())).unwrap();
+        assert_eq!(kept, spec);
+        assert!(value.contains("AKID2"));
+        assert!(prepare_secret("aws", SecretInput::value("x"), Some(spec)).is_err());
+    }
+
+    #[test]
+    fn reserves_internal_names() {
+        assert!(check_secret_name(USER_TOKEN_SECRET).is_err());
+        assert!(check_secret_name("Bad-Name").is_err());
+        check_secret_name("hf_token").unwrap();
     }
 }

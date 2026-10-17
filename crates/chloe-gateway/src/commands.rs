@@ -24,7 +24,7 @@
 //! OWNER は Organization (`org`) か team (`org/team`)。シークレットは、OWNER を省くと
 //! 接続した利用者の個人のものを扱う。
 
-use chloe_controller::catalog;
+use chloe_controller::catalog::{self, SecretInput};
 use chloe_controller::runner::PolicyLayer;
 use chloe_controller::workspace::RootMode;
 
@@ -86,13 +86,23 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
         ["ws", "rm", name] => ws_rm(shared, login, name).await,
         ["secret", "list"] => secret_list(shared, login, None).await,
         ["secret", "list", "--owner", owner] => secret_list(shared, login, Some(owner)).await,
-        ["secret", "set", kind] => secret_set(shared, login, None, kind, stdin).await,
-        ["secret", "set", "--owner", owner, kind] => {
-            secret_set(shared, login, Some(owner), kind, stdin).await
+        ["secret", "set", name] => secret_set(shared, login, None, name, false, stdin).await,
+        ["secret", "set", name, "--spec"] => {
+            secret_set(shared, login, None, name, true, stdin).await
         }
-        ["secret", "rm", kind] => secret_rm(shared, login, None, kind).await,
-        ["secret", "rm", "--owner", owner, kind] => {
-            secret_rm(shared, login, Some(owner), kind).await
+        ["secret", "set", "--owner", owner, name] => {
+            secret_set(shared, login, Some(owner), name, false, stdin).await
+        }
+        ["secret", "set", "--owner", owner, name, "--spec"] => {
+            secret_set(shared, login, Some(owner), name, true, stdin).await
+        }
+        ["secret", "show", name] => secret_show(shared, login, None, name).await,
+        ["secret", "show", "--owner", owner, name] => {
+            secret_show(shared, login, Some(owner), name).await
+        }
+        ["secret", "rm", name] => secret_rm(shared, login, None, name).await,
+        ["secret", "rm", "--owner", owner, name] => {
+            secret_rm(shared, login, Some(owner), name).await
         }
         ["policy", "show", owner] => policy_show(shared, login, owner).await,
         ["policy", "set", owner] => policy_set(shared, login, owner, stdin).await,
@@ -121,7 +131,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret set [--owner OWNER] KIND   (reads the value from stdin)\n  chloe secret rm [--owner OWNER] KIND\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nsecret kinds: {}\n",
+        "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -129,7 +139,7 @@ fn help() -> String {
 /// 操作の失敗をコマンドの表示にする。
 fn shown(error: ops::Error) -> String {
     match &error {
-        ops::Error::Invalid(m) if m.starts_with("unknown secret kind") => {
+        ops::Error::Invalid(m) if m.contains("pass one with --spec") => {
             format!("{m}\n{}", help())
         }
         _ => error.to_string(),
@@ -237,26 +247,50 @@ async fn secret_set(
     shared: &Shared,
     login: &str,
     owner: Option<&str>,
-    kind: &str,
+    name: &str,
+    with_spec: bool,
     stdin: &[u8],
 ) -> Result<String, String> {
     let owner = secret_owner(login, owner).map_err(shown)?;
-    ops::known_kind(kind).map_err(shown)?;
+    ops::check_secret_name(name).map_err(shown)?;
     ops::check_secret_manager(shared, login, &owner)
         .await
         .map_err(shown)?;
-    let value =
-        String::from_utf8(stdin.to_vec()).map_err(|_| "the value must be UTF-8".to_string())?;
-    let value = value.trim_end_matches(['\n', '\r']);
-    if value.is_empty() {
-        return Err("the value is empty (pass it on stdin)".into());
-    }
-    ops::set_secret(shared, login, &owner, kind, value)
+    let text =
+        String::from_utf8(stdin.to_vec()).map_err(|_| "the input must be UTF-8".to_string())?;
+    let input = if with_spec {
+        toml::from_str::<SecretInput>(&text).map_err(|e| format!("invalid definition: {e}"))?
+    } else {
+        let value = text.trim_end_matches(['\n', '\r']);
+        if value.is_empty() {
+            return Err("the value is empty (pass it on stdin)".into());
+        }
+        SecretInput::value(value)
+    };
+    ops::set_secret(shared, login, &owner, name, input)
         .await
         .map_err(shown)?;
     Ok(format!(
-        "saved {kind} for {} (used from the next request; in a running workspace, shells opened from now on get its placeholder)\n",
+        "saved {name} for {} (used from the next request; in a running workspace, shells opened from now on get its placeholder)\n",
         owner_arg(&owner)
+    ))
+}
+
+async fn secret_show(
+    shared: &Shared,
+    login: &str,
+    owner: Option<&str>,
+    name: &str,
+) -> Result<String, String> {
+    let owner = secret_owner(login, owner).map_err(shown)?;
+    let view = ops::show_secret(shared, login, &owner, name)
+        .await
+        .map_err(shown)?;
+    let spec = toml::to_string(&view.spec).map_err(|e| e.to_string())?;
+    let kind = if view.builtin { "built-in" } else { "defined" };
+    Ok(format!(
+        "# {} for {} ({kind})\n{spec}",
+        view.name, view.owner
     ))
 }
 
@@ -264,13 +298,13 @@ async fn secret_rm(
     shared: &Shared,
     login: &str,
     owner: Option<&str>,
-    kind: &str,
+    name: &str,
 ) -> Result<String, String> {
     let owner = secret_owner(login, owner).map_err(shown)?;
-    ops::remove_secret(shared, login, &owner, kind)
+    ops::remove_secret(shared, login, &owner, name)
         .await
         .map_err(shown)?;
-    Ok(format!("removed {kind} from {}\n", owner_arg(&owner)))
+    Ok(format!("removed {name} from {}\n", owner_arg(&owner)))
 }
 
 async fn policy_show(shared: &Shared, login: &str, owner: &str) -> Result<String, String> {
