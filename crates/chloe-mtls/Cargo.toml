@@ -1,0 +1,29 @@
+[package]
+name = "chloe-mtls"
+description = "コントロールプレーンと chloe-node のあいだの相互 TLS (CA、証明書の発行、HTTPS の待ち受け)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+time = "0.3"
+tracing.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
