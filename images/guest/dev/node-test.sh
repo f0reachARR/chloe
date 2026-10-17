@@ -114,8 +114,8 @@ check wrong-ca "does not match" sh -c '"$0" join --server "https://127.0.0.1:$1"
 check node-list "n2	https://127.0.0.1:${node_port[n2]}	joined" "$gateway" --config "$work/gateway.toml" node list
 
 section "placement"
-echo real-secret-A | as alice chloe secret set anthropic_api_key >/dev/null
-echo real-secret-B | as bob chloe secret set anthropic_api_key >/dev/null
+example_secret anthropic_api_key real-secret-A | as alice chloe secret set anthropic_api_key --spec >/dev/null
+example_secret anthropic_api_key real-secret-B | as bob chloe secret set anthropic_api_key --spec >/dev/null
 # 接続をつないだまま、二人のワークスペースを起動する。
 ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 'sleep 300' &
 alice_bg=$!

@@ -86,7 +86,7 @@ gateway_log() { strip_colors "$logs/gateway.log"; }
 log_has() { gateway_log | grep -o "$1" | tail -1; }
 
 section hooks
-echo real-secret-A | as_alice chloe secret set anthropic_api_key >/dev/null
+example_secret anthropic_api_key real-secret-A | as_alice chloe secret set anthropic_api_key --spec >/dev/null
 check claude-hooks "begin claude" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 60 claude -p hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
 check claude-hooks-end "end claude" as_alice 'cat /tmp/act.log'
 check codex-hooks "begin codex" as_alice 'rm -f /tmp/act.log; (CHLOE_ACTIVITY_LOG=/tmp/act.log setsid timeout 15 codex exec --skip-git-repo-check hi < /dev/null > /dev/null 2>&1 &); for _ in $(seq 75); do grep -q "begin codex" /tmp/act.log 2>/dev/null && break; sleep 0.2; done; pkill -x codex; while pgrep -x codex > /dev/null; do sleep 0.1; done; cat /tmp/act.log'
@@ -154,7 +154,7 @@ audit_has() { grep "\"message\":\"$1" "$logs/audit.jsonl" | head -1; }
 check audit-authenticated '"method":"publickey"' audit_has authenticated
 check audit-session '"kind":"exec"' audit_has 'session started'
 check audit-session-ended '"message":"session ended"' audit_has 'session ended'
-check audit-command '"command":"[\"secret\", \"set\", \"anthropic_api_key\"]"' audit_has 'management command'
+check audit-command '"command":"[\"secret\", \"set\", \"anthropic_api_key\", \"--spec\"]"' audit_has 'management command'
 check audit-runner '"key":"ws-1"' audit_has 'starting runner'
 check audit-adopted '"message":"adopted a running runner"' audit_has 'adopted'
 check audit-secret '"secret":"anthropic_api_key"' audit_has 'secret served'

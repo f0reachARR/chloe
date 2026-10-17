@@ -79,10 +79,10 @@ as() { local user="$1"; shift; ssh "${ssh_opts[@]}" -i "$work/${user%%+*}" "$use
 egress_log() { cat "$mvp/workspaces/$1/logs/requests.jsonl" 2>/dev/null; }
 
 section "secrets and management commands"
-check alice-secret "saved anthropic_api_key" sh -c 'echo real-secret-A | "$@"' _ \
-    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set anthropic_api_key
-check bob-secret "saved anthropic_api_key" sh -c 'echo real-secret-B | "$@"' _ \
-    ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe secret set anthropic_api_key
+check alice-secret "saved anthropic_api_key" sh -c 'printf "%s\n" "$0" | "$@"' "$(example_secret anthropic_api_key real-secret-A)" \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set anthropic_api_key --spec
+check bob-secret "saved anthropic_api_key" sh -c 'printf "%s\n" "$0" | "$@"' "$(example_secret anthropic_api_key real-secret-B)" \
+    ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe secret set anthropic_api_key --spec
 check secret-list "anthropic_api_key" as alice chloe secret list
 check secret-not-logged "clean" sh -c '! grep -q real-secret "$0" && echo clean' "$logs/gateway.log"
 
@@ -133,7 +133,7 @@ check alice-injected-after-update '"injected":["anthropic_api_key-0"]' last_anth
 started_at() { docker inspect -f '{{.State.StartedAt}}' "$prefix$alice_key"; }
 alice_started="$(started_at)"
 check new-kind-absent "absent" as alice 'printenv OPENAI_API_KEY || echo absent'
-echo real-secret-O | as alice chloe secret set openai_api_key >/dev/null
+example_secret openai_api_key real-secret-O | as alice chloe secret set openai_api_key --spec >/dev/null
 check new-kind-in-new-shell "sk-proj-chloe" as alice 'printenv OPENAI_API_KEY'
 check new-kind-same-runner "$alice_started" started_at
 # 新しい種類の宛先も、動いたまま名前を引けて差し替えられる (VM の DNS の許可リストも入れ替わる)。
@@ -169,7 +169,9 @@ check custom-needs-spec "pass one with --spec" sh -c 'echo x | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set echo_token
 check custom-set "saved echo_token" set_from "$work/echo.toml" echo_token --spec
 check custom-show 'placeholder = "echo_{id}_x"' as alice chloe secret show echo_token
-check builtin-takes-no-spec "takes only a value" set_from "$work/echo.toml" anthropic_api_key --spec
+check builtin-takes-no-spec "takes only a value" set_from "$work/echo.toml" github_token --spec
+check former-builtin-needs-spec "pass one with --spec" sh -c 'echo x | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set claude_oauth_token
 check custom-env "echo_chloe" as alice 'printenv ECHO_TOKEN'
 echo_headers() { as alice "curl -s -H \"Authorization: Bearer \$ECHO_TOKEN\" https://httpbin.org/headers"; }
 check custom-injected "Bearer real-custom-secret" echo_headers
@@ -247,7 +249,9 @@ check api-create-not-member "not a member of org:acme" api "$bob_token" POST /v1
 check api-create-duplicate "409" api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
 check api-patch-root '"root":"persistent"' api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"root":"persistent"}'
 check api-show-other "404" api "$bob_token" GET /v1/workspaces/acme/from-api
-check api-secret-set "204" api "$alice_token" PUT /v1/secrets/openai_api_key -d '{"value":"real-api-secret"}'
+check api-secret-set "204" api "$alice_token" PUT /v1/secrets/openai_api_key \
+    -d '{"value":"real-api-secret","env":["OPENAI_API_KEY"],"placeholder":"sk-proj-{id}","inject":[{"hosts":["api.openai.com"],"header":"authorization"}]}'
+check api-secret-show '"placeholder":"sk-proj-{id}"' api "$alice_token" GET /v1/secrets/openai_api_key
 check api-secret-list '"names":["anthropic_api_key","openai_api_key"]' api "$alice_token" GET /v1/secrets
 check api-secret-ssh "openai_api_key" as alice chloe secret list
 check api-org-secret-denied "403" api "$bob_token" PUT '/v1/secrets/openai_api_key?owner=acme' -d '{"value":"x"}'

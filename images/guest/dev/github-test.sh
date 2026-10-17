@@ -251,14 +251,14 @@ as alice+acme/proj "curl -s -o /dev/null -H 'Authorization: token $org_ph' https
 check scope-not-for-org "1" sh -c 'wc -l < "$0"' "$work/token-requests.log"
 
 section "organization and team secrets"
-check maintainer-team-secret "saved anthropic_api_key for acme/dev" sh -c 'echo real-team-key | "$@"' _ \
-    ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe secret set --owner acme/dev anthropic_api_key
+check maintainer-team-secret "saved anthropic_api_key for acme/dev" sh -c 'printf "%s\n" "$0" | "$@"' "$(example_secret anthropic_api_key real-team-key)" \
+    ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe secret set --owner acme/dev anthropic_api_key --spec
 check maintainer-not-org-secret "cannot change the secrets of acme" sh -c 'echo x | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe secret set --owner acme anthropic_api_key
 check other-org-secret "cannot change the secrets of beta" sh -c 'echo x | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret rm --owner beta openai_api_key
-check admin-org-secret "saved openai_api_key for acme" sh -c 'echo real-org-key | "$@"' _ \
-    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set --owner acme openai_api_key
+check admin-org-secret "saved openai_api_key for acme" sh -c 'printf "%s\n" "$0" | "$@"' "$(example_secret openai_api_key real-org-key)" \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set --owner acme openai_api_key --spec
 check team-secret-list "anthropic_api_key" as erin chloe secret list --owner acme/dev
 check team-gets-team-secret "sk-ant-api03-chloe" as alice+acme/dev/tools 'printenv ANTHROPIC_API_KEY'
 check team-gets-org-secret "sk-proj-chloe" as alice+acme/dev/tools 'printenv OPENAI_API_KEY'

@@ -13,6 +13,9 @@ elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", b - a }'; }
 
 result() { echo "==RESULT== $1: $2"; }
 
+# example_secret 名前 値: deploy/secrets の例の定義を、値を差し替えて出す (chloe secret set 名前 --spec に渡す)。
+example_secret() { sed "s|^value = .*|value = \"$2\"|" "$root/deploy/secrets/$1.toml"; }
+
 # check 名前 期待する文字列 コマンド...: 出力に期待する文字列が含まれれば ok。
 check() {
     local name="$1" expected="$2"; shift 2
