@@ -141,6 +141,54 @@ check new-kind-reachable "401" as alice "curl -s -o /dev/null -w '%{http_code}' 
 as alice chloe secret rm openai_api_key >/dev/null
 check removed-kind-gone "absent" as alice 'printenv OPENAI_API_KEY || echo absent'
 
+section "secrets with a definition"
+# 組み込みでない名前は定義を付けて登録する。httpbin.org が受け取ったヘッダーを返すので、差し替えた値を確かめられる。
+cat > "$work/echo.toml" <<'EOF'
+env = ["ECHO_TOKEN"]
+placeholder = "echo_{id}_x"
+value = "real-custom-secret"
+[[inject]]
+hosts = ["httpbin.org"]
+header = "authorization"
+EOF
+# 署名し直したあとの Authorization も、httpbin.org の返すヘッダーで確かめる。
+cat > "$work/aws.toml" <<'EOF'
+[fields.access_key_id]
+env = ["AWS_ACCESS_KEY_ID"]
+placeholder = "AKIA{id}"
+value = "AKIDREALEXAMPLE"
+[fields.secret_access_key]
+env = ["AWS_SECRET_ACCESS_KEY"]
+value = "real-aws-secret"
+[[sign]]
+scheme = "aws-sigv4"
+hosts = ["httpbin.org"]
+EOF
+set_from() { local file="$1"; shift; as alice chloe secret set "$@" < "$file"; }
+check custom-needs-spec "pass one with --spec" sh -c 'echo x | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set echo_token
+check custom-set "saved echo_token" set_from "$work/echo.toml" echo_token --spec
+check custom-show 'placeholder = "echo_{id}_x"' as alice chloe secret show echo_token
+check builtin-takes-no-spec "takes only a value" set_from "$work/echo.toml" anthropic_api_key --spec
+check custom-env "echo_chloe" as alice 'printenv ECHO_TOKEN'
+echo_headers() { as alice "curl -s -H \"Authorization: Bearer \$ECHO_TOKEN\" https://httpbin.org/headers"; }
+check custom-injected "Bearer real-custom-secret" echo_headers
+check custom-unbound "placeholder-to-unbound-host" as alice "curl -sS -H \"x-leak: \$ECHO_TOKEN\" https://api.anthropic.com/v1/models"
+check custom-value-only "saved echo_token" sh -c 'echo real-custom-secret-2 | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set echo_token
+check custom-value-updated "Bearer real-custom-secret-2" echo_headers
+check aws-set "saved aws" set_from "$work/aws.toml" aws --spec
+check aws-env "AKIAchloe" as alice 'printenv AWS_ACCESS_KEY_ID'
+check aws-resigned "Credential=AKIDREALEXAMPLE/" as alice \
+    "curl -s --aws-sigv4 aws:amz:us-east-1:execute-api --user \"\$AWS_ACCESS_KEY_ID:\$AWS_SECRET_ACCESS_KEY\" https://httpbin.org/headers"
+sleep 1
+last_httpbin_request() { egress_log "$alice_key" | grep '"host":"httpbin.org"' | tail -1; }
+check aws-sign-logged '"injected":["aws-sign-0"]' last_httpbin_request
+check custom-not-logged "clean" sh -c '! grep -qE "real-custom-secret|real-aws-secret|AKIDREALEXAMPLE" "$0" && echo clean' "$logs/gateway.log"
+as alice chloe secret rm echo_token >/dev/null
+as alice chloe secret rm aws >/dev/null
+check custom-removed "absent" as alice 'printenv ECHO_TOKEN || echo absent'
+
 section "workspaces"
 check ws-list "default" as alice chloe ws list
 check ws-create-org "created acme/proj" as alice chloe ws create acme/proj --root persistent
