@@ -343,7 +343,8 @@ impl App {
     fn handle_main_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            // Esc はフォームなどを閉じるのに使うので、続けて押しても終わらないようにする。
+            KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab if shift => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
             KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
             KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
