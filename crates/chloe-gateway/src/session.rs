@@ -16,6 +16,7 @@ use chloe_agent_proto::{
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
 use chloe_controller::{Controller, Error as ControllerError};
 use chloe_github::{DeviceCode, GitHubApp, UserToken};
+use chloe_secrets::Owner;
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelOpenFailure, Pty, Sig};
@@ -29,6 +30,7 @@ use crate::backend::Backend;
 use crate::commands;
 use crate::config::Config;
 use crate::device_flow;
+use crate::ops;
 use crate::tui;
 
 /// ワークスペースを指定しなかったときに入る、個人のワークスペースの名前。
@@ -48,7 +50,8 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// 入るワークスペースを決める。指定がなければ個人の default を (なければ作って) 使う。
+    /// 入るワークスペースを決める。指定がなければ個人の default を使う。個人の default は、
+    /// なければ作る。
     async fn resolve_workspace(&self, login: &str, spec: Option<&str>) -> Result<Workspace> {
         let target = WorkspaceRef::parse(spec.unwrap_or(DEFAULT_WORKSPACE), login)?;
         if !self.can_access(login, &target.owner).await? {
@@ -58,7 +61,7 @@ impl Shared {
         if let Some(ws) = store.find(&target).await? {
             return Ok(ws);
         }
-        if spec.is_some() {
+        if target.name != DEFAULT_WORKSPACE || !matches!(target.owner, Owner::User(_)) {
             bail!("no such workspace: {target} (create it with `chloe ws create {target}`)");
         }
         match store.create(&target, RootMode::Ephemeral, login).await {
@@ -125,8 +128,12 @@ pub struct Connection {
     /// ポート転送をした接続では、転送中の TCP の接続がなくても、SSH の接続が切れるまで
     /// ランナーを止めない (`ssh -N -L` で開いたまま、ときどき使うため)。
     forwarding: ForwardingHold,
+    /// ワークスペースを書かずに入って選んだワークスペース。この接続のあとのシェルやポート転送も
+    /// ここに入る。
+    chosen: ChosenWorkspace,
 }
 
+type ChosenWorkspace = Arc<std::sync::Mutex<Option<String>>>;
 type ForwardingHold = Arc<std::sync::Mutex<Option<chloe_controller::Session<Backend>>>>;
 
 impl Connection {
@@ -140,6 +147,7 @@ impl Connection {
             device: None,
             device_flow_started: false,
             forwarding: Arc::default(),
+            chosen: Arc::default(),
         }
     }
 
@@ -359,6 +367,7 @@ impl Connection {
         tokio::spawn(relay(
             self.shared.clone(),
             user.clone(),
+            self.chosen.clone(),
             session.handle(),
             channel,
             request,
@@ -581,6 +590,7 @@ impl russh::server::Handler for Connection {
         tokio::spawn(forward(
             self.shared.clone(),
             user,
+            self.chosen.clone(),
             self.forwarding.clone(),
             channel,
             reply,
@@ -767,15 +777,35 @@ impl russh::server::Handler for Connection {
 async fn relay(
     shared: Arc<Shared>,
     user: Authenticated,
+    chosen: ChosenWorkspace,
     handle: Handle,
     channel: ChannelId,
-    request: ExecRequest,
-    input: mpsc::Receiver<ClientMessage>,
+    mut request: ExecRequest,
+    mut input: mpsc::Receiver<ClientMessage>,
 ) {
+    let mut name = user
+        .workspace
+        .clone()
+        .unwrap_or_else(|| DEFAULT_WORKSPACE.into());
     let result = async {
-        let workspace = shared
-            .resolve_workspace(&user.login, user.workspace.as_deref())
-            .await?;
+        if user.workspace.is_none() {
+            match choose_workspace(
+                &shared,
+                &user.login,
+                &chosen,
+                &handle,
+                channel,
+                &mut request,
+                &mut input,
+            )
+            .await
+            {
+                tui::Picked::Workspace(picked) => name = picked,
+                tui::Picked::Cancelled => bail!("no workspace was chosen"),
+                tui::Picked::Closed => return Ok(None),
+            }
+        }
+        let workspace = shared.resolve_workspace(&user.login, Some(&name)).await?;
         // セッションを持っているあいだは、ランナーが止められない。
         let session = shared.controller.open(&workspace).await?;
         let stream = session
@@ -789,7 +819,7 @@ async fn relay(
         Ok(Some(code)) => code,
         // 利用者がチャネルを閉じた。
         Ok(None) => {
-            info!(target: "audit", login = %user.login, workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), "session ended");
+            info!(target: "audit", login = %user.login, workspace = %name, "session ended");
             return;
         }
         Err(error) => {
@@ -799,10 +829,52 @@ async fn relay(
             1
         }
     };
-    info!(target: "audit", login = %user.login, workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), code, "session ended");
+    info!(target: "audit", login = %user.login, workspace = %name, code, "session ended");
     let _ = handle.exit_status_request(channel, code).await;
     let _ = handle.eof(channel).await;
     let _ = handle.close(channel).await;
+}
+
+/// ワークスペースを書かずに端末でシェルを開いたとき、default 以外にも入れるワークスペースが
+/// あれば選ばせる。選んだものは接続のあいだ覚えておく。選ばせないときは default に入る。
+async fn choose_workspace(
+    shared: &Shared,
+    login: &str,
+    chosen: &ChosenWorkspace,
+    handle: &Handle,
+    channel: ChannelId,
+    request: &mut ExecRequest,
+    input: &mut mpsc::Receiver<ClientMessage>,
+) -> tui::Picked {
+    let default = || tui::Picked::Workspace(DEFAULT_WORKSPACE.into());
+    if let Some(name) = chosen.lock().unwrap().clone() {
+        return tui::Picked::Workspace(name);
+    }
+    // コマンドを渡されたときは、スクリプトから使われていることがあるので聞かない。
+    if !request.command.is_empty() {
+        return default();
+    }
+    let Some(tty) = request.tty.as_mut() else {
+        return default();
+    };
+    let workspaces = match ops::list_workspaces(shared, login).await {
+        Ok(workspaces) => workspaces,
+        Err(error) => {
+            warn!("failed to list workspaces: {error}");
+            return default();
+        }
+    };
+    if workspaces.iter().all(|ws| ws.name == DEFAULT_WORKSPACE) {
+        return default();
+    }
+    let picker = tui::Picker::new(login, DEFAULT_WORKSPACE, workspaces);
+    // 選んでいるあいだに端末の大きさが変わったら、シェルにはその大きさを渡す。
+    let picked = tui::pick(picker, handle, channel, &mut tty.size, input).await;
+    if let tui::Picked::Workspace(name) = &picked {
+        info!(target: "audit", %login, workspace = %name, "workspace chosen");
+        *chosen.lock().unwrap() = Some(name.clone());
+    }
+    picked
 }
 
 async fn relay_inner(
@@ -848,15 +920,20 @@ async fn relay_inner(
 async fn forward(
     shared: Arc<Shared>,
     user: Authenticated,
+    chosen: ChosenWorkspace,
     hold: ForwardingHold,
     channel: Channel<Msg>,
     reply: ChannelOpenHandle,
     request: ConnectRequest,
 ) {
     let target = format!("{}:{}", request.host, request.port);
+    let name = user
+        .workspace
+        .clone()
+        .or_else(|| chosen.lock().unwrap().clone());
     let connected = async {
         let workspace = shared
-            .resolve_workspace(&user.login, user.workspace.as_deref())
+            .resolve_workspace(&user.login, name.as_deref())
             .await?;
         // 中継しているあいだは、ランナーが止められない。
         let session = shared.controller.open(&workspace).await?;
@@ -880,7 +957,7 @@ async fn forward(
     let (session, (mut vsock, buffered)) = match connected {
         Ok(connected) => connected,
         Err(error) => {
-            warn!(target: "audit", login = %user.login, workspace = user.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), %target, "port forwarding failed: {error:#}");
+            warn!(target: "audit", login = %user.login, workspace = name.as_deref().unwrap_or(DEFAULT_WORKSPACE), %target, "port forwarding failed: {error:#}");
             reply.reject(ChannelOpenFailure::ConnectFailed).await;
             return;
         }

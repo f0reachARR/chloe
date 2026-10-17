@@ -214,7 +214,22 @@ check bad-login "Permission denied" ssh "${ssh_opts[@]}" -i "$work/alice" '../x@
 check exit-code "status=7" sh -c '"$@" "exit 7"; echo "status=$?"' _ ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1
 check pty "/dev/pts/" as alice -tt tty
 check shell "SHELL-OK user" sh -c 'printf "echo SHELL-OK \$(whoami)\nexit\n" | script -qec "$*" /dev/null | grep -ao "SHELL-OK user"' _ \
-    ssh "${ssh_opts[*]}" -i "$work/alice" -tt alice@127.0.0.1
+    ssh "${ssh_opts[*]}" -i "$work/alice" -tt alice+default@127.0.0.1
+# ワークスペースを書かずに端末でシェルを開くと、default のほかに acme/proj にも入れるので、
+# 選ぶ画面が出る。キーは fifo から送り、画面を待つ。
+mkfifo "$work/pick-in"
+exec 8<>"$work/pick-in"
+script -qfec "stty cols 100 rows 20; ssh -tt ${ssh_opts[*]} -i $work/alice alice@127.0.0.1" /dev/null \
+    < "$work/pick-in" > "$work/pick-out" 2>&1 &
+pick_shows() { wait_until 60 grep -qa "$1" "$work/pick-out" && echo "$1"; }
+check picker-opens "choose a workspace" pick_shows "choose a workspace"
+check picker-lists "acme/proj" pick_shows "acme/proj"
+printf '\033[B\r' >&8
+# 選ぶと元の画面に戻してから、選んだワークスペースのシェルを開く。
+check picker-leaves "1049l" pick_shows "$(printf '\033\\[?1049l')"
+printf 'echo "PICKED=$CHLOE_WORKSPACE"; exit\n' >&8
+check picker-shell "PICKED=acme/proj" pick_shows "PICKED=acme/proj"
+exec 8>&-
 
 section "idle stop and persistence"
 as alice 'echo kept > /workspace/marker && mkdir -p ~/.claude && echo kept > ~/.claude/marker'
