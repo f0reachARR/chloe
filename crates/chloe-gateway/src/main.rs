@@ -302,6 +302,17 @@ async fn node_command(config: &Config, command: NodeCommand) -> Result<()> {
             }
         }
         NodeCommand::Rm { name } => {
+            // 置いたワークスペースが残っていると、そのワークスペースを扱えなくなる。
+            let placed = store
+                .placement_counts()
+                .await?
+                .get(&name)
+                .copied()
+                .unwrap_or(0);
+            anyhow::ensure!(
+                placed == 0,
+                "{placed} workspace(s) are placed on {name}; remove them (chloe ws rm) before removing the node"
+            );
             anyhow::ensure!(store.remove_node(&name).await?, "no such node: {name}");
             println!("removed {name}");
         }

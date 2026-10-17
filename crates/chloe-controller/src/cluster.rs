@@ -8,7 +8,9 @@
 //! そのホストで動いているランナーの把握と記録を消してしまうので、記録のとおり動いているものと
 //! して扱う。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -26,6 +28,9 @@ pub struct ClusterBackend {
     store: Store,
     /// `chloe-node` への相互 TLS のクライアント (コントロールプレーンの証明書)。
     client: reqwest::Client,
+    /// 最後の一覧で、ランナーを返したホスト。置き場所の記録がないランナー (持ち主のない
+    /// ランナー) を止めるときに使う。
+    seen: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -35,7 +40,11 @@ struct Status {
 
 impl ClusterBackend {
     pub fn new(store: Store, client: reqwest::Client) -> Self {
-        Self { store, client }
+        Self {
+            store,
+            client,
+            seen: Mutex::new(HashMap::new()),
+        }
     }
 
     fn workspace_id(key: &str) -> Result<i64, Error> {
@@ -132,8 +141,19 @@ impl RunnerBackend for ClusterBackend {
     }
 
     async fn stop(&self, key: &str) -> Result<(), Error> {
-        let Some(node) = self.placed(key).await? else {
-            return Ok(());
+        let node = match self.placed(key).await? {
+            Some(node) => node,
+            // ワークスペースのないランナーは、一覧で返したホストで止める。
+            None => {
+                let seen = self.seen.lock().unwrap().get(key).cloned();
+                match seen {
+                    Some(name) => match self.store.node(&name).await? {
+                        Some(node) => node,
+                        None => return Ok(()),
+                    },
+                    None => return Ok(()),
+                }
+            }
         };
         let request = self
             .client
@@ -209,7 +229,14 @@ impl RunnerBackend for ClusterBackend {
             }
             let request = self.client.get(Self::url(&node, "/v1/runners"));
             match self.call(&node, request).await {
-                Ok(response) => keys.extend(response.json::<Vec<String>>().await.map_err(http)?),
+                Ok(response) => {
+                    let listed = response.json::<Vec<String>>().await.map_err(http)?;
+                    let mut seen = self.seen.lock().unwrap();
+                    for key in &listed {
+                        seen.insert(key.clone(), node.name.clone());
+                    }
+                    keys.extend(listed);
+                }
                 Err(Error::Unreachable(message)) => {
                     // 空とみなすと、reconcile がそのホストのランナーを片づけてしまう。
                     warn!(
