@@ -61,6 +61,23 @@ impl Workspace {
         .to_string()
     }
 
+    /// VM のホスト名。プロンプトに出るので、SSH で書く名前に近づける (`acme/dev/api` は
+    /// `acme-dev-api`)。ホスト名に使えない文字は `-` にし、63 文字に収める。
+    pub fn hostname(&self) -> String {
+        let name: String = self
+            .display_name()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .take(63)
+            .collect();
+        let name = name.trim_matches('-');
+        if name.is_empty() {
+            "chloe".into()
+        } else {
+            name.to_ascii_lowercase()
+        }
+    }
+
     /// ランナーやディレクトリの名前に使う、ワークスペースごとに一意な識別子。
     pub fn key(&self) -> String {
         format!("ws-{}", self.id)
@@ -137,5 +154,22 @@ mod tests {
         for bad in ["", "a/b/c/d", "../x", "-x", "a b", "org/"] {
             assert!(WorkspaceRef::parse(bad, "alice").is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn hostnames_follow_ssh_names() {
+        let ws = |spec: &str| {
+            let r = WorkspaceRef::parse(spec, "alice").unwrap();
+            Workspace {
+                id: 1,
+                owner: r.owner,
+                name: r.name,
+                root_mode: RootMode::Ephemeral,
+            }
+        };
+        assert_eq!(ws("default").hostname(), "default");
+        assert_eq!(ws("Acme/dev/my_api").hostname(), "acme-dev-my-api");
+        assert_eq!(ws("_x_").hostname(), "x");
+        assert_eq!(ws(&"a".repeat(64)).hostname().len(), 63);
     }
 }

@@ -150,7 +150,12 @@ pub fn build_spec(
         sign: vec![],
         rules: base.rules.clone(),
     };
-    let mut guest_env: Vec<(String, String)> = Vec::new();
+    // ワークスペースの名前。ゲストはホスト名に使い、プロンプトに出る。シークレットが同じ
+    // 環境変数を使おうとしても、こちらを先に置くので上書きされない。
+    let mut guest_env: Vec<(String, String)> = vec![
+        ("CHLOE_WORKSPACE".into(), workspace.display_name()),
+        ("CHLOE_HOSTNAME".into(), workspace.hostname()),
+    ];
     fn allow(hosts: &[String], policy: &mut PolicyConfig) {
         for host in hosts {
             if !policy.allow.contains(host) {
@@ -317,6 +322,13 @@ mod tests {
             ],
         );
         assert_eq!(spec.key, "ws-7");
+        assert_eq!(
+            spec.guest_env[..2],
+            [
+                ("CHLOE_WORKSPACE".into(), "api".into()),
+                ("CHLOE_HOSTNAME".into(), "api".into()),
+            ]
+        );
         assert_eq!(spec.policy.inject.len(), 3);
         assert_eq!(
             spec.policy.sign,
