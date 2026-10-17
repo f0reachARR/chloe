@@ -352,6 +352,9 @@ fn init_logging(audit_log: Option<&Path>) -> Result<()> {
     let audit = match audit_log {
         Some(path) => {
             use std::os::unix::fs::OpenOptionsExt as _;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
