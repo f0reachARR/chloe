@@ -7,12 +7,14 @@
 //! - 宛先、メソッド、パスの規則 ([`PathRuleConfig`]) で、許可した宛先への要求をさらに絞る。
 //! - プレースホルダーは、規則に登録した宛先と場所に限って本物に差し替える。
 //!   それ以外の宛先でプレースホルダーを見つけたら遮断する。
+//! - 署名の規則 ([`SignRuleConfig`]) では、プレースホルダーの鍵で作った署名を本物の鍵で作り直す。
 //!
-//! 方針は本物の値を持たない。[`Policy::evaluate`] はどのヘッダーをどの規則で差し替えるか
-//! ([`Substitution`]) だけを決め、呼び出し側が本物の値を取ってきて [`Policy::apply`] で書き換え、
+//! 方針は本物の値を持たない。[`Policy::evaluate`] はどのヘッダーをどの規則で書き換えるか
+//! ([`Plan`]) だけを決め、呼び出し側が本物の値を取ってきて [`Policy::apply`] で書き換え、
 //! すぐに捨てる。
 
 mod path;
+mod sigv4;
 
 pub use path::{Action, PathRuleConfig};
 
@@ -33,6 +35,8 @@ pub struct PolicyConfig {
     pub passthrough: Vec<String>,
     #[serde(default)]
     pub inject: Vec<InjectRuleConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sign: Vec<SignRuleConfig>,
     /// 宛先、メソッド、パスの規則。上から順に評価する。
     #[serde(default)]
     pub rules: Vec<PathRuleConfig>,
@@ -60,11 +64,71 @@ pub enum InjectFormat {
     BasicPassword,
 }
 
+/// 署名の規則。`hosts` への要求にある、プレースホルダーの鍵で作った署名を作り直す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignRuleConfig {
+    pub name: String,
+    pub hosts: Vec<String>,
+    #[serde(flatten)]
+    pub scheme: SignScheme,
+}
+
+/// 署名の方式と、方式が使う鍵。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scheme", rename_all = "kebab-case")]
+pub enum SignScheme {
+    /// AWS Signature Version 4。セッショントークンがあれば `x-amz-security-token` も差し替える。
+    #[serde(rename = "aws-sigv4")]
+    AwsSigV4 {
+        access_key_id: Credential,
+        secret_access_key: Credential,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_token: Option<Credential>,
+    },
+}
+
+impl SignScheme {
+    fn credentials(&self) -> Vec<&Credential> {
+        match self {
+            Self::AwsSigV4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+            } => [
+                Some(access_key_id),
+                Some(secret_access_key),
+                session_token.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        }
+    }
+}
+
+/// 署名に使う鍵の一つ。VM に渡したプレースホルダーと、本物の値を問い合わせるときの名前。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credential {
+    pub placeholder: String,
+    pub secret_env: String,
+}
+
 pub struct Policy {
     allow: Vec<String>,
     passthrough: Vec<String>,
     rules: Vec<InjectRule>,
+    sign: Vec<SignRuleConfig>,
+    /// プレースホルダーごとの、送ってよい宛先。
+    bindings: Vec<Binding>,
     path_rules: Vec<path::PathRule>,
+}
+
+struct Binding {
+    placeholder: String,
+    hosts: Vec<String>,
+    rule: String,
+    /// Basic 認証のパスワードとしても探す。
+    basic: bool,
 }
 
 struct InjectRule {
@@ -76,12 +140,39 @@ struct InjectRule {
     secret: String,
 }
 
-/// 差し替えの予定。`header` 番目のヘッダーを `rule` 番目の規則で、`secret` の本物の値に差し替える。
+/// 書き換えの予定。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    substitutions: Vec<Substitution>,
+    signings: Vec<Signing>,
+}
+
+/// `header` 番目のヘッダーを `rule` 番目の規則で、`secret` の本物の値に差し替える。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Substitution {
-    pub header: usize,
+struct Substitution {
+    header: usize,
     rule: usize,
-    pub secret: String,
+    secret: String,
+}
+
+/// `header` 番目のヘッダー (`Authorization`) を、`rule` 番目の署名の規則で作り直す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Signing {
+    header: usize,
+    rule: usize,
+    auth: sigv4::Authorization,
+    /// `x-amz-security-token` にセッショントークンのプレースホルダーがある。
+    session_token: bool,
+    method: String,
+    path_and_query: String,
+    authority: String,
+    payload_hash: String,
+}
+
+impl Plan {
+    pub fn is_empty(&self) -> bool {
+        self.substitutions.is_empty() && self.signings.is_empty()
+    }
 }
 
 /// TLS の接続を復号するかどうか。
@@ -129,6 +220,9 @@ pub enum BlockReason {
     /// パスを正規化できなかった (根より上を指す `..` や壊れたパーセントエンコード)。
     BadPath,
     PlaceholderToUnboundHost,
+    /// 署名の規則の宛先に、作り直せない署名 (署名付き URL、チャンクごとの署名、
+    /// 本文のハッシュが分からないものなど) を送ろうとした。
+    Unsignable,
 }
 
 impl BlockReason {
@@ -140,13 +234,14 @@ impl BlockReason {
             Self::PathDenied => "path-denied",
             Self::BadPath => "bad-path",
             Self::PlaceholderToUnboundHost => "placeholder-to-unbound-host",
+            Self::Unsignable => "unsignable",
         }
     }
 }
 
 impl Policy {
     pub fn new(config: PolicyConfig) -> Self {
-        let rules = config
+        let rules: Vec<InjectRule> = config
             .inject
             .iter()
             .map(|rule| InjectRule {
@@ -158,6 +253,25 @@ impl Policy {
                 secret: rule.secret_env.clone(),
             })
             .collect();
+        let mut bindings: Vec<Binding> = rules
+            .iter()
+            .map(|rule| Binding {
+                placeholder: rule.placeholder.clone(),
+                hosts: rule.hosts.clone(),
+                rule: rule.name.clone(),
+                basic: rule.format == InjectFormat::BasicPassword,
+            })
+            .collect();
+        for rule in &config.sign {
+            for credential in rule.scheme.credentials() {
+                bindings.push(Binding {
+                    placeholder: credential.placeholder.clone(),
+                    hosts: rule.hosts.clone(),
+                    rule: rule.name.clone(),
+                    basic: false,
+                });
+            }
+        }
         let mut allow = config.allow;
         allow.extend(config.passthrough.iter().cloned());
         let path_rules = config
@@ -170,6 +284,8 @@ impl Policy {
             allow,
             passthrough: config.passthrough,
             rules,
+            sign: config.sign,
+            bindings,
             path_rules,
         }
     }
@@ -186,26 +302,46 @@ impl Policy {
         host_matches(host, &self.allow)
     }
 
-    /// 要求を判定し、許可するなら差し替えの予定も返す。
-    pub fn evaluate(&self, request: &Request<'_>) -> (Decision, Vec<Substitution>) {
+    /// 要求を判定し、許可するなら書き換えの予定も返す。
+    pub fn evaluate(&self, request: &Request<'_>) -> (Decision, Plan) {
         match self.decide(request) {
-            Ok(substitutions) => {
+            Ok(plan) => {
                 let mut injected = Vec::new();
-                for s in &substitutions {
-                    let name = &self.rules[s.rule].name;
+                let names = plan
+                    .substitutions
+                    .iter()
+                    .map(|s| &self.rules[s.rule].name)
+                    .chain(plan.signings.iter().map(|s| &self.sign[s.rule].name));
+                for name in names {
                     if !injected.contains(name) {
                         injected.push(name.clone());
                     }
                 }
-                (Decision::Allowed { injected }, substitutions)
+                (Decision::Allowed { injected }, plan)
             }
-            Err(decision) => (decision, vec![]),
+            Err(decision) => (decision, Plan::default()),
         }
     }
 
-    /// 差し替えに要る本物の値の名前 (重複なし)。
-    pub fn secrets_needed(substitutions: &[Substitution]) -> Vec<String> {
-        let mut names: Vec<String> = substitutions.iter().map(|s| s.secret.clone()).collect();
+    /// 書き換えに要る本物の値の名前 (重複なし)。
+    pub fn secrets_needed(&self, plan: &Plan) -> Vec<String> {
+        let mut names: Vec<String> = plan
+            .substitutions
+            .iter()
+            .map(|s| s.secret.clone())
+            .collect();
+        for s in &plan.signings {
+            let SignScheme::AwsSigV4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+            } = &self.sign[s.rule].scheme;
+            names.push(access_key_id.secret_env.clone());
+            names.push(secret_access_key.secret_env.clone());
+            if let Some(token) = session_token.as_ref().filter(|_| s.session_token) {
+                names.push(token.secret_env.clone());
+            }
+        }
         names.sort();
         names.dedup();
         names
@@ -216,24 +352,61 @@ impl Policy {
     pub fn apply(
         &self,
         headers: &mut [(String, Vec<u8>)],
-        substitutions: &[Substitution],
+        plan: &Plan,
         value: impl Fn(&str) -> Option<SecretString>,
     ) -> Result<(), String> {
-        let mut rendered = Vec::with_capacity(substitutions.len());
-        for s in substitutions {
-            let secret = value(&s.secret).ok_or_else(|| s.secret.clone())?;
+        let get = |name: &str| value(name).ok_or_else(|| name.to_string());
+        let mut work = headers.to_vec();
+        for s in &plan.substitutions {
+            let secret = get(&s.secret)?;
             let rule = &self.rules[s.rule];
-            if let Some(new) = rule.render(&headers[s.header].1, secret.expose_secret()) {
-                rendered.push((s.header, new));
+            if let Some(new) = rule.render(&work[s.header].1, secret.expose_secret()) {
+                work[s.header].1 = new;
             }
         }
-        for (index, new) in rendered {
-            headers[index].1 = new;
+        // 署名は差し替えたあとのヘッダーで作る (セッショントークンも署名に含まれる)。
+        for s in &plan.signings {
+            let rule = &self.sign[s.rule];
+            let SignScheme::AwsSigV4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+            } = &rule.scheme;
+            if let Some(token) = session_token.as_ref().filter(|_| s.session_token) {
+                let real = get(&token.secret_env)?;
+                for (name, value) in work.iter_mut() {
+                    if name == "x-amz-security-token"
+                        && let Ok(text) = std::str::from_utf8(value)
+                    {
+                        *value = text
+                            .replace(&token.placeholder, real.expose_secret())
+                            .into_bytes();
+                    }
+                }
+            }
+            let key_id = get(&access_key_id.secret_env)?;
+            let secret = get(&secret_access_key.secret_env)?;
+            let request = sigv4::SigningRequest {
+                method: &s.method,
+                path_and_query: &s.path_and_query,
+                authority: &s.authority,
+                headers: &work,
+                payload_hash: &s.payload_hash,
+            };
+            let signed = sigv4::sign(
+                &s.auth,
+                &request,
+                key_id.expose_secret(),
+                secret.expose_secret(),
+            )
+            .ok_or_else(|| rule.name.clone())?;
+            work[s.header].1 = signed.into_bytes();
         }
+        headers.clone_from_slice(&work);
         Ok(())
     }
 
-    fn decide(&self, request: &Request<'_>) -> Result<Vec<Substitution>, Decision> {
+    fn decide(&self, request: &Request<'_>) -> Result<Plan, Decision> {
         let host = normalize_host(request.host);
         if host == CA_HOST {
             return Err(Decision::Ca);
@@ -265,63 +438,143 @@ impl Policy {
             }
         }
 
-        let mut substitutions = Vec::new();
-        for (rule_index, rule) in self.rules.iter().enumerate() {
-            // 同じプレースホルダーを複数の規則で差し替えることがある (git と API など)。
-            // どれかの規則がこの宛先を許していれば、束縛された宛先とみなす。
+        // 同じプレースホルダーを複数の規則で差し替えることがある (git と API など)。
+        // どれかの規則がこの宛先を許していれば、束縛された宛先とみなす。
+        for binding in &self.bindings {
+            let in_headers = request.headers.iter().any(|(_, value)| {
+                contains_bytes(value, binding.placeholder.as_bytes())
+                    || (binding.basic
+                        && basic_credentials(value).is_some_and(|(_, p)| p == binding.placeholder))
+            });
+            let in_url = request.path_and_query.contains(&binding.placeholder);
+            let in_body = request
+                .body
+                .is_some_and(|body| contains_bytes(body, binding.placeholder.as_bytes()));
             let bound = self
-                .rules
+                .bindings
                 .iter()
-                .any(|r| r.placeholder == rule.placeholder && host_matches(&host, &r.hosts));
+                .any(|b| b.placeholder == binding.placeholder && host_matches(&host, &b.hosts));
+            if (in_headers || in_url || in_body) && !bound {
+                return Err(blocked(
+                    BlockReason::PlaceholderToUnboundHost,
+                    Some(&binding.rule),
+                ));
+            }
+        }
+
+        let mut plan = Plan::default();
+        for (rule_index, rule) in self.rules.iter().enumerate() {
+            if !host_matches(&host, &rule.hosts) {
+                continue;
+            }
             for (index, (name, value)) in request.headers.iter().enumerate() {
-                if !rule.contains(value) {
-                    continue;
-                }
-                if !bound {
-                    return Err(blocked(
-                        BlockReason::PlaceholderToUnboundHost,
-                        Some(&rule.name),
-                    ));
-                }
                 if *name == rule.header && rule.renders(value) {
-                    substitutions.push(Substitution {
+                    plan.substitutions.push(Substitution {
                         header: index,
                         rule: rule_index,
                         secret: rule.secret.clone(),
                     });
                 }
             }
-            let in_url = request.path_and_query.contains(&rule.placeholder);
-            let in_body = request
-                .body
-                .is_some_and(|body| contains_bytes(body, rule.placeholder.as_bytes()));
-            if (in_url || in_body) && !bound {
-                return Err(blocked(
-                    BlockReason::PlaceholderToUnboundHost,
-                    Some(&rule.name),
-                ));
+        }
+        for (rule_index, rule) in self.sign.iter().enumerate() {
+            if !host_matches(&host, &rule.hosts) {
+                continue;
+            }
+            let signing = self.plan_signing(rule_index, request)?;
+            plan.signings.extend(signing);
+        }
+        Ok(plan)
+    }
+
+    /// 署名の規則の宛先への要求で、プレースホルダーの鍵で作った署名を探す。
+    fn plan_signing(
+        &self,
+        rule_index: usize,
+        request: &Request<'_>,
+    ) -> Result<Option<Signing>, Decision> {
+        let rule = &self.sign[rule_index];
+        let SignScheme::AwsSigV4 {
+            access_key_id,
+            session_token,
+            ..
+        } = &rule.scheme;
+        let unsignable = || blocked(BlockReason::Unsignable, Some(&rule.name));
+        let mut found = None;
+        for (index, (name, value)) in request.headers.iter().enumerate() {
+            if name != "authorization" {
+                continue;
+            }
+            if let Some(auth) = sigv4::Authorization::parse(value)
+                && auth.access_key_id == access_key_id.placeholder
+            {
+                if found.is_some() {
+                    return Err(unsignable());
+                }
+                found = Some((index, auth));
             }
         }
-        Ok(substitutions)
+        let Some((header, auth)) = found else {
+            // 鍵のプレースホルダーがあるのに作り直せる署名がない (署名付き URL など)。
+            let anywhere = request.path_and_query.contains(&access_key_id.placeholder)
+                || request
+                    .headers
+                    .iter()
+                    .any(|(_, v)| contains_bytes(v, access_key_id.placeholder.as_bytes()));
+            return if anywhere {
+                Err(unsignable())
+            } else {
+                Ok(None)
+            };
+        };
+        // 署名したヘッダーが揃っていなければ、作り直しても通らない。
+        let has = |name: &str| request.headers.iter().any(|(n, _)| n == name);
+        if !has("x-amz-date") || auth.signed_header_names().any(|n| n != "host" && !has(n)) {
+            return Err(unsignable());
+        }
+        let payload_hash = match sigv4::header_values(request.headers, "x-amz-content-sha256") {
+            Some(hash) if hash.starts_with("STREAMING-") => return Err(unsignable()),
+            Some(hash) => hash,
+            None => match request.body {
+                Some(body) => sigv4::sha256_hex(body),
+                None => return Err(unsignable()),
+            },
+        };
+        let session_token = session_token.as_ref().is_some_and(|token| {
+            request.headers.iter().any(|(n, v)| {
+                n == "x-amz-security-token" && contains_bytes(v, token.placeholder.as_bytes())
+            })
+        });
+        Ok(Some(Signing {
+            header,
+            rule: rule_index,
+            auth,
+            session_token,
+            method: request.method.to_string(),
+            path_and_query: request.path_and_query.to_string(),
+            authority: request.host.to_string(),
+            payload_hash,
+        }))
     }
+}
+
+/// Basic 認証の値なら、ユーザー名とパスワードを返す。
+fn basic_credentials(value: &[u8]) -> Option<(String, String)> {
+    let value = std::str::from_utf8(value).ok()?;
+    let (scheme, encoded) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = String::from_utf8(BASE64.decode(encoded.trim()).ok()?).ok()?;
+    let (user, password) = decoded.split_once(':')?;
+    Some((user.to_string(), password.to_string()))
 }
 
 impl InjectRule {
     /// Basic 認証のパスワードがプレースホルダーなら、そのユーザー名を返す。
     fn basic_user(&self, value: &[u8]) -> Option<String> {
-        let value = std::str::from_utf8(value).ok()?;
-        let (scheme, encoded) = value.split_once(' ')?;
-        if !scheme.eq_ignore_ascii_case("basic") {
-            return None;
-        }
-        let decoded = String::from_utf8(BASE64.decode(encoded.trim()).ok()?).ok()?;
-        let (user, password) = decoded.split_once(':')?;
-        (password == self.placeholder).then(|| user.to_string())
-    }
-
-    fn contains(&self, value: &[u8]) -> bool {
-        contains_bytes(value, self.placeholder.as_bytes())
-            || (self.format == InjectFormat::BasicPassword && self.basic_user(value).is_some())
+        let (user, password) = basic_credentials(value)?;
+        (password == self.placeholder).then_some(user)
     }
 
     /// この規則で差し替えられる値か。
@@ -741,13 +994,219 @@ mod tests {
             headers: &headers,
             body: None,
         });
-        assert_eq!(Policy::secrets_needed(&substitutions), ["TEST"]);
+        assert_eq!(p.secrets_needed(&substitutions), ["TEST"]);
         // 値が得られなければ何も書き換えない。
         assert_eq!(
             p.apply(&mut headers, &substitutions, |_| None),
             Err("TEST".to_string())
         );
         assert_eq!(headers[0].1, format!("Bearer {PH}").into_bytes());
+    }
+
+    const SIGV4: &str = include_str!("../testdata/sigv4.json");
+
+    fn sigv4_policy() -> (Policy, serde_json::Value) {
+        let vectors: serde_json::Value = serde_json::from_str(SIGV4).unwrap();
+        let ph = &vectors["placeholder"];
+        let config: PolicyConfig = serde_json::from_value(serde_json::json!({
+            "allow": ["*.amazonaws.com", "example.org"],
+            "sign": [{
+                "name": "aws",
+                "hosts": ["*.amazonaws.com"],
+                "scheme": "aws-sigv4",
+                "access_key_id": { "placeholder": ph["access_key_id"], "secret_env": "AKID" },
+                "secret_access_key": { "placeholder": ph["secret_access_key"], "secret_env": "SECRET" },
+                "session_token": { "placeholder": ph["session_token"], "secret_env": "TOKEN" }
+            }]
+        }))
+        .unwrap();
+        (Policy::new(config), vectors)
+    }
+
+    fn aws_request<'a>(
+        case: &'a serde_json::Value,
+        headers: &'a [(String, Vec<u8>)],
+        body: Option<&'a [u8]>,
+    ) -> Request<'a> {
+        let host = case["authority"].as_str().unwrap();
+        Request {
+            host,
+            sni: Some(host),
+            tls: true,
+            method: case["method"].as_str().unwrap(),
+            path_and_query: case["path_and_query"].as_str().unwrap(),
+            headers,
+            body,
+        }
+    }
+
+    fn case_headers(case: &serde_json::Value) -> Vec<(String, Vec<u8>)> {
+        case["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                (
+                    h[0].as_str().unwrap().to_string(),
+                    h[1].as_str().unwrap().as_bytes().to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    /// botocore が本物の鍵で作った署名と同じ署名に作り直す (testdata/sigv4.py)。
+    #[test]
+    fn resigns_aws_sigv4_like_botocore() {
+        let (p, vectors) = sigv4_policy();
+        let real = &vectors["real"];
+        for case in vectors["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let mut headers = case_headers(case);
+            let body = case["body"].as_str().unwrap().as_bytes();
+            let (decision, plan) = p.evaluate(&aws_request(case, &headers, Some(body)));
+            assert_eq!(
+                decision,
+                Decision::Allowed {
+                    injected: vec!["aws".into()]
+                },
+                "{name}"
+            );
+            let mut needed = vec!["AKID", "SECRET"];
+            if !case["expected_security_token"].is_null() {
+                needed.push("TOKEN");
+            }
+            assert_eq!(p.secrets_needed(&plan), needed, "{name}");
+            p.apply(&mut headers, &plan, |secret| {
+                let field = match secret {
+                    "AKID" => "access_key_id",
+                    "SECRET" => "secret_access_key",
+                    _ => "session_token",
+                };
+                Some(real[field].as_str().unwrap().to_string().into())
+            })
+            .unwrap();
+            let header = |n: &str| {
+                headers
+                    .iter()
+                    .find(|(h, _)| h == n)
+                    .map(|(_, v)| String::from_utf8(v.clone()).unwrap())
+            };
+            assert_eq!(
+                header("authorization").unwrap(),
+                case["expected_authorization"].as_str().unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                header("x-amz-security-token").as_deref(),
+                case["expected_security_token"].as_str(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_what_cannot_be_resigned() {
+        let (p, vectors) = sigv4_policy();
+        let cases = vectors["cases"].as_array().unwrap();
+        let ph = vectors["placeholder"]["access_key_id"].as_str().unwrap();
+        let vanilla = &cases[0];
+        let lambda = &cases[2];
+        let decide = |case: &serde_json::Value, headers: &[(String, Vec<u8>)], body| {
+            let (decision, plan) = p.evaluate(&aws_request(case, headers, body));
+            assert!(plan.is_empty());
+            decision
+        };
+
+        // 本文のハッシュが分からない (本文を調べられず、x-amz-content-sha256 もない)。
+        let headers = case_headers(lambda);
+        assert_eq!(
+            reason(decide(lambda, &headers, None)),
+            BlockReason::Unsignable
+        );
+
+        // S3 のチャンクごとの署名。
+        let mut headers = case_headers(vanilla);
+        headers.push((
+            "x-amz-content-sha256".into(),
+            b"STREAMING-AWS4-HMAC-SHA256-PAYLOAD".to_vec(),
+        ));
+        assert_eq!(
+            reason(decide(vanilla, &headers, Some(b""))),
+            BlockReason::Unsignable
+        );
+
+        // 署名したヘッダーが要求にない。
+        let headers: Vec<_> = case_headers(vanilla)
+            .into_iter()
+            .filter(|(n, _)| n != "x-amz-date")
+            .collect();
+        assert_eq!(
+            reason(decide(vanilla, &headers, Some(b""))),
+            BlockReason::Unsignable
+        );
+
+        // 署名付き URL。
+        let presigned = serde_json::json!({
+            "authority": "bucket.s3.amazonaws.com",
+            "method": "GET",
+            "path_and_query": format!("/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={ph}%2F20150830%2Fus-east-1%2Fs3%2Faws4_request"),
+        });
+        assert_eq!(
+            reason(decide(&presigned, &[], Some(b""))),
+            BlockReason::Unsignable
+        );
+
+        // 規則の宛先でなければ、どの鍵のプレースホルダーも送らせない。
+        let mut elsewhere = vanilla.clone();
+        elsewhere["authority"] = "example.org".into();
+        let headers = case_headers(vanilla);
+        assert_eq!(
+            reason(decide(&elsewhere, &headers, Some(b""))),
+            BlockReason::PlaceholderToUnboundHost
+        );
+        let secret = vectors["placeholder"]["secret_access_key"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            reason(decide(&elsewhere, &[], Some(secret.as_bytes()))),
+            BlockReason::PlaceholderToUnboundHost
+        );
+
+        // プレースホルダーの鍵を使わない署名には触らない。
+        let headers = vec![(
+            "authorization".to_string(),
+            b"AWS4-HMAC-SHA256 Credential=AKIDOTHER/20150830/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=00".to_vec(),
+        )];
+        assert_eq!(
+            decide(vanilla, &headers, Some(b"")),
+            Decision::Allowed { injected: vec![] }
+        );
+    }
+
+    #[test]
+    fn sign_rule_roundtrips_as_json() {
+        let rule = SignRuleConfig {
+            name: "aws".into(),
+            hosts: vec!["*.amazonaws.com".into()],
+            scheme: SignScheme::AwsSigV4 {
+                access_key_id: Credential {
+                    placeholder: "AKIAx".into(),
+                    secret_env: "A".into(),
+                },
+                secret_access_key: Credential {
+                    placeholder: "s".into(),
+                    secret_env: "S".into(),
+                },
+                session_token: None,
+            },
+        };
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["scheme"], "aws-sigv4");
+        assert!(json.get("session_token").is_none());
+        assert_eq!(
+            serde_json::from_value::<SignRuleConfig>(json).unwrap(),
+            rule
+        );
     }
 
     #[test]

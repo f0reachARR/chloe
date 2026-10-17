@@ -76,7 +76,7 @@ pub async fn serve(path: &Path, shared: SharedPolicy) -> Result<()> {
 /// 更新を当てて、差し替えの規則の数を返す。失敗したら今の方針を変えない。
 fn apply(line: &str, shared: &SharedPolicy) -> Result<usize> {
     let update: Update = serde_json::from_str(line).context("invalid update")?;
-    let rules = update.policy.inject.len();
+    let rules = update.policy.inject.len() + update.policy.sign.len();
     shared.replace(Policy::new(update.policy));
     Ok(rules)
 }
@@ -88,7 +88,8 @@ mod tests {
 
     fn injected(shared: &SharedPolicy, auth: &str) -> Vec<String> {
         let headers = vec![("authorization".to_string(), auth.as_bytes().to_vec())];
-        let (decision, substitutions) = shared.current().evaluate(&Request {
+        let policy = shared.current();
+        let (decision, plan) = policy.evaluate(&Request {
             host: "api.github.com",
             sni: Some("api.github.com"),
             tls: true,
@@ -98,7 +99,7 @@ mod tests {
             body: None,
         });
         match decision {
-            Decision::Allowed { .. } => chloe_policy::Policy::secrets_needed(&substitutions),
+            Decision::Allowed { .. } => policy.secrets_needed(&plan),
             other => panic!("unexpected {other:?}"),
         }
     }

@@ -146,6 +146,7 @@ pub fn build_spec(
         allow: base.allow.clone(),
         passthrough: base.passthrough.clone(),
         inject: vec![],
+        sign: vec![],
         rules: base.rules.clone(),
     };
     let mut guest_env = Vec::new();
