@@ -316,4 +316,32 @@ check team-gets-org-secret "sk-proj-chloe" as alice+acme/dev/tools 'printenv OPE
 check org-not-team-secret "absent" as alice+acme/proj 'printenv ANTHROPIC_API_KEY || echo absent'
 check secrets-not-logged "clean" sh -c '! grep -q "real-team-key\|real-org-key" "$0" && echo clean' "$logs/gateway.log"
 
+section "management TUI"
+# 端末を割り当てた ssh で chloe だけを実行すると、TUI が開く。キーは fifo から送り、画面を待つ。
+# script の端末は大きさが 0 なので、先に決める。
+mkfifo "$work/tui-in"
+exec 7<>"$work/tui-in"
+script -qfec "stty cols 120 rows 40; ssh -tt ${ssh_opts[*]} -i $work/alice alice@127.0.0.1 chloe" /dev/null \
+    < "$work/tui-in" > "$work/tui-out" 2>&1 &
+tui_shows() { wait_until 20 grep -qa "$1" "$work/tui-out" && echo "$1"; }
+tui_keys() { printf '%b' "$1" >&7; }
+check tui-opens "acme/proj" tui_shows "acme/proj"
+check tui-alt-screen "alternate screen" sh -c 'grep -qa "$(printf "\033\\[?1049h")" "$0" && echo alternate screen' "$work/tui-out"
+tui_keys 'n'
+check tui-form "New workspace" tui_shows "New workspace"
+tui_keys 'tui-ws\x13'
+check tui-created "created tui-ws" tui_shows "created tui-ws"
+check tui-created-listed "tui-ws" as alice chloe ws list
+tui_keys '2o'
+check tui-org-secrets "openai_api_key" tui_shows "openai_api_key"
+tui_keys '3\r'
+# 一覧の先頭の acme の設定を開く。
+check tui-org-settings "example.org" tui_shows "example.org"
+# Esc と q を一度に送ると Alt+q になるので、どこからでも閉じる Ctrl+C で閉じる。
+tui_keys '\x03'
+check tui-exits "1049l" tui_shows "$(printf '\033\\[?1049l')"
+exec 7>&-
+cp "$work/tui-out" "$logs/tui-out"
+check tui-audit 'via="tui"' sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "management command" | grep -o "via=\"tui\"" | head -1' "$logs/gateway.log"
+
 timing_summary
