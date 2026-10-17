@@ -50,10 +50,11 @@ impl Store {
         };
         for kind in catalog::KINDS {
             sqlx::query(
-                "INSERT INTO placeholders (workspace_id, secret_name, placeholder) VALUES (?1, ?2, ?3)",
+                "INSERT INTO placeholders (workspace_id, secret_name, field, template, placeholder) VALUES (?1, ?2, 'value', ?3, ?4)",
             )
             .bind(id)
             .bind(kind.name)
+            .bind(format!("{}{{id}}", kind.placeholder_prefix))
             .bind(new_placeholder(kind.placeholder_prefix))
             .execute(&mut *tx)
             .await?;
@@ -427,11 +428,12 @@ impl Store {
         let kind = catalog::kind(secret_name)
             .ok_or_else(|| Error::Invalid(format!("unknown secret: {secret_name}")))?;
         sqlx::query(
-            "INSERT INTO placeholders (workspace_id, secret_name, placeholder) VALUES (?1, ?2, ?3)
-             ON CONFLICT (workspace_id, secret_name) DO UPDATE SET placeholder = excluded.placeholder",
+            "INSERT INTO placeholders (workspace_id, secret_name, field, template, placeholder) VALUES (?1, ?2, 'value', ?3, ?4)
+             ON CONFLICT (workspace_id, secret_name, field) DO UPDATE SET placeholder = excluded.placeholder",
         )
         .bind(id)
         .bind(secret_name)
+        .bind(format!("{}{{id}}", kind.placeholder_prefix))
         .bind(new_placeholder(kind.placeholder_prefix))
         .execute(&self.pool)
         .await?;
