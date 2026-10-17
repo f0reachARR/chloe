@@ -219,6 +219,7 @@ sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url h
 ### ホスト
 
 各ホストに、ビルドしたものを「配置」のとおりに置き、利用者 `chloe` を作る（`chloe-gateway` と `chloe-gateway.service` は要らない）。
+`useradd` の `--home-dir` は `/var/lib/chloe-node` にする。
 今は配る仕組みがないので、手で写す。
 `chloe-dev-runner` のイメージも要る（ホストでビルドするか、`docker save` と `docker load` で写す）。
 
