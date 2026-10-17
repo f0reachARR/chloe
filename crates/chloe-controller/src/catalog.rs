@@ -5,7 +5,8 @@
 //! 差し替えの規則 (inject) は欄の一つを宛先の決まったヘッダーで本物に差し替え、署名の規則 (sign) は
 //! 欄のいくつかを鍵にして署名を作り直す。
 //!
-//! 組み込みの種類 ([`preset`]) は定義を登録しなくても使える。ほかの名前は、登録するときに定義を渡す。
+//! 組み込みの種類 ([`preset`]、GitHub のトークン) は定義を登録しなくても使える。ほかの名前は、
+//! 登録するときに定義を渡す (よく使うものの例は `deploy/secrets/` にある)。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -334,82 +335,74 @@ fn check_header(header: &str) -> Result<(), String> {
     }
 }
 
-/// 組み込みの種類の名前。
-pub const PRESETS: &[&str] = &[
+/// 組み込みの種類の名前。chloe が値を作る (GitHub App のトークン) ので、定義を登録させない。
+pub const PRESETS: &[&str] = &["github_token"];
+
+/// 組み込みの種類の定義。
+pub fn preset(name: &str) -> Option<SecretSpec> {
+    if name != "github_token" {
+        return None;
+    }
+    let rule = |hosts: &[&str], format| InjectSpec {
+        field: VALUE.into(),
+        hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        header: "authorization".into(),
+        format,
+    };
+    Some(SecretSpec {
+        fields: BTreeMap::from([(
+            VALUE.to_string(),
+            FieldSpec {
+                env: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+                // GitHub App のユーザートークンの接頭辞。
+                placeholder: "ghu_{id}".into(),
+            },
+        )]),
+        inject: vec![
+            rule(&["github.com"], InjectFormat::BasicPassword),
+            rule(
+                &["api.github.com", "uploads.github.com"],
+                InjectFormat::Replace,
+            ),
+        ],
+        sign: vec![],
+    })
+}
+
+/// 組み込みの種類か、例の定義 (テスト用)。
+#[cfg(test)]
+pub(crate) fn spec_for_test(name: &str) -> SecretSpec {
+    preset(name).unwrap_or_else(|| example(name, "v").into_parts().unwrap().0.unwrap())
+}
+
+/// 0006 より前に組み込みだった種類 (テスト用)。例の定義はプレースホルダーの形を引き継ぐ。
+#[cfg(test)]
+pub(crate) const FORMER_PRESETS: [&str; 4] = [
     "anthropic_api_key",
     "claude_oauth_token",
     "openai_api_key",
     "github_token",
 ];
 
-/// 組み込みの種類の定義。
-pub fn preset(name: &str) -> Option<SecretSpec> {
-    let single = |env: &[&str], placeholder: &str, inject: Vec<InjectSpec>| SecretSpec {
-        fields: BTreeMap::from([(
-            VALUE.to_string(),
-            FieldSpec {
-                env: env.iter().map(|e| e.to_string()).collect(),
-                placeholder: placeholder.into(),
-            },
-        )]),
-        inject,
-        sign: vec![],
+/// 例の定義 (`deploy/secrets/<名前>.toml`) を、値を差し替えて読む (テスト用)。
+#[cfg(test)]
+pub(crate) fn example(name: &str, value: &str) -> SecretInput {
+    let text = match name {
+        "anthropic_api_key" => include_str!("../../../deploy/secrets/anthropic_api_key.toml"),
+        "claude_oauth_token" => include_str!("../../../deploy/secrets/claude_oauth_token.toml"),
+        "openai_api_key" => include_str!("../../../deploy/secrets/openai_api_key.toml"),
+        "aws" => include_str!("../../../deploy/secrets/aws.toml"),
+        _ => panic!("no example for {name}"),
     };
-    let rule = |hosts: &[&str], header: &str, format| InjectSpec {
-        field: VALUE.into(),
-        hosts: hosts.iter().map(|h| h.to_string()).collect(),
-        header: header.into(),
-        format,
-    };
-    let spec = match name {
-        "anthropic_api_key" => single(
-            &["ANTHROPIC_API_KEY"],
-            "sk-ant-api03-{id}",
-            vec![rule(
-                &["api.anthropic.com"],
-                "x-api-key",
-                InjectFormat::Replace,
-            )],
-        ),
-        "claude_oauth_token" => single(
-            &["CLAUDE_CODE_OAUTH_TOKEN"],
-            "sk-ant-oat01-{id}",
-            vec![rule(
-                &["api.anthropic.com"],
-                "authorization",
-                InjectFormat::Replace,
-            )],
-        ),
-        // codex exec は CODEX_API_KEY を読む。
-        "openai_api_key" => single(
-            &["OPENAI_API_KEY", "CODEX_API_KEY"],
-            "sk-proj-{id}",
-            vec![rule(
-                &["api.openai.com"],
-                "authorization",
-                InjectFormat::Replace,
-            )],
-        ),
-        // GitHub App のユーザートークンの接頭辞。
-        "github_token" => single(
-            &["GH_TOKEN", "GITHUB_TOKEN"],
-            "ghu_{id}",
-            vec![
-                rule(
-                    &["github.com"],
-                    "authorization",
-                    InjectFormat::BasicPassword,
-                ),
-                rule(
-                    &["api.github.com", "uploads.github.com"],
-                    "authorization",
-                    InjectFormat::Replace,
-                ),
-            ],
-        ),
-        _ => return None,
-    };
-    Some(spec)
+    let mut input: SecretInput = toml::from_str(text).unwrap();
+    if input.fields.is_empty() {
+        input.value = Some(value.into());
+    } else {
+        for field in input.fields.values_mut() {
+            field.value = value.into();
+        }
+    }
+    input
 }
 
 /// ランナーのプロキシが本物の値を問い合わせるときの名前 (開発用のプロキシでは環境変数の名前にもなる)。
@@ -456,12 +449,24 @@ mod tests {
     }
 
     #[test]
-    fn presets_are_valid() {
+    fn presets_and_examples_are_valid() {
         for name in PRESETS {
             check_name(name).unwrap();
             preset(name).unwrap().validate().unwrap();
         }
-        assert!(preset("unknown").is_none());
+        assert!(preset("anthropic_api_key").is_none());
+        for name in [
+            "anthropic_api_key",
+            "claude_oauth_token",
+            "openai_api_key",
+            "aws",
+        ] {
+            check_name(name).unwrap();
+            let (spec, values) = example(name, "v").into_parts().unwrap();
+            let spec = spec.unwrap();
+            spec.validate().unwrap();
+            spec.encode_values(&values).unwrap();
+        }
     }
 
     #[test]

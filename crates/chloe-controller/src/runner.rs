@@ -303,7 +303,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let preset = |name: &str| (name.to_string(), catalog::preset(name).unwrap());
+        let preset = |name: &str| (name.to_string(), catalog::spec_for_test(name));
         let spec = build_spec(
             &ws,
             &base,

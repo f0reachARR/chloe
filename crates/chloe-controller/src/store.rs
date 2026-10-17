@@ -596,7 +596,7 @@ pub(crate) mod tests {
 
         let presets = [(
             "anthropic_api_key".to_string(),
-            catalog::preset("anthropic_api_key").unwrap(),
+            catalog::spec_for_test("anthropic_api_key"),
         )];
         store.ensure_placeholders(ws.id, &presets).await.unwrap();
         store.delete(ws.id).await.unwrap();
@@ -756,9 +756,9 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        let presets: Vec<(String, SecretSpec)> = catalog::PRESETS
+        let presets: Vec<(String, SecretSpec)> = catalog::FORMER_PRESETS
             .iter()
-            .map(|name| (name.to_string(), catalog::preset(name).unwrap()))
+            .map(|name| (name.to_string(), catalog::spec_for_test(name)))
             .collect();
         let key = |name: &str| (name.to_string(), catalog::VALUE.to_string());
         let first = store.ensure_placeholders(a.id, &presets).await.unwrap();
@@ -819,10 +819,10 @@ pub(crate) mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let old: Vec<(String, String)> = catalog::PRESETS
+        let old: Vec<(String, String)> = catalog::FORMER_PRESETS
             .iter()
             .map(|name| {
-                let template = &catalog::preset(name).unwrap().fields[catalog::VALUE].placeholder;
+                let template = &catalog::spec_for_test(name).fields[catalog::VALUE].placeholder;
                 (name.to_string(), new_placeholder(template))
             })
             .collect();
@@ -837,9 +837,9 @@ pub(crate) mod tests {
             .unwrap();
         }
         chloe_secrets::MIGRATOR.run(&pool).await.unwrap();
-        let presets: Vec<(String, SecretSpec)> = catalog::PRESETS
+        let presets: Vec<(String, SecretSpec)> = catalog::FORMER_PRESETS
             .iter()
-            .map(|name| (name.to_string(), catalog::preset(name).unwrap()))
+            .map(|name| (name.to_string(), catalog::spec_for_test(name)))
             .collect();
         let now = Store::new(pool)
             .ensure_placeholders(1, &presets)

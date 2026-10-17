@@ -3,7 +3,8 @@
 ALTER TABLE secrets ADD COLUMN spec TEXT;
 
 -- プレースホルダーをシークレットの欄ごとにし、作ったときの形 (`{id}` を乱数に置き換える) を残す。
--- 形が変わったら作り直す。組み込みの種類は今のプレースホルダーをそのまま使い続ける。
+-- 形が変わったら作り直す。以前の組み込みの種類は、同じ形の定義 (deploy/secrets の例) で
+-- 登録し直せば、今のプレースホルダーをそのまま使い続ける。
 CREATE TABLE placeholders_v2 (
     workspace_id INTEGER NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     secret_name TEXT NOT NULL,

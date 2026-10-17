@@ -503,12 +503,13 @@ mod tests {
     fn prepares_secrets() {
         // 組み込みの種類は値だけで登録できる。
         let (value, spec) =
-            prepare_secret("anthropic_api_key", SecretInput::value("sk"), None).unwrap();
-        assert_eq!((value.as_str(), spec), ("sk", None));
+            prepare_secret("github_token", SecretInput::value("ghp"), None).unwrap();
+        assert_eq!((value.as_str(), spec), ("ghp", None));
         // 組み込みの種類には定義を渡せない。
-        assert!(prepare_secret("anthropic_api_key", input(HF), None).is_err());
-        // 定義のない名前は、値だけでは登録できない。
+        assert!(prepare_secret("github_token", input(HF), None).is_err());
+        // 定義のない名前は、値だけでは登録できない (以前は組み込みだった名前も)。
         assert!(prepare_secret("hf_token", SecretInput::value("x"), None).is_err());
+        assert!(prepare_secret("anthropic_api_key", SecretInput::value("x"), None).is_err());
 
         let (value, spec) = prepare_secret("hf_token", input(HF), None).unwrap();
         assert_eq!(value, "hf-real");

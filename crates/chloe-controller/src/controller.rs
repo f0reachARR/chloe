@@ -937,6 +937,27 @@ mod tests {
             .unwrap()
     }
 
+    /// 例の定義 (deploy/secrets) で登録する。ゲートウェイの登録と同じ形で置く。
+    trait SetExample {
+        async fn set_example(&self, owner: &Owner, name: &str, value: &str);
+    }
+
+    impl SetExample for SecretDb {
+        async fn set_example(&self, owner: &Owner, name: &str, value: &str) {
+            let (spec, values) = catalog::example(name, value).into_parts().unwrap();
+            let spec = spec.unwrap();
+            let stored = spec.encode_values(&values).unwrap();
+            self.set_with_spec(
+                owner,
+                name,
+                &stored.into(),
+                Some(&serde_json::to_string(&spec).unwrap()),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn waits_while_an_agent_is_working() {
         let ms = Duration::from_millis;
@@ -979,9 +1000,8 @@ mod tests {
         let alice = Owner::User("alice".into());
         before
             .secrets()
-            .set(&alice, "anthropic_api_key", &"alice-key".to_string().into())
-            .await
-            .unwrap();
+            .set_example(&alice, "anthropic_api_key", "alice-key")
+            .await;
         let ws = workspace(&before, "api", "alice").await;
         let other = workspace(&before, "other", "alice").await;
         let session = before.open(&ws).await.unwrap();
@@ -1105,17 +1125,14 @@ mod tests {
         };
         let secrets = controller.secrets();
         secrets
-            .set(&org, "anthropic_api_key", &"org-key".to_string().into())
-            .await
-            .unwrap();
+            .set_example(&org, "anthropic_api_key", "org-key")
+            .await;
         secrets
-            .set(&org, "openai_api_key", &"org-openai".to_string().into())
-            .await
-            .unwrap();
+            .set_example(&org, "openai_api_key", "org-openai")
+            .await;
         secrets
-            .set(&team, "openai_api_key", &"team-openai".to_string().into())
-            .await
-            .unwrap();
+            .set_example(&team, "openai_api_key", "team-openai")
+            .await;
         let ws = workspace(&controller, "acme/dev/tools", "alice").await;
         let other_team = workspace(&controller, "acme/ops/tools", "alice").await;
         let _a = controller.open(&ws).await.unwrap();
@@ -1179,14 +1196,12 @@ mod tests {
         let bob = Owner::User("bob".into());
         controller
             .secrets()
-            .set(&alice, "anthropic_api_key", &"alice-key".to_string().into())
-            .await
-            .unwrap();
+            .set_example(&alice, "anthropic_api_key", "alice-key")
+            .await;
         controller
             .secrets()
-            .set(&bob, "anthropic_api_key", &"bob-key".to_string().into())
-            .await
-            .unwrap();
+            .set_example(&bob, "anthropic_api_key", "bob-key")
+            .await;
         let ws_a = controller
             .store()
             .create(
@@ -1238,13 +1253,8 @@ mod tests {
         // 値を変えると、次の問い合わせから新しい値になる (送り込みは要らない)。
         controller
             .secrets()
-            .set(
-                &alice,
-                "anthropic_api_key",
-                &"alice-key-2".to_string().into(),
-            )
-            .await
-            .unwrap();
+            .set_example(&alice, "anthropic_api_key", "alice-key-2")
+            .await;
         assert!(
             ask(&socket_a, "CHLOE_SECRET_ANTHROPIC_API_KEY")
                 .await
