@@ -79,6 +79,11 @@ async fn main() -> Result<()> {
     if let Some(Command::Node { command }) = cli.command {
         return node_command(&config, command).await;
     }
+    anyhow::ensure!(
+        auth::is_login(&config.ssh_user),
+        "ssh_user must be 1-39 letters, digits and hyphens: {:?}",
+        config.ssh_user
+    );
     init_logging(config.audit_log.as_deref())?;
 
     let host_key = load_or_generate_host_key(&config.host_key)?;

@@ -166,6 +166,14 @@ impl Shared {
         load_user_token(self.controller.secrets(), login).await
     }
 
+    /// 利用者の GitHub のユーザートークンが、まだ使えるか (更新すれば使えるものを含む)。
+    pub async fn has_usable_token(&self, login: &str) -> Result<bool> {
+        Ok(self
+            .load_user_token(login)
+            .await?
+            .is_some_and(|token| token.is_usable()))
+    }
+
     pub async fn store_user_token(&self, login: &str, token: &UserToken) -> Result<()> {
         store_user_token(self.controller.secrets(), login, token).await
     }

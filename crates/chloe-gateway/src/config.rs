@@ -17,6 +17,10 @@ pub struct Config {
     /// 公開鍵を取得する GitHub の URL。`{github_url}/{login}.keys` を読む。
     #[serde(default = "default_github_url")]
     pub github_url: String,
+    /// GitHub のログイン名の代わりに使える SSH のユーザー名 (`git@github.com` の `git` にあたる)。
+    /// このユーザー名と、GitHub に存在しないユーザー名では、利用者を公開鍵か Device Flow で決める。
+    #[serde(default = "default_ssh_user")]
+    pub ssh_user: String,
     /// SQLite のデータベース。なければ作る。
     pub database: PathBuf,
     /// 監査ログ (JSON Lines) を追記するファイル。ログイン、セッション、ポート転送、管理コマンド、
@@ -109,6 +113,10 @@ impl Config {
             .iter()
             .any(|u| u.eq_ignore_ascii_case(login))
     }
+}
+
+fn default_ssh_user() -> String {
+    "chloe".into()
 }
 
 fn default_github_url() -> String {

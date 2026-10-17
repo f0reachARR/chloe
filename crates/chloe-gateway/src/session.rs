@@ -15,14 +15,16 @@ use chloe_agent_proto::{
 };
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
 use chloe_controller::{Controller, Error as ControllerError};
-use chloe_github::{DeviceCode, GitHubApp, Poll};
+use chloe_github::{DeviceCode, GitHubApp, Poll, UserToken};
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelOpenFailure, Pty, Sig};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::auth::{GitHubKeys, parse_user};
+use crate::auth::{
+    Claim, GitHubKeys, KeyOutcome, SshUser, fingerprint, key_outcome, openssh, parse_user,
+};
 use crate::backend::Backend;
 use crate::commands;
 use crate::config::Config;
@@ -76,6 +78,27 @@ struct Authenticated {
     workspace: Option<String>,
 }
 
+/// 公開鍵の確認の結果。
+enum KeyCheck {
+    Accept(Authenticated),
+    /// 鍵は通すが、Device Flow を済ませないと入れない。
+    DeviceFlow,
+    Reject,
+}
+
+/// keyboard-interactive で進めている Device Flow。
+enum DeviceState {
+    /// 承認を待っている。`expected` は SSH ユーザー名の GitHub のログイン名 (誰でもよい
+    /// 名前なら `None`)。
+    Waiting {
+        expected: Option<String>,
+        workspace: Option<String>,
+        device: DeviceCode,
+    },
+    /// 失敗を見せた。次の応答で断る。
+    Failed,
+}
+
 #[derive(Default)]
 struct ChannelState {
     tty: Option<TtyRequest>,
@@ -90,8 +113,10 @@ pub struct Connection {
     peer: Option<std::net::SocketAddr>,
     user: Option<Authenticated>,
     channels: HashMap<ChannelId, ChannelState>,
+    /// Device Flow に進む前に通した公開鍵。Device Flow を済ませたら、この鍵を利用者に結び付ける。
+    offered_key: Option<PublicKey>,
     /// keyboard-interactive で進めている Device Flow。
-    device: Option<(Authenticated, DeviceCode)>,
+    device: Option<DeviceState>,
     /// ポート転送をした接続では、転送中の TCP の接続がなくても、SSH の接続が切れるまで
     /// ランナーを止めない (`ssh -N -L` で開いたまま、ときどき使うため)。
     forwarding: ForwardingHold,
@@ -106,20 +131,21 @@ impl Connection {
             peer,
             user: None,
             channels: HashMap::new(),
+            offered_key: None,
             device: None,
             forwarding: Arc::default(),
         }
     }
 
-    /// ログイン名とワークスペースだけで判断できる確認。鍵や Device Flow の前に行う。
-    async fn admit(&self, user: &str) -> Result<Option<Authenticated>> {
-        let user = parse_user(user)?;
-        if !self.shared.is_allowed(&user.login).await? {
+    /// ログイン名とワークスペースだけで判断できる確認。利用者がこのサーバーを使えて、
+    /// 指定したワークスペースに入れるか。
+    async fn admit(&self, login: &str, workspace: Option<&str>) -> Result<Option<Authenticated>> {
+        if !self.shared.is_allowed(login).await? {
             return Ok(None);
         }
-        if let Some(spec) = &user.workspace {
-            let target = WorkspaceRef::parse(spec, &user.login)?;
-            if !self.shared.can_access(&user.login, &target.owner).await?
+        if let Some(spec) = workspace {
+            let target = WorkspaceRef::parse(spec, login)?;
+            if !self.shared.can_access(login, &target.owner).await?
                 || self
                     .shared
                     .controller
@@ -132,29 +158,164 @@ impl Connection {
             }
         }
         Ok(Some(Authenticated {
-            login: user.login.to_ascii_lowercase(),
-            workspace: user.workspace,
+            login: login.to_ascii_lowercase(),
+            workspace: workspace.map(str::to_string),
         }))
     }
 
-    async fn authorize(&self, user: &str, key: &PublicKey) -> Result<Option<Authenticated>> {
-        let Some(admitted) = self.admit(user).await? else {
-            return Ok(None);
-        };
-        if !self.shared.keys.is_registered(&admitted.login, key).await? {
-            return Ok(None);
+    /// SSH ユーザー名の名前が、GitHub のログイン名か、誰でもよい名前 (予約したユーザー名か
+    /// GitHub に存在しない名前) か。
+    async fn claim(&self, user: &SshUser) -> Result<Claim> {
+        if user.name.eq_ignore_ascii_case(&self.shared.config.ssh_user) {
+            return Ok(Claim::Anyone);
         }
-        Ok(Some(admitted))
+        Ok(if self.shared.keys.exists(&user.name).await? {
+            Claim::Login(user.name.to_ascii_lowercase())
+        } else {
+            Claim::Anyone
+        })
     }
 
-    async fn check_key(&self, user: &str, key: &PublicKey) -> Option<Authenticated> {
+    async fn authorize(&self, user: &str, key: &PublicKey) -> Result<KeyCheck> {
+        let user = parse_user(user)?;
+        let claim = self.claim(&user).await?;
+        let store = self.shared.controller.store();
+        let fingerprint = fingerprint(key);
+        let owner = match &claim {
+            Claim::Login(login) => {
+                // 入れない利用者には、Device Flow を始めさせない。
+                if self
+                    .admit(login, user.workspace.as_deref())
+                    .await?
+                    .is_none()
+                {
+                    return Ok(KeyCheck::Reject);
+                }
+                let registered = self.shared.keys.is_registered(login, key).await?
+                    || store.ssh_key_login(&fingerprint).await?.as_ref() == Some(login);
+                registered.then(|| login.clone())
+            }
+            Claim::Anyone => store.ssh_key_login(&fingerprint).await?,
+        };
+        let device_flow = self.shared.github.is_some();
+        let token_usable = match &owner {
+            Some(login) if device_flow => self.shared.has_usable_token(login).await?,
+            _ => false,
+        };
+        Ok(
+            match key_outcome(&claim, owner.as_deref(), device_flow, token_usable) {
+                KeyOutcome::Reject => KeyCheck::Reject,
+                KeyOutcome::DeviceFlow => KeyCheck::DeviceFlow,
+                KeyOutcome::Accept => {
+                    let login = owner.unwrap_or_default();
+                    match self.admit(&login, user.workspace.as_deref()).await? {
+                        Some(admitted) => KeyCheck::Accept(admitted),
+                        None => KeyCheck::Reject,
+                    }
+                }
+            },
+        )
+    }
+
+    async fn check_key(&self, user: &str, key: &PublicKey) -> KeyCheck {
         match self.authorize(user, key).await {
             Ok(result) => result,
             Err(error) => {
                 warn!(target: "audit", peer = %peer_name(self.peer), user, "authentication failed: {error:#}");
-                None
+                KeyCheck::Reject
             }
         }
+    }
+
+    /// keyboard-interactive の最初の呼び出し。Device Flow を始めてコードを見せる。
+    async fn start_device_flow(&mut self, github: &GitHubApp, user: &str) -> Result<Option<Auth>> {
+        let user = parse_user(user)?;
+        let expected = match self.claim(&user).await? {
+            Claim::Login(login) => {
+                if self
+                    .admit(&login, user.workspace.as_deref())
+                    .await?
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+                Some(login)
+            }
+            Claim::Anyone => None,
+        };
+        let device = github.start_device_flow().await?;
+        let mut instructions = match &expected {
+            Some(login) => format!("Sign in to GitHub as {login}:\n"),
+            None => "Sign in to GitHub:\n".to_string(),
+        };
+        instructions.push_str(&format!(
+            "  1. Open {}\n  2. Enter the code {}\n",
+            device.verification_uri, device.user_code
+        ));
+        if expected.is_none()
+            && let Some(key) = &self.offered_key
+        {
+            instructions.push_str(&format!(
+                "This SSH key ({}) will sign you in from now on.\n",
+                fingerprint(key)
+            ));
+        }
+        self.device = Some(DeviceState::Waiting {
+            expected,
+            workspace: user.workspace,
+            device,
+        });
+        Ok(Some(device_prompt(instructions)))
+    }
+
+    /// Device Flow が承認されたあと、トークンの持ち主を確かめて保存する。誰でもよい名前で
+    /// 公開鍵を通していれば、その鍵を持ち主に結び付ける。
+    async fn finish_device_login(
+        &self,
+        expected: Option<String>,
+        workspace: Option<String>,
+        owner: String,
+        token: UserToken,
+    ) -> Result<Authenticated> {
+        let owner = owner.to_ascii_lowercase();
+        if let Some(expected) = &expected
+            && *expected != owner
+        {
+            bail!(
+                "signed in to GitHub as {owner}, not {expected}. To sign in with any GitHub account, connect as {}@",
+                self.shared.config.ssh_user
+            );
+        }
+        let Some(admitted) = self.admit(&owner, workspace.as_deref()).await? else {
+            bail!(
+                "{owner} cannot use this server{}",
+                workspace
+                    .map(|w| format!(" or the workspace {w}"))
+                    .unwrap_or_default()
+            );
+        };
+        self.shared.store_user_token(&owner, &token).await?;
+        // ログアウトのあとも動いていたワークスペースに、トークンをまた渡す。
+        self.shared
+            .refresh_running(Some(&crate::access::personal(&owner)))
+            .await;
+        if expected.is_none()
+            && let Some(key) = &self.offered_key
+        {
+            let fingerprint = fingerprint(key);
+            let bound = self
+                .shared
+                .controller
+                .store()
+                .bind_ssh_key(&owner, &fingerprint, &openssh(key))
+                .await?;
+            if bound == owner {
+                info!(target: "audit", peer = %peer_name(self.peer), login = %owner, %fingerprint, "SSH key bound");
+            } else {
+                warn!(target: "audit", peer = %peer_name(self.peer), login = %owner, %fingerprint, bound_to = %bound, "the SSH key is bound to another user; not rebound");
+            }
+        }
+        Ok(admitted)
     }
 
     fn start(
@@ -247,10 +408,10 @@ impl russh::server::Handler for Connection {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        // 鍵の署名を求める前に、登録された鍵かを確かめる。違えば次の鍵を試させる。
+        // 鍵の署名を求める前に、通せる鍵かを確かめる。違えば次の鍵を試させる。
         Ok(match self.check_key(user, public_key).await {
-            Some(_) => Auth::Accept,
-            None => Auth::reject(),
+            KeyCheck::Accept(_) | KeyCheck::DeviceFlow => Auth::Accept,
+            KeyCheck::Reject => Auth::reject(),
         })
     }
 
@@ -260,12 +421,29 @@ impl russh::server::Handler for Connection {
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
         match self.check_key(user, public_key).await {
-            Some(authenticated) => {
+            KeyCheck::Accept(authenticated) => {
                 info!(target: "audit", peer = %peer_name(self.peer), login = %authenticated.login, workspace = authenticated.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), method = "publickey", "authenticated");
+                let _ = self
+                    .shared
+                    .controller
+                    .store()
+                    .touch_ssh_key(&fingerprint(public_key))
+                    .await;
                 self.user = Some(authenticated);
                 Ok(Auth::Accept)
             }
-            None => {
+            // 鍵は通したことにして (部分的な成功)、Device Flow だけを続けさせる。
+            KeyCheck::DeviceFlow => {
+                info!(target: "audit", peer = %peer_name(self.peer), user, method = "publickey", fingerprint = %fingerprint(public_key), "device flow required");
+                self.offered_key = Some(public_key.clone());
+                Ok(Auth::Reject {
+                    proceed_with_methods: Some(russh::MethodSet::from(
+                        &[russh::MethodKind::KeyboardInteractive][..],
+                    )),
+                    partial_success: true,
+                })
+            }
+            KeyCheck::Reject => {
                 info!(target: "audit", peer = %peer_name(self.peer), user, method = "publickey", "rejected");
                 Ok(Auth::reject())
             }
@@ -283,30 +461,41 @@ impl russh::server::Handler for Connection {
         };
         let outcome = match (response, self.device.take()) {
             // 最初の呼び出し。Device Flow を始めてコードを見せる。
-            (None, _) => match self.admit(user).await {
-                Ok(Some(admitted)) => match github.start_device_flow().await {
-                    Ok(device) => {
-                        let instructions = format!(
-                            "Sign in to GitHub as {}:\n  1. Open {}\n  2. Enter the code {}\n",
-                            admitted.login, device.verification_uri, device.user_code
-                        );
-                        self.device = Some((admitted, device));
-                        return Ok(device_prompt(instructions));
-                    }
-                    Err(error) => Err(anyhow::Error::from(error)),
-                },
+            (None, _) => match self.start_device_flow(&github, user).await {
+                Ok(Some(prompt)) => return Ok(prompt),
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             },
             // 利用者が Enter を押した。承認されるまで少し待つ。
-            (Some(_), Some((admitted, device))) => {
+            (
+                Some(_),
+                Some(DeviceState::Waiting {
+                    expected,
+                    workspace,
+                    device,
+                }),
+            ) => {
                 let deadline = tokio::time::Instant::now() + KI_POLL_WAIT;
-                match finish_device_flow(&self.shared, &github, &admitted.login, &device, deadline)
-                    .await
-                {
-                    Ok(true) => Ok(Some(admitted)),
-                    Ok(false) => {
-                        self.device = Some((admitted, device));
+                match finish_device_flow(&github, &device, deadline).await {
+                    Ok(Some((owner, token))) => {
+                        match self
+                            .finish_device_login(expected, workspace, owner, token)
+                            .await
+                        {
+                            Ok(admitted) => Ok(Some(admitted)),
+                            Err(error) => {
+                                warn!(target: "audit", peer = %peer_name(self.peer), user, method = "device_flow", "rejected: {error:#}");
+                                self.device = Some(DeviceState::Failed);
+                                return Ok(failure_prompt(&error));
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        self.device = Some(DeviceState::Waiting {
+                            expected,
+                            workspace,
+                            device,
+                        });
                         return Ok(device_prompt(
                             "Not authorized yet. Approve the code on GitHub, then press Enter.\n"
                                 .into(),
@@ -315,11 +504,16 @@ impl russh::server::Handler for Connection {
                     Err(error) => Err(error),
                 }
             }
-            (Some(_), None) => Ok(None),
+            (Some(_), _) => Ok(None),
         };
         match outcome {
             Ok(Some(authenticated)) => {
-                info!(target: "audit", peer = %peer_name(self.peer), login = %authenticated.login, workspace = authenticated.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), method = "device_flow", "authenticated");
+                let method = if self.offered_key.is_some() {
+                    "publickey+device_flow"
+                } else {
+                    "device_flow"
+                };
+                info!(target: "audit", peer = %peer_name(self.peer), login = %authenticated.login, workspace = authenticated.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), method, "authenticated");
                 self.user = Some(authenticated);
                 Ok(Auth::Accept)
             }
@@ -685,29 +879,32 @@ fn device_prompt(instructions: String) -> Auth {
     }
 }
 
-/// Device Flow の承認を `deadline` まで待つ。承認されたら、トークンの持ち主が `login` であることを
-/// 確かめて保存し、`true` を返す。まだ承認されていなければ `false` を返す。
+/// 失敗の理由を見せて、Enter で閉じさせる。
+fn failure_prompt(error: &anyhow::Error) -> Auth {
+    Auth::Partial {
+        name: "chloe".into(),
+        instructions: format!("chloe: {error:#}\n").into(),
+        prompts: vec![("Press Enter to close: ".into(), true)].into(),
+    }
+}
+
+/// Device Flow の承認を `deadline` まで待つ。承認されたら、トークンの持ち主のログイン名と
+/// トークンを返す (保存はしない)。まだ承認されていなければ `None` を返す。
 async fn finish_device_flow(
-    shared: &Shared,
     github: &GitHubApp,
-    login: &str,
     device: &DeviceCode,
     deadline: tokio::time::Instant,
-) -> Result<bool> {
+) -> Result<Option<(String, UserToken)>> {
     loop {
         match github.poll_device_flow(device).await? {
             Poll::Token(token) => {
                 let owner = github.user_login(&token.access_token).await?;
-                if !owner.eq_ignore_ascii_case(login) {
-                    bail!("signed in to GitHub as {owner}, not {login}");
-                }
-                shared.store_user_token(login, &token).await?;
-                return Ok(true);
+                return Ok(Some((owner, token)));
             }
             Poll::Pending { interval } => {
                 let next = tokio::time::Instant::now() + Duration::from_secs(interval);
                 if next > deadline {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 tokio::time::sleep_until(next).await;
             }
@@ -743,7 +940,15 @@ async fn github_login_command(
     ))
     .await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(device.expires_in);
-    match finish_device_flow(shared, github, login, &device, deadline).await {
+    let result = match finish_device_flow(github, &device, deadline).await {
+        Ok(Some((owner, _))) if !owner.eq_ignore_ascii_case(login) => Err(anyhow::anyhow!(
+            "signed in to GitHub as {owner}, not {login}"
+        )),
+        Ok(Some((_, token))) => shared.store_user_token(login, &token).await.map(|()| true),
+        Ok(None) => Ok(false),
+        Err(error) => Err(error),
+    };
+    match result {
         Ok(true) => {
             let refreshed = shared
                 .refresh_running(Some(&crate::access::personal(login)))
