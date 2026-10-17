@@ -61,24 +61,24 @@ Device Flow で得たユーザートークンは、client secret なしで更新
 アプリは Organization にインストールし、chloe で扱うリポジトリを選ぶ（Only select repositories）。
 インストール ID は chloe がアプリの秘密鍵で API から調べるので、控えなくてよい。
 
-## 情報の置き場（開発用）
+## 情報の置き場
 
-リポジトリの外の `~/.config/chloe/` に置く。
-秘密鍵はチャットやリポジトリに貼らず、ファイルの権限を 600 にする。
+秘密鍵はチャットやリポジトリに貼らず、ゲートウェイを動かす利用者だけが読めるようにする。
+
+### ホストに配置するとき
+
+[インストール](install.md) の配置では、`/etc/chloe/` に置き、ゲートウェイを動かす利用者 `chloe` のグループに読ませる。
 
 ```sh
-mkdir -p ~/.config/chloe
-chmod 700 ~/.config/chloe
-mv ~/Downloads/<app-name>.*.private-key.pem ~/.config/chloe/github-app.pem
-chmod 600 ~/.config/chloe/github-app.pem
+sudo install -m 640 -g chloe ~/Downloads/<app-name>.*.private-key.pem /etc/chloe/github-app.pem
 ```
 
-`~/.config/chloe/github-app.toml`：
+`/etc/chloe/github-app.toml`：
 
 ```toml
 app_id = 123456
 client_id = "Iv23liXXXXXXXXXXXXXX"
-private_key = "file:/home/<user>/.config/chloe/github-app.pem"
+private_key = "file:/etc/chloe/github-app.pem"
 # 使う Organization を限るときに書く。書かなければ、アプリをインストールしたすべての
 # Organization を使う。
 # organizations = ["ForteFibre"]
@@ -87,15 +87,29 @@ private_key = "file:/home/<user>/.config/chloe/github-app.pem"
 `private_key` はシークレットの参照として読む。
 1Password Connect を使うようになったら、`op://<vault>/<item>/<field>` の形の参照に書き換え、秘密鍵のファイルは消す。
 
-## ゲートウェイでの使い方
-
-ゲートウェイの設定に GitHub App の設定のパスを書く。
+ゲートウェイの設定（`/etc/chloe/gateway.toml`）にこのパスを書く。
 
 ```toml
-github_app = "~/.config/chloe/github-app.toml"
+github_app = "/etc/chloe/github-app.toml"
 ```
 
-これで次のようになる。
+### 開発するとき
+
+リポジトリの外の `~/.config/chloe/` に置く。
+
+```sh
+mkdir -p ~/.config/chloe
+chmod 700 ~/.config/chloe
+mv ~/Downloads/<app-name>.*.private-key.pem ~/.config/chloe/github-app.pem
+chmod 600 ~/.config/chloe/github-app.pem
+```
+
+`~/.config/chloe/github-app.toml` の書き方は上と同じで、`private_key` を `file:/home/<user>/.config/chloe/github-app.pem` にする。
+ゲートウェイの設定には `github_app = "~/.config/chloe/github-app.toml"` と書く（`~` はゲートウェイを起動した利用者のホームディレクトリに読み替える）。
+
+## ゲートウェイでの使い方
+
+ゲートウェイの設定の `github_app` に GitHub App の設定のパスを書くと、次のようになる。
 
 - アプリをインストールしたいずれかの Organization のメンバーがログインできる。`allowed_users` は、それに加えて許す利用者になる。
 - Organization のワークスペース（`org/name`）にはそのメンバーが、team のワークスペース（`org/team/name`）にはその team のメンバーが入れる。確かめられるのはアプリをインストールした Organization だけである。

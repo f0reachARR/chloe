@@ -13,7 +13,8 @@ user@chloe:/workspace$ claude
 
 開発中である。
 ランナー（ワークスペースの VM とプロキシ）は、特権コンテナの中で Firecracker を動かす開発用の実装だけがある。
-jailer による Firecracker の隔離、systemd の unit、Kubernetes への配置はまだない。
+jailer による Firecracker の隔離と Kubernetes への配置はまだない。
+ホストに配置するための設定の例と systemd の unit は `deploy/` にあるが、まだ実際のホストで確かめていない。
 実装の順序と各段階の結果は [実装手順](docs/implementation-steps.md) にある。
 
 ## できること
@@ -64,7 +65,8 @@ jailer による Firecracker の隔離、systemd の unit、Kubernetes への配
 ## はじめかた
 
 KVM が使える x86_64 の Linux で、リポジトリのルートで次のように実行する。
-必要なものと詳しい手順は [インストール](docs/install.md) にある。
+ここでは開発用の設定で、リポジトリの中のファイルをそのまま使う。
+ホストに配置して動かす手順は [インストール](docs/install.md) にある。
 
 ```sh
 images/guest/kernel/build.sh
@@ -112,7 +114,8 @@ crates/
 images/guest/
   kernel/            ゲストのカーネルのビルド
   rootfs/            ゲストのルートファイルシステムのビルド
-  dev/               開発用のランナーのコンテナ、設定の例、VM を使う確認
+  dev/               開発用のランナーのコンテナ、開発用の設定の例、VM を使う確認
+deploy/              ホストに配置するための設定の例と systemd の unit
 migrations/          データベースのマイグレーション
 docs/                文書
 ```

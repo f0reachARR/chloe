@@ -492,7 +492,7 @@ VM を使う確認は 7 つ、275 項目がすべて通った（並べて 71 秒
 - **9d コントロールプレーン**：設定の `[cluster]` で、ランナーを `chloe-node` のホストに置く。`chloe-gateway node add|list|rm` でホストを登録し、一度だけ使える参加用のトークン（CA の指紋つき）を作る。ワークスペースは最初に起動したホストに結びつけ、新しいワークスペースは置いたワークスペースが少ないホストに置く。内部 API は、そのホストに置いたランナーの問い合わせにだけ答え、断ったら監査ログに残す。つながらないホストのランナーは、記録のとおり動いているものとして扱う（reconcile が片づけない）。
 - **9e 管理 API**：管理コマンドの処理を `ops` にまとめ、SSH のコマンドと HTTP(S) の API（設定の `[api]`）の両方から使う。`chloe token create|list|revoke` で、期限と失効のあるトークンを作る。API の呼び出しは `via="api"` とトークンの ID をつけて監査ログに残す。
 
-設定の例は `images/guest/dev/gateway.example.toml`（`[cluster]` と `[api]`）と `images/guest/dev/node.example.toml`。
+設定の例は `images/guest/dev/gateway.example.toml`（`[cluster]` と `[api]`）と `deploy/node.toml`。
 
 残したもの：
 

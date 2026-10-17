@@ -3,11 +3,12 @@
 設定のファイルは TOML で書く。
 知らない項目があると、読み込みに失敗する（書き間違いに気付けるように）。
 相対パスは、プロセスを起動したディレクトリから解決する。
+systemd で動かすときは、すべて絶対パスで書く。
 
 | ファイル | 読むもの | 例 |
 | --- | --- | --- |
-| ゲートウェイの設定 | `chloe-gateway --config` | `images/guest/dev/gateway.example.toml` |
-| `chloe-node` の設定 | `chloe-node run --config` | `images/guest/dev/node.example.toml` |
+| ゲートウェイの設定 | `chloe-gateway --config` | `deploy/gateway.toml`（開発用は `images/guest/dev/gateway.example.toml`） |
+| `chloe-node` の設定 | `chloe-node run --config` | `deploy/node.toml` |
 | GitHub App の設定 | ゲートウェイの設定の `github_app` | [GitHub App の準備](github-app.md) |
 | Organization と team の設定 | `chloe policy set`、管理 API | 下の「Organization と team の設定」 |
 
@@ -85,7 +86,7 @@ action = "deny"
 
 | 項目 | 既定 | 内容 |
 | --- | --- | --- |
-| `guest_dir` | （必須） | カーネルとルートファイルシステムのディレクトリ（`build/guest`） |
+| `guest_dir` | （必須） | カーネル（`kernel/vmlinux`）とルートファイルシステム（`rootfs.ext4`）のディレクトリ |
 | `egress_bin` | （必須） | コンテナに渡す `chloe-egress` のバイナリ |
 | `state_root` | （必須） | ワークスペースごとの状態（ディスク、ログ、CA）を置くディレクトリ |
 | `image` | `chloe-dev-runner` | ランナーのコンテナのイメージ |

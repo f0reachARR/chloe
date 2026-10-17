@@ -267,6 +267,8 @@ listen = "127.0.0.1:8080"
 # tls_key = "/etc/chloe/api.key"
 ```
 
+鍵は `chloe` の利用者が読めるようにする（`sudo install -m 640 -g chloe api.key /etc/chloe/api.key`）。
+
 使い方は [管理 API](api.md) にある。
 
 ## 更新
