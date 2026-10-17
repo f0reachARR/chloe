@@ -132,13 +132,51 @@ dnsmasq \
     --log-facility="$logs/dnsmasq.log" --log-queries &
 echo $! > /run/dnsmasq.pid
 
-# ワークスペースと Docker のディスクがなければ作る。持ち主は状態のディレクトリに合わせる。
+# ディスクの大きさ (20G、512M など) をバイト数にする。
+to_bytes() {
+    case "$1" in
+    *G) echo $((${1%G} * 1024 * 1024 * 1024)) ;;
+    *M) echo $((${1%M} * 1024 * 1024)) ;;
+    *) echo "$1" ;;
+    esac
+}
+
+# ext4 のイメージのファイルシステムの大きさ (バイト)。
+fs_bytes() {
+    dumpe2fs -h "$1" 2>/dev/null | {
+        count=0 block=0
+        while IFS=: read -r key value; do
+            case "$key" in
+            "Block count") count=$((value)) ;;
+            "Block size") block=$((value)) ;;
+            esac
+        done
+        echo $((count * block))
+    }
+}
+
+# ワークスペースと Docker のディスクがなければ作り、指定より小さければ広げる (縮めはしない)。
+# 持ち主は状態のディレクトリに合わせる。
 for pair in "workspace:${WORKSPACE_SIZE:-20G}" "docker:${DOCKER_SIZE:-40G}"; do
     name="${pair%%:*}" size="${pair#*:}" img="/state/${pair%%:*}.ext4"
     if [ ! -f "$img" ]; then
         truncate -s "$size" "$img"
         mkfs.ext4 -q -L "chloe-$name" "$img"
         chown --reference=/state "$img"
+    elif [ "$(fs_bytes "$img")" -lt "$(to_bytes "$size")" ]; then
+        echo "growing the $name disk to $size" >&2
+        # 広げる前に検査する。直せない誤りが残るなら (終了コード 4 以上)、壊さないよう起動しない。
+        rc=0
+        e2fsck -f -p "$img" >&2 || rc=$?
+        if [ "$rc" -ge 4 ]; then
+            echo "e2fsck could not fix the $name disk (exit code $rc); not starting" >&2
+            exit 1
+        fi
+        # ファイルがすでに大きい (前に広げかけて止まった) ときは縮めない。
+        if [ "$(stat -c %s "$img")" -lt "$(to_bytes "$size")" ]; then
+            truncate -s "$size" "$img"
+        fi
+        resize2fs "$img" "$(($(to_bytes "$size") / 1024))K" >&2
     fi
 done
 

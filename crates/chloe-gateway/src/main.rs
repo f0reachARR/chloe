@@ -82,6 +82,10 @@ async fn main() -> Result<()> {
         .policy
         .check()
         .map_err(|e| anyhow::anyhow!("invalid [policy]: {e}"))?;
+    config
+        .disks
+        .check()
+        .map_err(|e| anyhow::anyhow!("invalid [disks]: {e}"))?;
     if let Some(Command::Node { command }) = cli.command {
         return node_command(&config, command).await;
     }
@@ -250,7 +254,8 @@ async fn build_controller(
     .with_activity_wait(
         Duration::from_secs(config.activity_poll_secs.max(1)),
         Duration::from_secs(config.max_busy_wait_secs),
-    );
+    )
+    .with_disks(config.disks);
     Ok((controller, secrets, cluster))
 }
 

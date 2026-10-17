@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::Error;
 use crate::catalog::{self, SecretSpec, SignKind};
-use crate::workspace::{RootMode, Workspace};
+use crate::workspace::{DiskConfig, RootMode, Workspace};
 
 /// guest-agent への接続。vsock か、それを中継した接続。
 pub trait AgentIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -28,6 +28,13 @@ pub struct RunnerSpec {
     /// ランナーの識別子 ([`Workspace::key`])。
     pub key: String,
     pub root_mode: RootMode,
+    /// ワークスペースのディスクの大きさ (GiB)。今のディスクより大きければ、起動する前に広げる。
+    /// なければランナーの既定で作る (古い controller から受け取ったとき)。
+    #[serde(default)]
+    pub workspace_disk_gib: Option<u32>,
+    /// Docker のディスクの大きさ (GiB)。扱いは `workspace_disk_gib` と同じ。
+    #[serde(default)]
+    pub docker_disk_gib: Option<u32>,
     /// プロキシの方針。差し替えの規則は持つが、本物の値は持たない。
     pub policy: PolicyConfig,
     /// VM の環境変数に入れるプレースホルダー。
@@ -150,6 +157,7 @@ pub fn most_specific<T: Clone>(
 pub fn build_spec(
     workspace: &Workspace,
     base: &BasePolicy,
+    disks: &DiskConfig,
     placeholders: &std::collections::BTreeMap<(String, String), String>,
     specs: &[(String, SecretSpec)],
 ) -> RunnerSpec {
@@ -240,6 +248,8 @@ pub fn build_spec(
     RunnerSpec {
         key: workspace.key(),
         root_mode: workspace.root_mode,
+        workspace_disk_gib: Some(disks.workspace_gib(workspace.disks)),
+        docker_disk_gib: Some(disks.docker_gib(workspace.disks)),
         policy,
         guest_env,
     }
@@ -316,6 +326,17 @@ mod tests {
         assert!(toml::from_str::<BasePolicy>(r#"allow = ["x.example"]"#).is_err());
     }
 
+    /// ディスクの大きさを持たない古い controller の spec も、chloe-node が受け取れる。
+    #[test]
+    fn reads_specs_without_disk_sizes() {
+        let spec: RunnerSpec = serde_json::from_str(
+            r#"{"key": "ws-1", "root_mode": "ephemeral", "policy": {"rules": []}, "guest_env": []}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.workspace_disk_gib, None);
+        assert_eq!(spec.docker_disk_gib, None);
+    }
+
     #[test]
     fn builds_rules_only_for_available_kinds() {
         let ws = Workspace {
@@ -323,7 +344,10 @@ mod tests {
             owner: Owner::User("alice".into()),
             name: "api".into(),
             root_mode: RootMode::Ephemeral,
-            disks: Default::default(),
+            disks: crate::workspace::DiskSizes {
+                workspace_gib: Some(50),
+                docker_gib: None,
+            },
         };
         let placeholders = [
             ("anthropic_api_key", "value", "sk-ant-api03-chloeA"),
@@ -364,6 +388,7 @@ mod tests {
         let spec = build_spec(
             &ws,
             &base,
+            &DiskConfig::default(),
             &placeholders,
             &[
                 preset("anthropic_api_key"),
@@ -374,6 +399,8 @@ mod tests {
             ],
         );
         assert_eq!(spec.key, "ws-7");
+        assert_eq!(spec.workspace_disk_gib, Some(50));
+        assert_eq!(spec.docker_disk_gib, Some(40));
         assert_eq!(
             spec.guest_env[..2],
             [

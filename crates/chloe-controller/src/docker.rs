@@ -119,7 +119,15 @@ impl RunnerBackend for DockerBackend {
             .args([
                 "-e",
                 &format!("CHLOE_ROOT_MODE={}", spec.root_mode.as_str()),
-            ])
+            ]);
+        // なければ entrypoint.sh の既定で作る。
+        if let Some(gib) = spec.workspace_disk_gib {
+            command.args(["-e", &format!("WORKSPACE_SIZE={gib}G")]);
+        }
+        if let Some(gib) = spec.docker_disk_gib {
+            command.args(["-e", &format!("DOCKER_SIZE={gib}G")]);
+        }
+        command
             .args(["-v", &format!("{}:/guest:ro", self.guest_dir.display())])
             .args(["-v", &format!("{}:/state", state.display())])
             .args([

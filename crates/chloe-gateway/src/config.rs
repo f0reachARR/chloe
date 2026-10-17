@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use chloe_controller::docker::DockerConfig;
 use chloe_controller::runner::BasePolicy;
+use chloe_controller::workspace::DiskConfig;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +65,9 @@ pub struct Config {
     /// すべてのワークスペースに共通の、外への通信の規則。
     #[serde(default)]
     pub policy: BasePolicy,
+    /// ワークスペースのディスクの大きさの既定と上限。
+    #[serde(default)]
+    pub disks: DiskConfig,
     /// 同じホストの Docker にランナーを置くときの設定。`cluster` とどちらか一方を書く。
     #[serde(default)]
     pub runner: Option<DockerConfig>,
@@ -160,6 +164,9 @@ mod tests {
             hosts = ["httpbin.org"]
             action = "allow"
 
+            [disks]
+            max_workspace_gib = 500
+
             [runner]
             guest_dir = "build/guest"
             egress_bin = "target/debug/chloe-egress"
@@ -167,6 +174,8 @@ mod tests {
             "#,
         )
         .unwrap();
+        assert_eq!(config.disks.workspace_gib, 20);
+        assert_eq!(config.disks.max_workspace_gib, 500);
         assert_eq!(config.github_url, "https://github.com");
         assert_eq!(config.idle_timeout_secs, 1800);
         assert!(config.is_allowed("alice"));
@@ -208,6 +217,7 @@ mod tests {
             let config: Config = toml::from_str(example).unwrap();
             assert!(config.runner.is_some());
             config.policy.check().unwrap();
+            config.disks.check().unwrap();
         }
     }
 }

@@ -18,7 +18,7 @@ use crate::Error;
 use crate::catalog::{self, SecretSpec};
 use crate::runner::{AgentStream, BasePolicy, RunnerBackend, RunnerSpec, build_spec};
 use crate::store::Store;
-use crate::workspace::Workspace;
+use crate::workspace::{DiskConfig, Workspace};
 
 /// VM を止めるときに、VM の中で再起動を頼んでから待つ時間の既定値。
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -154,6 +154,7 @@ struct Inner<B> {
     resolver: Resolver,
     backend: B,
     base: BasePolicy,
+    disks: DiskConfig,
     idle_timeout: Duration,
     stop_timeout: Duration,
     activity_poll: Duration,
@@ -240,6 +241,7 @@ impl<B: RunnerBackend> Controller<B> {
                 },
                 backend,
                 base,
+                disks: DiskConfig::default(),
                 idle_timeout,
                 stop_timeout: GRACEFUL_STOP_TIMEOUT,
                 activity_poll: ACTIVITY_POLL,
@@ -269,6 +271,11 @@ impl<B: RunnerBackend> Controller<B> {
             inner.activity_poll = poll;
             inner.max_busy_wait = max;
         })
+    }
+
+    /// ディスクの大きさの既定と上限を変える。
+    pub fn with_disks(self, disks: DiskConfig) -> Self {
+        self.configure(|inner| inner.disks = disks)
     }
 
     /// データベースの外で作るシークレットの出どころを足す。
@@ -301,6 +308,11 @@ impl<B: RunnerBackend> Controller<B> {
     /// すべてのワークスペースに共通の規則 (ゲートウェイの `[policy]`)。
     pub fn base_policy(&self) -> &BasePolicy {
         &self.inner.base
+    }
+
+    /// ディスクの大きさの既定と上限 (ゲートウェイの `[disks]`)。
+    pub fn disks(&self) -> &DiskConfig {
+        &self.inner.disks
     }
 
     pub fn store(&self) -> &Store {
@@ -457,6 +469,7 @@ impl<B: RunnerBackend> Controller<B> {
         let spec = build_spec(
             workspace,
             &self.inner.base.with_layers(&layers),
+            &self.inner.disks,
             &placeholders,
             &specs,
         );
