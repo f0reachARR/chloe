@@ -96,6 +96,11 @@ enum KeyCheck {
 
 /// keyboard-interactive で進めている Device Flow。
 enum DeviceState {
+    /// Enter を押すのを待っている。押されてからコードを作る。`expected` は [`Self::Waiting`] と同じ。
+    Confirming {
+        expected: Option<String>,
+        workspace: Option<String>,
+    },
     /// 承認を待っている。`expected` は SSH ユーザー名の GitHub のログイン名 (誰でもよい
     /// 名前なら `None`)。
     Waiting {
@@ -244,8 +249,9 @@ impl Connection {
         }
     }
 
-    /// keyboard-interactive の最初の呼び出し。Device Flow を始めてコードを見せる。
-    async fn start_device_flow(&mut self, github: &GitHubApp, user: &str) -> Result<Option<Auth>> {
+    /// keyboard-interactive の最初の呼び出し。入れる利用者かを確かめ、Enter を押すのを待つ。
+    /// コードは押されてから作る (つないだだけの相手にコードを作らない)。
+    async fn confirm_device_flow(&mut self, user: &str) -> Result<Option<Auth>> {
         let user = parse_user(user)?;
         let expected = match self.claim(&user).await? {
             Claim::Login(login) => {
@@ -260,6 +266,28 @@ impl Connection {
             }
             Claim::Anyone => None,
         };
+        let instructions = match &expected {
+            Some(login) => format!("Sign in to GitHub as {login} to continue.\n"),
+            None => "Sign in to GitHub to continue.\n".to_string(),
+        };
+        self.device = Some(DeviceState::Confirming {
+            expected,
+            workspace: user.workspace,
+        });
+        Ok(Some(Auth::Partial {
+            name: "chloe".into(),
+            instructions: instructions.into(),
+            prompts: vec![("Press Enter to get a sign-in code: ".into(), true)].into(),
+        }))
+    }
+
+    /// Enter が押されたら、Device Flow を始めてコードを見せる。
+    async fn start_device_flow(
+        &mut self,
+        github: &GitHubApp,
+        expected: Option<String>,
+        workspace: Option<String>,
+    ) -> Result<Auth> {
         let device = github.start_device_flow().await?;
         let mut instructions = match &expected {
             Some(login) => format!("Sign in to GitHub as {login}:\n"),
@@ -279,10 +307,10 @@ impl Connection {
         }
         self.device = Some(DeviceState::Waiting {
             expected,
-            workspace: user.workspace,
+            workspace,
             device,
         });
-        Ok(Some(device_prompt(instructions)))
+        Ok(device_prompt(instructions))
     }
 
     /// Device Flow が承認されたあと、トークンの持ち主を確かめて保存する。誰でもよい名前で
@@ -478,17 +506,28 @@ impl russh::server::Handler for Connection {
             return Ok(Auth::reject());
         };
         let outcome = match (response, self.device.take()) {
-            // 最初の呼び出し。Device Flow を始めてコードを見せる。
+            // 最初の呼び出し。Enter を押すのを待つ。
             // この接続ですでに Device Flow を行った。やり直すには接続し直す。
             (None, _) if self.device_flow_started => Ok(None),
             (None, _) => {
                 self.device_flow_started = true;
-                match self.start_device_flow(&github, user).await {
+                match self.confirm_device_flow(user).await {
                     Ok(Some(prompt)) => return Ok(prompt),
                     Ok(None) => Ok(None),
                     Err(error) => Err(error),
                 }
             }
+            // 利用者が Enter を押した。Device Flow を始めてコードを見せる。
+            (
+                Some(_),
+                Some(DeviceState::Confirming {
+                    expected,
+                    workspace,
+                }),
+            ) => match self.start_device_flow(&github, expected, workspace).await {
+                Ok(prompt) => return Ok(prompt),
+                Err(error) => Err(error),
+            },
             // 利用者が Enter を押した。承認されるまで少し待つ。
             (
                 Some(_),

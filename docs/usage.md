@@ -6,8 +6,9 @@ chloe に SSH で入って使う人のための説明である。
 ## 接続する
 
 ユーザー名を `chloe` にして入る（`git@github.com` と同じく、誰でも同じユーザー名を使う）。
-初めて入るときは、SSH が GitHub の Device Flow のコードを表示する。
-`https://github.com/login/device` でコードを入力して承認し、Enter を押す。
+初めて入るときは、SSH が GitHub へのサインインを求める。
+Enter を押すと Device Flow のコードが表示される。
+`https://github.com/login/device` でコードを入力して承認し、もう一度 Enter を押す。
 Device Flow は一つの接続で一度だけ行う。失敗したり、ほかのアカウントで承認したりしたときは、接続し直す。
 承認した GitHub のアカウントが、chloe での利用者になる。
 
