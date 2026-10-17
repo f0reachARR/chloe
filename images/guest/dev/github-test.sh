@@ -182,7 +182,7 @@ sign_in() {
     echo "$3" > "$work/approver"
     shift 3
     local opts=(-p "$ssh_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        -o IdentitiesOnly=yes -o IdentityAgent=none -o LogLevel=ERROR -o NumberOfPasswordPrompts=1)
+        -o IdentitiesOnly=yes -o IdentityAgent=none -o LogLevel=ERROR)
     if [ "$key" = none ]; then
         opts+=(-o PubkeyAuthentication=no)
     else
@@ -200,6 +200,8 @@ section "who can log in"
 check key-needs-device-flow "Permission denied" as alice true
 check wrong-account "Permission denied" sign_in alice alice bob chloe whoami
 check wrong-account-reason "signed in to GitHub as bob, not alice" grep -o "signed in to GitHub as bob, not alice" "$logs/gateway.log"
+# 失敗しても同じ接続では Device Flow をやり直さない (クライアントが keyboard-interactive を試し直しても)。
+check wrong-account-once "count=1" sh -c 'echo "count=$(grep -c "signed in to GitHub as bob, not alice" "$0")"' "$logs/gateway.log"
 check org-member "alice" sign_in alice alice alice chloe whoami
 check key-after-device-flow "alice" as alice chloe whoami
 check allowed-user "bob" sign_in bob bob bob chloe whoami

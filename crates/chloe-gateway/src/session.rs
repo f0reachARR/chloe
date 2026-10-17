@@ -119,6 +119,9 @@ pub struct Connection {
     offered_key: Option<PublicKey>,
     /// keyboard-interactive で進めている Device Flow。
     device: Option<DeviceState>,
+    /// この接続で Device Flow を始めたか。失敗してもやり直させず、やり直すなら接続し直させる
+    /// (クライアントは keyboard-interactive を何度か試すので、そのたびにコードを作らない)。
+    device_flow_started: bool,
     /// ポート転送をした接続では、転送中の TCP の接続がなくても、SSH の接続が切れるまで
     /// ランナーを止めない (`ssh -N -L` で開いたまま、ときどき使うため)。
     forwarding: ForwardingHold,
@@ -135,6 +138,7 @@ impl Connection {
             channels: HashMap::new(),
             offered_key: None,
             device: None,
+            device_flow_started: false,
             forwarding: Arc::default(),
         }
     }
@@ -463,11 +467,16 @@ impl russh::server::Handler for Connection {
         };
         let outcome = match (response, self.device.take()) {
             // 最初の呼び出し。Device Flow を始めてコードを見せる。
-            (None, _) => match self.start_device_flow(&github, user).await {
-                Ok(Some(prompt)) => return Ok(prompt),
-                Ok(None) => Ok(None),
-                Err(error) => Err(error),
-            },
+            // この接続ですでに Device Flow を行った。やり直すには接続し直す。
+            (None, _) if self.device_flow_started => Ok(None),
+            (None, _) => {
+                self.device_flow_started = true;
+                match self.start_device_flow(&github, user).await {
+                    Ok(Some(prompt)) => return Ok(prompt),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
             // 利用者が Enter を押した。承認されるまで少し待つ。
             (
                 Some(_),
@@ -906,7 +915,7 @@ fn device_prompt(instructions: String) -> Auth {
 fn failure_prompt(error: &anyhow::Error) -> Auth {
     Auth::Partial {
         name: "chloe".into(),
-        instructions: format!("chloe: {error:#}\n").into(),
+        instructions: format!("chloe: {error:#}\nConnect again to retry.\n").into(),
         prompts: vec![("Press Enter to close: ".into(), true)].into(),
     }
 }
