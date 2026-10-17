@@ -326,6 +326,24 @@ async fn device_flow_and_refresh() {
 }
 
 #[test]
+fn user_tokens_stay_usable_while_refreshable() {
+    let token = |expires_at, refresh: bool, refresh_expires_at| UserToken {
+        access_token: "ghu".into(),
+        expires_at,
+        refresh_token: refresh.then(|| "ghr".into()),
+        refresh_expires_at,
+    };
+    let past = Some(1);
+    let future = Some(now_secs() + 3600);
+    assert!(token(None, false, None).is_usable());
+    assert!(token(future, false, None).is_usable());
+    assert!(!token(past, false, None).is_usable());
+    assert!(token(past, true, future).is_usable());
+    assert!(token(past, true, None).is_usable());
+    assert!(!token(past, true, past).is_usable());
+}
+
+#[test]
 fn parses_github_timestamps() {
     assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
     assert_eq!(parse_rfc3339("2026-10-16T12:00:00Z"), Some(1_792_152_000));

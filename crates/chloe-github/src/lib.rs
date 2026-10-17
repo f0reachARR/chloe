@@ -110,6 +110,16 @@ impl UserToken {
         self.expires_at
             .is_some_and(|at| at <= now_secs() + margin.as_secs())
     }
+
+    /// まだ使えるか。失効していても、リフレッシュトークンが有効なら更新して使える。
+    pub fn is_usable(&self) -> bool {
+        let now = now_secs();
+        let alive = |at: Option<u64>| at.is_none_or(|at| at > now);
+        match &self.refresh_token {
+            Some(_) => alive(self.refresh_expires_at),
+            None => alive(self.expires_at),
+        }
+    }
 }
 
 pub enum Poll {
