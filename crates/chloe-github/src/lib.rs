@@ -1,7 +1,8 @@
 //! GitHub App を使った認証と所属の確認。
 //!
-//! - アプリの JWT で、Organization へのインストールのトークン (インストールトークン) を発行する。
-//!   所属の確認と、共有ワークスペースの GitHub の認証情報に使う。
+//! - アプリの JWT で、アプリをインストールした Organization ごとにインストールのトークン
+//!   (インストールトークン) を発行する。所属と役割の確認と、共有ワークスペースの GitHub の
+//!   認証情報に使う。
 //! - Device Flow で利用者を認証し、ユーザートークンを得る。個人ワークスペースの GitHub の
 //!   認証情報に使う。ユーザートークンは 8 時間で失効し、リフレッシュトークンで更新する。
 
@@ -17,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 /// 所属の確認の結果を覚えておく時間。
 const MEMBERSHIP_TTL: Duration = Duration::from_secs(300);
+/// アプリをインストールした Organization の一覧を覚えておく時間。
+const INSTALLATIONS_TTL: Duration = Duration::from_secs(300);
 /// インストールトークンは、失効までこれより短くなったら発行し直す。
 const TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(300);
 
@@ -30,6 +33,8 @@ pub enum Error {
     Config(String),
     #[error(transparent)]
     Secrets(#[from] chloe_secrets::Error),
+    #[error("the GitHub App is not installed on {0}")]
+    NotInstalled(String),
 }
 
 /// `~/.config/chloe/github-app.toml` の形。
@@ -38,7 +43,10 @@ pub enum Error {
 pub struct AppConfig {
     pub app_id: u64,
     pub client_id: String,
-    pub organization: String,
+    /// 使う Organization を一つに限るときに指定する。なければ、アプリをインストールした
+    /// すべての Organization を使う。
+    #[serde(default)]
+    pub organization: Option<String>,
     /// 秘密鍵 (PEM) への参照 (`file:`、`op://` など)。
     pub private_key: String,
     #[serde(default = "default_api_url")]
@@ -104,13 +112,50 @@ pub struct GitHubApp {
     http: reqwest::Client,
     config: AppConfig,
     key: EncodingKey,
-    installation: Mutex<Option<(u64, String, Instant)>>,
-    memberships: Mutex<HashMap<String, (bool, Instant)>>,
+    /// アプリをインストールした Organization (小文字) とインストールの ID、調べた時刻。
+    installations: Mutex<Option<(HashMap<String, u64>, Instant)>>,
+    /// インストールと範囲ごとのインストールトークンと、その期限。
+    tokens: Mutex<HashMap<String, (String, Instant)>>,
+    /// 所属の確認の結果 (役割。所属していなければ `None`) と、確かめた時刻。
+    memberships: Mutex<HashMap<String, (Option<String>, Instant)>>,
+}
+
+/// インストールトークンの範囲。既定ではインストールのすべてのリポジトリと権限。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenScope {
+    /// リポジトリの名前 (Organization の名前を含まない)。`None` ならすべて。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
+    /// 権限の名前と水準 (`contents = "read"` など)。`None` ならインストールの権限すべて。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Organization での役割。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrgRole {
+    Admin,
+    Member,
+}
+
+/// team での役割。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeamRole {
+    Maintainer,
+    Member,
 }
 
 #[derive(Deserialize)]
-struct Installation {
+struct InstallationEntry {
     id: u64,
+    account: Account,
+}
+
+#[derive(Deserialize)]
+struct Account {
+    login: String,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Deserialize)]
@@ -135,9 +180,12 @@ struct User {
     login: String,
 }
 
+/// Organization と team の所属 (`/orgs/{org}/memberships/{user}`、
+/// `/orgs/{org}/teams/{team}/memberships/{user}`)。
 #[derive(Deserialize)]
-struct TeamMembership {
+struct Membership {
     state: String,
+    role: String,
 }
 
 #[derive(Serialize)]
@@ -159,13 +207,10 @@ impl GitHubApp {
                 .build()?,
             config,
             key,
-            installation: Mutex::new(None),
+            installations: Mutex::new(None),
+            tokens: Mutex::new(HashMap::new()),
             memberships: Mutex::new(HashMap::new()),
         })
-    }
-
-    pub fn organization(&self) -> &str {
-        &self.config.organization
     }
 
     /// アプリとして API を呼ぶための JWT。時計のずれを見込んで 60 秒前から有効にする。
@@ -187,106 +232,177 @@ impl GitHubApp {
             .header("x-github-api-version", "2022-11-28")
     }
 
-    /// アプリをインストールしたアカウントの名前の一覧 (設定の確認用)。
-    pub async fn installed_accounts(&self) -> Result<Vec<String>, Error> {
-        #[derive(Deserialize)]
-        struct Account {
-            login: String,
+    /// アプリをインストールした Organization (小文字) とインストールの ID。
+    /// 設定に `organization` があれば、その Organization だけを使う。
+    async fn installations(&self) -> Result<HashMap<String, u64>, Error> {
+        if let Some((installations, checked)) = self.installations.lock().unwrap().as_ref()
+            && checked.elapsed() < INSTALLATIONS_TTL
+        {
+            return Ok(installations.clone());
         }
-        #[derive(Deserialize)]
-        struct Entry {
-            account: Account,
+        let jwt = self.jwt()?;
+        let mut installations = HashMap::new();
+        for page in 1.. {
+            let path = format!("/app/installations?per_page=100&page={page}");
+            let entries: Vec<InstallationEntry> =
+                json(self.api(reqwest::Method::GET, &path).bearer_auth(&jwt)).await?;
+            let last = entries.len() < 100;
+            for entry in entries {
+                let org = entry.account.login.to_ascii_lowercase();
+                let wanted = self
+                    .config
+                    .organization
+                    .as_deref()
+                    .is_none_or(|only| only.eq_ignore_ascii_case(&org));
+                if entry.account.kind == "Organization" && wanted {
+                    installations.insert(org, entry.id);
+                }
+            }
+            if last {
+                break;
+            }
         }
-        let entries: Vec<Entry> = json(
-            self.api(reqwest::Method::GET, "/app/installations")
-                .bearer_auth(self.jwt()?),
-        )
-        .await?;
-        Ok(entries.into_iter().map(|e| e.account.login).collect())
+        *self.installations.lock().unwrap() = Some((installations.clone(), Instant::now()));
+        Ok(installations)
     }
 
-    /// Organization へのインストールのトークン。期限が近くなるまで使い回す。
-    pub async fn installation_token(&self) -> Result<SecretString, Error> {
-        if let Some((_, token, expires)) = self.installation.lock().unwrap().as_ref()
+    /// アプリをインストールした Organization の名前 (小文字、並べたもの)。
+    pub async fn organizations(&self) -> Result<Vec<String>, Error> {
+        let mut orgs: Vec<String> = self.installations().await?.into_keys().collect();
+        orgs.sort();
+        Ok(orgs)
+    }
+
+    /// アプリを `org` にインストールしているか。
+    pub async fn is_installed(&self, org: &str) -> Result<bool, Error> {
+        Ok(self
+            .installations()
+            .await?
+            .contains_key(&org.to_ascii_lowercase()))
+    }
+
+    /// `org` へのインストールの、`scope` の範囲のトークン。期限が近くなるまで使い回す。
+    pub async fn installation_token(
+        &self,
+        org: &str,
+        scope: &TokenScope,
+    ) -> Result<SecretString, Error> {
+        let id = *self
+            .installations()
+            .await?
+            .get(&org.to_ascii_lowercase())
+            .ok_or_else(|| Error::NotInstalled(org.to_string()))?;
+        let body = serde_json::to_string(scope).unwrap_or_default();
+        let cache_key = format!("{id}:{body}");
+        if let Some((token, expires)) = self.tokens.lock().unwrap().get(&cache_key)
             && Instant::now() + TOKEN_REFRESH_MARGIN < *expires
         {
             return Ok(token.clone().into());
         }
-        let jwt = self.jwt()?;
-        let path = format!("/orgs/{}/installation", self.config.organization);
-        let installation: Installation =
-            json(self.api(reqwest::Method::GET, &path).bearer_auth(&jwt)).await?;
-        let path = format!("/app/installations/{}/access_tokens", installation.id);
-        let token: InstallationToken =
-            json(self.api(reqwest::Method::POST, &path).bearer_auth(&jwt)).await?;
+        let path = format!("/app/installations/{id}/access_tokens");
+        let mut request = self
+            .api(reqwest::Method::POST, &path)
+            .bearer_auth(self.jwt()?);
+        if *scope != TokenScope::default() {
+            request = request
+                .header("content-type", "application/json")
+                .body(body);
+        }
+        let token: InstallationToken = json(request).await?;
         let lifetime = parse_rfc3339(&token.expires_at)
             .map(|at| Duration::from_secs(at.saturating_sub(now_secs())))
             .unwrap_or(Duration::from_secs(3600));
-        *self.installation.lock().unwrap() = Some((
-            installation.id,
-            token.token.clone(),
-            Instant::now() + lifetime,
-        ));
+        self.tokens
+            .lock()
+            .unwrap()
+            .insert(cache_key, (token.token.clone(), Instant::now() + lifetime));
         Ok(token.token.into())
     }
 
-    /// 利用者がアプリの Organization のメンバーか。
-    pub async fn is_org_member(&self, login: &str) -> Result<bool, Error> {
-        let org = self.config.organization.clone();
-        let path = format!("/orgs/{org}/members/{login}");
-        self.cached_membership(format!("org:{org}:{login}"), || async move {
-            let token = self.installation_token().await?;
-            let response = self
-                .api(reqwest::Method::GET, &path)
-                .bearer_auth(token.expose_secret())
-                .send()
-                .await?;
-            match response.status() {
-                StatusCode::NO_CONTENT => Ok(true),
-                StatusCode::NOT_FOUND | StatusCode::FOUND => Ok(false),
-                status => Err(Error::Api(path.clone(), status.to_string())),
+    /// 利用者が、アプリをインストールしたいずれかの Organization のメンバーか。
+    pub async fn is_member_of_any(&self, login: &str) -> Result<bool, Error> {
+        for org in self.organizations().await? {
+            if self.is_org_member(&org, login).await? {
+                return Ok(true);
             }
-        })
-        .await
+        }
+        Ok(false)
     }
 
-    /// 利用者がアプリの Organization の team のメンバーか。
-    pub async fn is_team_member(&self, team: &str, login: &str) -> Result<bool, Error> {
-        let org = self.config.organization.clone();
+    /// 利用者が `org` のメンバーか。アプリをインストールしていない Organization では `false`。
+    pub async fn is_org_member(&self, org: &str, login: &str) -> Result<bool, Error> {
+        Ok(self.org_role(org, login).await?.is_some())
+    }
+
+    /// 利用者の `org` での役割。メンバーでなければ (招待を承諾していなければ) `None`。
+    pub async fn org_role(&self, org: &str, login: &str) -> Result<Option<OrgRole>, Error> {
+        let path = format!("/orgs/{org}/memberships/{login}");
+        let role = self
+            .membership(org, format!("org:{org}:{login}"), path)
+            .await?;
+        Ok(role.map(|role| match role.as_str() {
+            "admin" => OrgRole::Admin,
+            _ => OrgRole::Member,
+        }))
+    }
+
+    /// 利用者が `org` の team のメンバーか。
+    pub async fn is_team_member(&self, org: &str, team: &str, login: &str) -> Result<bool, Error> {
+        Ok(self.team_role(org, team, login).await?.is_some())
+    }
+
+    /// 利用者の team での役割。メンバーでなければ `None`。
+    pub async fn team_role(
+        &self,
+        org: &str,
+        team: &str,
+        login: &str,
+    ) -> Result<Option<TeamRole>, Error> {
         let path = format!("/orgs/{org}/teams/{team}/memberships/{login}");
-        self.cached_membership(format!("team:{org}/{team}:{login}"), || async move {
-            let token = self.installation_token().await?;
-            let response = self
-                .api(reqwest::Method::GET, &path)
-                .bearer_auth(token.expose_secret())
-                .send()
-                .await?;
-            match response.status() {
-                StatusCode::OK => Ok(response.json::<TeamMembership>().await?.state == "active"),
-                StatusCode::NOT_FOUND => Ok(false),
-                status => Err(Error::Api(path.clone(), status.to_string())),
-            }
-        })
-        .await
+        let role = self
+            .membership(org, format!("team:{org}/{team}:{login}"), path)
+            .await?;
+        Ok(role.map(|role| match role.as_str() {
+            "maintainer" => TeamRole::Maintainer,
+            _ => TeamRole::Member,
+        }))
     }
 
-    async fn cached_membership<F, Fut>(&self, key: String, check: F) -> Result<bool, Error>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<bool, Error>>,
-    {
+    /// 所属を確かめ、有効な所属なら役割を返す。結果はしばらく覚えておく。
+    async fn membership(
+        &self,
+        org: &str,
+        key: String,
+        path: String,
+    ) -> Result<Option<String>, Error> {
         let key = key.to_ascii_lowercase();
-        if let Some((member, checked)) = self.memberships.lock().unwrap().get(&key)
+        if let Some((role, checked)) = self.memberships.lock().unwrap().get(&key)
             && checked.elapsed() < MEMBERSHIP_TTL
         {
-            return Ok(*member);
+            return Ok(role.clone());
         }
-        let member = check().await?;
+        if !self.is_installed(org).await? {
+            return Ok(None);
+        }
+        let token = self.installation_token(org, &TokenScope::default()).await?;
+        let response = self
+            .api(reqwest::Method::GET, &path)
+            .bearer_auth(token.expose_secret())
+            .send()
+            .await?;
+        let role = match response.status() {
+            StatusCode::OK => {
+                let membership: Membership = response.json().await?;
+                (membership.state == "active").then_some(membership.role)
+            }
+            StatusCode::NOT_FOUND => None,
+            status => return Err(Error::Api(path, status.to_string())),
+        };
         self.memberships
             .lock()
             .unwrap()
-            .insert(key, (member, Instant::now()));
-        Ok(member)
+            .insert(key, (role.clone(), Instant::now()));
+        Ok(role)
     }
 
     /// Device Flow を始める。

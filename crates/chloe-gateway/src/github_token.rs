@@ -1,7 +1,8 @@
 //! ランナーのプロキシの問い合わせに答える GitHub のトークン。
 //!
 //! 個人のワークスペースには Device Flow で得たユーザートークンを (期限が近ければ更新して)、
-//! アプリの Organization の team と Organization のワークスペースにはインストールトークンを答える。
+//! アプリをインストールした Organization の team と Organization のワークスペースには、
+//! その Organization のインストールトークンを答える。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chloe_controller::DynamicSecrets;
 use chloe_controller::workspace::Workspace;
-use chloe_github::{GitHubApp, UserToken};
+use chloe_github::{GitHubApp, TokenScope, UserToken};
 use chloe_secrets::{ExposeSecret, Owner, SecretDb, SecretString};
 use futures::future::BoxFuture;
 use tracing::{info, warn};
@@ -35,10 +36,6 @@ impl GitHubTokens {
             secrets,
             refresh: tokio::sync::Mutex::new(()),
         }
-    }
-
-    fn is_app_org(&self, org: &str) -> bool {
-        org.eq_ignore_ascii_case(self.github.organization())
     }
 
     async fn user_token(&self, login: &str) -> Result<Option<SecretString>> {
@@ -78,7 +75,9 @@ impl DynamicSecrets for GitHubTokens {
                     self.secrets.list(&workspace.owner).await,
                     Ok(names) if names.iter().any(|n| n == USER_TOKEN_SECRET)
                 ),
-                Owner::Org(org) | Owner::Team { org, .. } => self.is_app_org(org),
+                Owner::Org(org) | Owner::Team { org, .. } => {
+                    matches!(self.github.is_installed(org).await, Ok(true))
+                }
             };
             if available {
                 vec![KIND.to_string()]
@@ -99,13 +98,18 @@ impl DynamicSecrets for GitHubTokens {
             }
             let result = match &workspace.owner {
                 Owner::User(login) => self.user_token(login).await,
-                Owner::Org(org) | Owner::Team { org, .. } if self.is_app_org(org) => self
-                    .github
-                    .installation_token()
-                    .await
-                    .map(Some)
-                    .map_err(Into::into),
-                _ => Ok(None),
+                Owner::Org(org) | Owner::Team { org, .. } => {
+                    match self.github.is_installed(org).await {
+                        Ok(true) => self
+                            .github
+                            .installation_token(org, &TokenScope::default())
+                            .await
+                            .map(Some)
+                            .map_err(Into::into),
+                        Ok(false) => Ok(None),
+                        Err(error) => Err(error.into()),
+                    }
+                }
             };
             result.map_err(|error| {
                 warn!(workspace = %workspace.display_name(), "no GitHub token: {error:#}");

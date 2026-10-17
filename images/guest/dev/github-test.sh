@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 段階 6f の確認。GitHub のふりをするサーバーに GitHub App の API を答えさせ、
+# 段階 6f と 8a の確認。GitHub のふりをするサーバーに GitHub App の API を答えさせ、
 # 所属の確認、chloe github login (Device Flow)、GitHub のトークンの差し替えを確かめる。
 #
-# 利用者は alice (acme のメンバーで、team dev のメンバー)、bob (acme のメンバーではないが
-# allowed_users にいる)、carol (どちらでもない)。
+# アプリは acme と beta の二つの Organization にインストールしてある。
+# 利用者は alice (acme のメンバーで、team dev のメンバー)、bob (どちらのメンバーでもないが
+# allowed_users にいる)、carol (どちらでもない)、dave (beta のメンバー)。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +29,7 @@ source "$here/gateway-lib.sh"
 docker ps -aq --filter "name=^$prefix" | xargs -r docker rm -f >/dev/null
 rm -rf "$state"
 mkdir -p "$logs" "$work/keys"
-for user in alice bob carol; do
+for user in alice bob carol dave; do
     ssh-keygen -q -t ed25519 -N '' -C "$user" -f "$work/$user"
     cp "$work/$user.pub" "$work/keys/$user.keys"
 done
@@ -40,6 +41,17 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 keys_dir, port = sys.argv[1], int(sys.argv[2])
 polls = {"n": 0}
 lock = threading.Lock()
+# インストールごとのトークンと、そのトークンで答える所属 (パス → 役割)。
+tokens = {"1": "ghs_acme", "2": "ghs_beta"}
+memberships = {
+    "ghs_acme": {
+        "/orgs/acme/memberships/alice": "member",
+        "/orgs/acme/teams/dev/memberships/alice": "member",
+    },
+    "ghs_beta": {
+        "/orgs/beta/memberships/dave": "member",
+    },
+}
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -55,7 +67,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         auth = self.headers.get("authorization", "")
-        installation = auth == "Bearer ghs_stub"
         path = self.path
         if path.endswith(".keys"):
             try:
@@ -66,15 +77,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             return self.wfile.write(data)
-        if path == "/orgs/acme/installation" and auth.startswith("Bearer ey"):
-            return self.reply(200, {"id": 1})
-        if path == "/orgs/acme/members/alice" and installation:
-            return self.reply(204)
-        if path.startswith("/orgs/acme/members/") and installation:
-            return self.reply(404, {})
-        if path == "/orgs/acme/teams/dev/memberships/alice" and installation:
-            return self.reply(200, {"state": "active"})
-        if path.startswith("/orgs/acme/teams/") and installation:
+        if path.startswith("/app/installations?") and auth.startswith("Bearer ey"):
+            return self.reply(200, [
+                {"id": 1, "account": {"login": "acme", "type": "Organization"}},
+                {"id": 2, "account": {"login": "beta", "type": "Organization"}},
+            ])
+        token = auth.removeprefix("Bearer ")
+        if token in memberships:
+            role = memberships[token].get(path)
+            if role:
+                return self.reply(200, {"state": "active", "role": role})
             return self.reply(404, {})
         if path == "/user" and auth == "Bearer ghu_stub_alice":
             return self.reply(200, {"login": "alice"})
@@ -82,8 +94,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0))).decode()
-        if self.path == "/app/installations/1/access_tokens":
-            return self.reply(201, {"token": "ghs_stub", "expires_at": "2099-01-01T00:00:00Z"})
+        parts = self.path.split("/")
+        if self.path.startswith("/app/installations/") and parts[-1] == "access_tokens":
+            return self.reply(201, {"token": tokens[parts[3]], "expires_at": "2099-01-01T00:00:00Z"})
         if self.path == "/login/device/code":
             return self.reply(200, {"device_code": "dc", "user_code": "ABCD-1234",
                 "verification_uri": "https://github.com/login/device", "expires_in": 60, "interval": 1})
@@ -105,7 +118,6 @@ stub_pid=$!
 cat > "$work/github-app.toml" <<EOF
 app_id = 1
 client_id = "Iv-stub"
-organization = "acme"
 private_key = "file:$root/crates/chloe-github/tests/data/test-app-key.pem"
 api_url = "http://127.0.0.1:$stub_port"
 web_url = "http://127.0.0.1:$stub_port"
@@ -148,6 +160,7 @@ section "who can log in"
 check org-member "alice" as alice 'echo $(id -un) alice'
 check allowed-user "ok" as bob 'echo ok'
 check outsider "Permission denied" as carol true
+check other-org-member "ok" as dave 'echo ok'
 
 section "chloe github login"
 # ログインの前から動いているランナーを、接続をつないだまま保つ。
@@ -190,5 +203,15 @@ check org-runner-no-token "0" sh -c '
     "$prefix" "$(runner_key "$org_ph")"
 check org-token-served "secret served" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "secret served" | grep "acme/proj" | grep -o "secret served.*github_token" | tail -1' "$logs/gateway.log"
 check personal-not-in-org "absent" as alice+acme/proj 'env | grep -q ghu_stub && echo present || echo absent'
+
+section "a second organization"
+check create-beta "created beta/app" as dave chloe ws create beta/app
+check beta-not-for-acme "not a member" as dave chloe ws create acme/x
+check acme-not-for-beta "Permission denied" as alice+beta/app true
+check beta-list "beta/app" as dave chloe ws list
+beta_ph="$(as dave+beta/app 'printenv GH_TOKEN')"
+check beta-placeholder "ghu_chloe" echo "$beta_ph"
+check beta-api "401" as dave+beta/app "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: token $beta_ph' https://api.github.com/user"
+check beta-token-served "secret served" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "secret served" | grep "beta/app" | grep -o "secret served.*github_token" | tail -1' "$logs/gateway.log"
 
 timing_summary

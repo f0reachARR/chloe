@@ -1,7 +1,7 @@
 //! 誰がログインでき、どのワークスペースに入れるか。
 //!
-//! GitHub App を設定していれば、アプリの Organization のメンバーがログインでき、
-//! Organization と team のワークスペースには GitHub 上の所属で入れる。
+//! GitHub App を設定していれば、アプリをインストールしたいずれかの Organization のメンバーが
+//! ログインでき、Organization と team のワークスペースには GitHub 上の所属で入れる。
 //! 設定の `allowed_users` と `memberships` は、それに加えて許す (開発用)。
 
 use anyhow::Result;
@@ -19,7 +19,7 @@ impl Shared {
             return Ok(true);
         }
         match &self.github {
-            Some(github) => Ok(github.is_org_member(login).await?),
+            Some(github) => Ok(github.is_member_of_any(login).await?),
             None => Ok(false),
         }
     }
@@ -36,7 +36,7 @@ impl Shared {
                 .filter_map(|o| o.parse().ok()),
         );
         if let Some(github) = &self.github {
-            candidates.push(Owner::Org(github.organization().to_ascii_lowercase()));
+            candidates.extend(github.organizations().await?.into_iter().map(Owner::Org));
         }
         candidates.sort();
         candidates.dedup();
@@ -63,17 +63,11 @@ impl Shared {
         let Some(github) = &self.github else {
             return Ok(false);
         };
-        let app_org = github.organization();
+        // アプリをインストールしていない Organization の所属は確かめられない (false になる)。
         Ok(match owner {
             Owner::User(_) => false,
-            Owner::Org(org) if org.eq_ignore_ascii_case(app_org) => {
-                github.is_org_member(login).await?
-            }
-            Owner::Team { org, team } if org.eq_ignore_ascii_case(app_org) => {
-                github.is_team_member(team, login).await?
-            }
-            // アプリの Organization 以外の所属は確かめられない。
-            _ => false,
+            Owner::Org(org) => github.is_org_member(org, login).await?,
+            Owner::Team { org, team } => github.is_team_member(org, team, login).await?,
         })
     }
 

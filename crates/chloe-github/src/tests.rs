@@ -77,7 +77,7 @@ async fn app(url: &str) -> GitHubApp {
     let config = AppConfig {
         app_id: 123,
         client_id: "Iv-test".into(),
-        organization: "acme".into(),
+        organization: None,
         private_key: format!("file:{key}"),
         api_url: url.into(),
         web_url: url.into(),
@@ -87,54 +87,164 @@ async fn app(url: &str) -> GitHubApp {
         .unwrap()
 }
 
-#[tokio::test]
-async fn installation_token_is_cached_and_used_for_membership() {
-    let issued = Arc::new(AtomicUsize::new(0));
-    let counter = issued.clone();
-    let url = stub(move |req| {
-        let installation = req.authorization.as_deref() == Some("Bearer ghs_test");
+/// acme (インストール 42) と beta (インストール 43) にインストールしたアプリのふり。
+/// alice は acme の管理者で team dev の maintainer、bob は beta のメンバー、carol は招待中。
+fn two_orgs(
+    issued: Arc<AtomicUsize>,
+    scoped: Arc<Mutex<Vec<String>>>,
+) -> impl Fn(Request) -> (u16, String) + Send + Sync + 'static {
+    move |req| {
+        let auth = req.authorization.as_deref().unwrap_or_default();
+        let acme = auth == "Bearer ghs_acme";
+        let beta = auth == "Bearer ghs_beta";
         match (req.method.as_str(), req.path.as_str()) {
-            ("GET", "/orgs/acme/installation") => {
-                assert!(
-                    req.authorization.unwrap().starts_with("Bearer ey"),
-                    "an app JWT"
-                );
-                (200, r#"{"id":42}"#.into())
-            }
-            ("POST", "/app/installations/42/access_tokens") => {
-                counter.fetch_add(1, Ordering::SeqCst);
+            ("GET", "/app/installations?per_page=100&page=1") => {
+                assert!(auth.starts_with("Bearer ey"), "an app JWT");
                 (
-                    201,
-                    r#"{"token":"ghs_test","expires_at":"2099-01-01T00:00:00Z"}"#.into(),
+                    200,
+                    r#"[{"id":42,"account":{"login":"Acme","type":"Organization"}},
+                        {"id":43,"account":{"login":"beta","type":"Organization"}},
+                        {"id":44,"account":{"login":"someone","type":"User"}}]"#
+                        .into(),
                 )
             }
-            ("GET", "/orgs/acme/members/alice") if installation => (204, String::new()),
-            ("GET", "/orgs/acme/members/bob") if installation => (404, "{}".into()),
-            ("GET", "/orgs/acme/teams/dev/memberships/alice") if installation => {
-                (200, r#"{"state":"active"}"#.into())
+            ("POST", "/app/installations/42/access_tokens") => {
+                issued.fetch_add(1, Ordering::SeqCst);
+                if !req.body.is_empty() {
+                    scoped.lock().unwrap().push(req.body.clone());
+                    return (
+                        201,
+                        r#"{"token":"ghs_acme_scoped","expires_at":"2099-01-01T00:00:00Z"}"#.into(),
+                    );
+                }
+                (
+                    201,
+                    r#"{"token":"ghs_acme","expires_at":"2099-01-01T00:00:00Z"}"#.into(),
+                )
             }
-            ("GET", "/orgs/acme/teams/dev/memberships/carol") if installation => {
-                (200, r#"{"state":"pending"}"#.into())
+            ("POST", "/app/installations/43/access_tokens") => (
+                201,
+                r#"{"token":"ghs_beta","expires_at":"2099-01-01T00:00:00Z"}"#.into(),
+            ),
+            ("GET", "/orgs/acme/memberships/alice") if acme => {
+                (200, r#"{"state":"active","role":"admin"}"#.into())
+            }
+            ("GET", "/orgs/acme/memberships/carol") if acme => {
+                (200, r#"{"state":"pending","role":"member"}"#.into())
+            }
+            ("GET", "/orgs/beta/memberships/bob") if beta => {
+                (200, r#"{"state":"active","role":"member"}"#.into())
+            }
+            ("GET", "/orgs/acme/teams/dev/memberships/alice") if acme => {
+                (200, r#"{"state":"active","role":"maintainer"}"#.into())
+            }
+            ("GET", "/orgs/acme/teams/dev/memberships/dave") if acme => {
+                (200, r#"{"state":"active","role":"member"}"#.into())
             }
             _ => (404, "{}".into()),
         }
-    })
-    .await;
+    }
+}
+
+#[tokio::test]
+async fn installations_tokens_and_roles() {
+    let issued = Arc::new(AtomicUsize::new(0));
+    let scoped = Arc::new(Mutex::new(Vec::new()));
+    let url = stub(two_orgs(issued.clone(), scoped.clone())).await;
     let app = app(&url).await;
-    assert_eq!(
-        app.installation_token().await.unwrap().expose_secret(),
-        "ghs_test"
+    assert_eq!(app.organizations().await.unwrap(), ["acme", "beta"]);
+    assert!(app.is_installed("ACME").await.unwrap());
+    assert!(
+        !app.is_installed("someone").await.unwrap(),
+        "only organizations"
     );
-    assert!(app.is_org_member("alice").await.unwrap());
-    assert!(!app.is_org_member("bob").await.unwrap());
-    assert!(app.is_team_member("dev", "alice").await.unwrap());
-    assert!(!app.is_team_member("dev", "carol").await.unwrap());
-    assert!(!app.is_team_member("dev", "bob").await.unwrap());
+    assert_eq!(
+        app.installation_token("acme", &TokenScope::default())
+            .await
+            .unwrap()
+            .expose_secret(),
+        "ghs_acme"
+    );
+    assert!(matches!(
+        app.installation_token("gamma", &TokenScope::default())
+            .await,
+        Err(Error::NotInstalled(_))
+    ));
+
+    assert_eq!(
+        app.org_role("acme", "alice").await.unwrap(),
+        Some(OrgRole::Admin)
+    );
+    assert_eq!(
+        app.org_role("beta", "bob").await.unwrap(),
+        Some(OrgRole::Member)
+    );
+    assert!(!app.is_org_member("acme", "bob").await.unwrap());
+    assert!(
+        !app.is_org_member("acme", "carol").await.unwrap(),
+        "pending"
+    );
+    assert!(
+        !app.is_org_member("gamma", "alice").await.unwrap(),
+        "not installed"
+    );
+    assert!(app.is_member_of_any("bob").await.unwrap());
+    assert!(!app.is_member_of_any("carol").await.unwrap());
+    assert_eq!(
+        app.team_role("acme", "dev", "alice").await.unwrap(),
+        Some(TeamRole::Maintainer)
+    );
+    assert_eq!(
+        app.team_role("acme", "dev", "dave").await.unwrap(),
+        Some(TeamRole::Member)
+    );
+    assert!(!app.is_team_member("acme", "dev", "bob").await.unwrap());
     assert_eq!(
         issued.load(Ordering::SeqCst),
         1,
         "the token is reused until it nearly expires"
     );
+
+    // 範囲を指定すると、その範囲のトークンを別に発行して使い回す。
+    let scope = TokenScope {
+        repositories: Some(vec!["app".into()]),
+        permissions: Some([("contents".to_string(), "read".to_string())].into()),
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            app.installation_token("acme", &scope)
+                .await
+                .unwrap()
+                .expose_secret(),
+            "ghs_acme_scoped"
+        );
+    }
+    assert_eq!(issued.load(Ordering::SeqCst), 2);
+    let body: serde_json::Value = serde_json::from_str(&scoped.lock().unwrap()[0]).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"repositories": ["app"], "permissions": {"contents": "read"}})
+    );
+}
+
+/// 設定で Organization を一つに限ると、ほかのインストールは使わない。
+#[tokio::test]
+async fn organization_setting_limits_installations() {
+    let url = stub(two_orgs(Arc::default(), Arc::default())).await;
+    let key = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/test-app-key.pem");
+    let config = AppConfig {
+        app_id: 123,
+        client_id: "Iv-test".into(),
+        organization: Some("acme".into()),
+        private_key: format!("file:{key}"),
+        api_url: url.clone(),
+        web_url: url,
+    };
+    let app = GitHubApp::new(config, &Resolver { connect: None })
+        .await
+        .unwrap();
+    assert_eq!(app.organizations().await.unwrap(), ["acme"]);
+    assert!(!app.is_member_of_any("bob").await.unwrap());
 }
 
 #[tokio::test]
