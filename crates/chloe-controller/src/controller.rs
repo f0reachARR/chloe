@@ -5,13 +5,10 @@
 //! 本物の値の問い合わせに答える ([`crate::broker`])。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chloe_agent_proto::{
-    AGENT_PORT, AgentMessage, ClientMessage, Connection, ExecRequest, PROTOCOL_VERSION, firecracker,
-};
+use chloe_agent_proto::{AgentMessage, ClientMessage, Connection, ExecRequest, PROTOCOL_VERSION};
 use chloe_secrets::{Owner, SecretDb, SecretString};
 use futures::future::BoxFuture;
 use tokio::task::JoinHandle;
@@ -19,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::Error;
 use crate::catalog;
-use crate::runner::{BasePolicy, RunnerBackend, RunnerSpec, build_spec};
+use crate::runner::{AgentStream, BasePolicy, RunnerBackend, RunnerSpec, build_spec};
 use crate::store::Store;
 use crate::workspace::Workspace;
 
@@ -134,9 +131,16 @@ struct RunnerState {
 }
 
 struct Running {
-    vsock: PathBuf,
-    /// 本物の値の問い合わせに答えるタスク。
-    broker: JoinHandle<()>,
+    /// 同じホストで本物の値の問い合わせに答えるタスク (ほかのホストのランナーでは `None`)。
+    broker: Option<JoinHandle<()>>,
+}
+
+impl Running {
+    fn abort_broker(&self) {
+        if let Some(broker) = &self.broker {
+            broker.abort();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -161,7 +165,18 @@ pub struct ReconcileReport {
 pub struct Session<B: RunnerBackend> {
     controller: Controller<B>,
     workspace_id: i64,
-    pub vsock: PathBuf,
+    key: String,
+}
+
+impl<B: RunnerBackend> Session<B> {
+    /// ワークスペースの VM の guest-agent につなぐ。VM が起動しきるまで `wait` だけ待つ。
+    pub async fn connect_agent(&self, wait: Duration) -> Result<AgentStream, Error> {
+        self.controller
+            .inner
+            .backend
+            .connect_agent(&self.key, wait)
+            .await
+    }
 }
 
 impl<B: RunnerBackend> Controller<B> {
@@ -240,10 +255,10 @@ impl<B: RunnerBackend> Controller<B> {
         let state = self.state(workspace.id);
         state.sessions.lock().unwrap().open += 1;
         match self.ensure_running(workspace, &state).await {
-            Ok(vsock) => Ok(Session {
+            Ok(()) => Ok(Session {
                 controller: self.clone(),
                 workspace_id: workspace.id,
-                vsock,
+                key: workspace.key(),
             }),
             Err(error) => {
                 self.close(workspace.id);
@@ -256,39 +271,71 @@ impl<B: RunnerBackend> Controller<B> {
         &self,
         workspace: &Workspace,
         state: &RunnerState,
-    ) -> Result<PathBuf, Error> {
+    ) -> Result<(), Error> {
         let mut running = state.lifecycle.lock().await;
         let key = workspace.key();
         if let Some(current) = running.as_ref() {
             if self.inner.backend.is_running(&key).await? {
-                return Ok(current.vsock.clone());
+                return Ok(());
             }
-            current.broker.abort();
+            current.abort_broker();
         }
         let spec = self.build(workspace).await?;
         // ランナーのプロキシが問い合わせられるよう、起動する前に待ち受けを始める。
-        let broker = crate::broker::serve(
-            &self.inner.backend.broker_socket(&key),
-            workspace.clone(),
-            self.inner.resolver.clone(),
-        )?;
+        let broker = self.serve_local_broker(workspace)?;
         info!(target: "audit", workspace = %workspace.display_name(), key, "starting runner");
         match self.inner.backend.start(spec).await {
-            Ok(vsock) => {
-                *running = Some(Running {
-                    vsock: vsock.clone(),
-                    broker,
-                });
+            Ok(()) => {
+                *running = Some(Running { broker });
                 self.inner
                     .store
                     .record_runner(workspace.id, self.inner.backend.node())
                     .await?;
-                Ok(vsock)
+                Ok(())
             }
             Err(error) => {
-                broker.abort();
+                if let Some(broker) = broker {
+                    broker.abort();
+                }
                 Err(error)
             }
+        }
+    }
+
+    /// 同じホストのランナーなら、問い合わせ用ソケットで待ち受けを始める。
+    fn serve_local_broker(&self, workspace: &Workspace) -> Result<Option<JoinHandle<()>>, Error> {
+        match self.inner.backend.local_broker_socket(&workspace.key()) {
+            Some(socket) => Ok(Some(crate::broker::serve(
+                &socket,
+                workspace.clone(),
+                self.inner.resolver.clone(),
+            )?)),
+            None => Ok(None),
+        }
+    }
+
+    fn remove_local_broker(&self, key: &str) {
+        if let Some(socket) = self.inner.backend.local_broker_socket(key) {
+            let _ = std::fs::remove_file(socket);
+        }
+    }
+
+    /// ランナーのプロキシからの本物の値の問い合わせ (一行の JSON) に答える。ほかのホストの
+    /// `chloe-node` が中継してきた問い合わせに使う。そのランナーを動かしているホストからの
+    /// 問い合わせかは、呼ぶ側が確かめる。
+    pub async fn answer_secret(&self, key: &str, question: &str) -> String {
+        let workspace = match key
+            .strip_prefix("ws-")
+            .and_then(|id| id.parse::<i64>().ok())
+        {
+            Some(id) => self.inner.store.get(id).await.ok().flatten(),
+            None => None,
+        };
+        match workspace {
+            Some(workspace) => {
+                crate::broker::answer(question, &workspace, &self.inner.resolver).await
+            }
+            None => format!("{}\n", serde_json::json!({ "error": "unknown runner" })),
         }
     }
 
@@ -321,11 +368,8 @@ impl<B: RunnerBackend> Controller<B> {
         info!(workspace = %workspace.display_name(), "runner policy refreshed");
         // 新しく使えるようになった種類のプレースホルダーを、このあとに起動するシェルに入れる。
         // すでに動いているシェルの環境は変わらない。
-        let vsock = running.as_ref().map(|r| r.vsock.clone());
         drop(running);
-        if let Some(vsock) = vsock
-            && let Err(error) = push_env(&vsock, env).await
-        {
+        if let Err(error) = self.push_env(&workspace.key(), env).await {
             warn!(workspace = %workspace.display_name(), "failed to update the VM environment: {error}");
         }
         Ok(true)
@@ -384,7 +428,7 @@ impl<B: RunnerBackend> Controller<B> {
                 if !still_idle() {
                     return;
                 }
-                let busy = controller.activity(&state).await;
+                let busy = controller.activity(workspace_id, &state).await;
                 if busy.is_empty() {
                     break;
                 }
@@ -413,12 +457,12 @@ impl<B: RunnerBackend> Controller<B> {
     }
 
     /// VM の中で作業中のエージェントの印。尋ねられなければ作業中のものはないとみなす。
-    async fn activity(&self, state: &RunnerState) -> Vec<String> {
-        let vsock = match state.lifecycle.lock().await.as_ref() {
-            Some(running) => running.vsock.clone(),
-            None => return vec![],
-        };
-        match tokio::time::timeout(Duration::from_secs(10), query_activity(&vsock)).await {
+    async fn activity(&self, workspace_id: i64, state: &RunnerState) -> Vec<String> {
+        if state.lifecycle.lock().await.is_none() {
+            return vec![];
+        }
+        let key = format!("ws-{workspace_id}");
+        match tokio::time::timeout(Duration::from_secs(10), self.query_activity(&key)).await {
             Ok(Ok(busy)) => busy,
             Ok(Err(error)) => {
                 warn!("failed to ask the VM about agent activity: {error}");
@@ -451,7 +495,7 @@ impl<B: RunnerBackend> Controller<B> {
             let Some(workspace) = workspace else {
                 warn!(target: "audit", key, "stopping a runner without a workspace");
                 self.inner.backend.stop(key).await?;
-                let _ = std::fs::remove_file(self.inner.backend.broker_socket(key));
+                self.remove_local_broker(key);
                 report.stopped.push(key.clone());
                 continue;
             };
@@ -461,15 +505,8 @@ impl<B: RunnerBackend> Controller<B> {
             if running.is_some() || !self.inner.backend.is_running(key).await? {
                 continue;
             }
-            let broker = crate::broker::serve(
-                &self.inner.backend.broker_socket(key),
-                workspace.clone(),
-                self.inner.resolver.clone(),
-            )?;
-            *running = Some(Running {
-                vsock: self.inner.backend.vsock_path(key),
-                broker,
-            });
+            let broker = self.serve_local_broker(&workspace)?;
+            *running = Some(Running { broker });
             drop(running);
             self.inner
                 .store
@@ -501,8 +538,8 @@ impl<B: RunnerBackend> Controller<B> {
                 continue;
             }
             if let Some(current) = running.take() {
-                current.broker.abort();
-                let _ = std::fs::remove_file(self.inner.backend.broker_socket(&key));
+                current.abort_broker();
+                self.remove_local_broker(&key);
                 warn!(target: "audit", key, "a runner stopped without the controller");
                 report.cleared.push(key);
             }
@@ -530,7 +567,7 @@ impl<B: RunnerBackend> Controller<B> {
         let key = format!("ws-{workspace_id}");
         info!(target: "audit", key, "stopping runner");
         // VM の中で再起動を頼むと、ファイルシステムを閉じてから Firecracker が終わる。
-        if let Err(error) = request_reboot(&current.vsock, self.inner.stop_timeout).await {
+        if let Err(error) = self.request_reboot(&key).await {
             warn!(key, "failed to ask the VM to stop: {error}");
         }
         let deadline = tokio::time::Instant::now() + self.inner.stop_timeout;
@@ -538,8 +575,8 @@ impl<B: RunnerBackend> Controller<B> {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         let result = self.inner.backend.stop(&key).await;
-        current.broker.abort();
-        let _ = std::fs::remove_file(self.inner.backend.broker_socket(&key));
+        current.abort_broker();
+        self.remove_local_broker(&key);
         if result.is_ok() {
             self.inner.store.remove_runner(workspace_id).await?;
         }
@@ -553,63 +590,71 @@ impl<B: RunnerBackend> Drop for Session<B> {
     }
 }
 
-async fn push_env(vsock: &std::path::Path, env: Vec<(String, String)>) -> Result<(), Error> {
-    let stream = firecracker::connect(vsock, AGENT_PORT, Duration::from_secs(2)).await?;
-    let mut conn = Connection::new(stream);
-    conn.send(&ClientMessage::SetEnv(env))
-        .await
-        .map_err(|e| Error::Runner(e.to_string()))?;
-    let answer = tokio::time::timeout(Duration::from_secs(5), conn.recv::<AgentMessage>())
-        .await
-        .map_err(|_| Error::Runner("the VM did not answer in time".into()))?;
-    match answer {
-        Ok(Some(AgentMessage::EnvUpdated)) => Ok(()),
-        Ok(Some(AgentMessage::Error(message))) => Err(Error::Runner(message)),
-        Ok(other) => Err(Error::Runner(format!("unexpected answer: {other:?}"))),
-        Err(e) => Err(Error::Runner(e.to_string())),
+impl<B: RunnerBackend> Controller<B> {
+    async fn connect(&self, key: &str, wait: Duration) -> Result<Connection<AgentStream>, Error> {
+        Ok(Connection::new(
+            self.inner.backend.connect_agent(key, wait).await?,
+        ))
     }
-}
 
-async fn query_activity(vsock: &std::path::Path) -> Result<Vec<String>, Error> {
-    let stream = firecracker::connect(vsock, AGENT_PORT, Duration::from_secs(2)).await?;
-    let mut conn = Connection::new(stream);
-    conn.send(&ClientMessage::Activity)
-        .await
-        .map_err(|e| Error::Runner(e.to_string()))?;
-    match conn.recv::<AgentMessage>().await {
-        Ok(Some(AgentMessage::Activity { busy })) => Ok(busy),
-        Ok(other) => Err(Error::Runner(format!("unexpected answer: {other:?}"))),
-        Err(e) => Err(Error::Runner(e.to_string())),
-    }
-}
-
-async fn request_reboot(vsock: &std::path::Path, wait: Duration) -> Result<(), Error> {
-    let stream = firecracker::connect(vsock, AGENT_PORT, wait.min(Duration::from_secs(2))).await?;
-    let mut conn = Connection::new(stream);
-    conn.send(&ClientMessage::Exec(ExecRequest {
-        version: PROTOCOL_VERSION,
-        command: vec!["systemctl".into(), "reboot".into()],
-        user: Some("root".into()),
-        env: vec![],
-        cwd: None,
-        tty: None,
-    }))
-    .await
-    .map_err(|e| Error::Runner(e.to_string()))?;
-    // 接続を閉じると guest-agent はプロセスを止めるので、systemctl が再起動を頼み終わる
-    // (終わるか、再起動で接続が切れる) まで待つ。`Started` だけで閉じると、再起動が始まらない。
-    let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match conn.recv::<AgentMessage>().await {
-                Ok(Some(AgentMessage::Exited(_) | AgentMessage::Error(_))) | Ok(None) | Err(_) => {
-                    break;
-                }
-                Ok(Some(_)) => {}
-            }
+    async fn push_env(&self, key: &str, env: Vec<(String, String)>) -> Result<(), Error> {
+        let mut conn = self.connect(key, Duration::from_secs(2)).await?;
+        conn.send(&ClientMessage::SetEnv(env))
+            .await
+            .map_err(|e| Error::Runner(e.to_string()))?;
+        let answer = tokio::time::timeout(Duration::from_secs(5), conn.recv::<AgentMessage>())
+            .await
+            .map_err(|_| Error::Runner("the VM did not answer in time".into()))?;
+        match answer {
+            Ok(Some(AgentMessage::EnvUpdated)) => Ok(()),
+            Ok(Some(AgentMessage::Error(message))) => Err(Error::Runner(message)),
+            Ok(other) => Err(Error::Runner(format!("unexpected answer: {other:?}"))),
+            Err(e) => Err(Error::Runner(e.to_string())),
         }
-    })
-    .await;
-    Ok(())
+    }
+
+    async fn query_activity(&self, key: &str) -> Result<Vec<String>, Error> {
+        let mut conn = self.connect(key, Duration::from_secs(2)).await?;
+        conn.send(&ClientMessage::Activity)
+            .await
+            .map_err(|e| Error::Runner(e.to_string()))?;
+        match conn.recv::<AgentMessage>().await {
+            Ok(Some(AgentMessage::Activity { busy })) => Ok(busy),
+            Ok(other) => Err(Error::Runner(format!("unexpected answer: {other:?}"))),
+            Err(e) => Err(Error::Runner(e.to_string())),
+        }
+    }
+
+    async fn request_reboot(&self, key: &str) -> Result<(), Error> {
+        let wait = self.inner.stop_timeout.min(Duration::from_secs(2));
+        let mut conn = self.connect(key, wait).await?;
+        conn.send(&ClientMessage::Exec(ExecRequest {
+            version: PROTOCOL_VERSION,
+            command: vec!["systemctl".into(), "reboot".into()],
+            user: Some("root".into()),
+            env: vec![],
+            cwd: None,
+            tty: None,
+        }))
+        .await
+        .map_err(|e| Error::Runner(e.to_string()))?;
+        // 接続を閉じると guest-agent はプロセスを止めるので、systemctl が再起動を頼み終わる
+        // (終わるか、再起動で接続が切れる) まで待つ。`Started` だけで閉じると、再起動が始まらない。
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match conn.recv::<AgentMessage>().await {
+                    Ok(Some(AgentMessage::Exited(_) | AgentMessage::Error(_)))
+                    | Ok(None)
+                    | Err(_) => {
+                        break;
+                    }
+                    Ok(Some(_)) => {}
+                }
+            }
+        })
+        .await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -618,8 +663,9 @@ mod tests {
     use crate::workspace::{RootMode, WorkspaceRef};
     use chloe_agent_proto::ExitStatus;
     use chloe_secrets::{MasterKey, Owner};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     /// 偽の guest-agent が最後に受け取った環境変数。
     type PushedEnv = Arc<Mutex<Option<Vec<(String, String)>>>>;
@@ -643,7 +689,7 @@ mod tests {
         stale_list: Mutex<Option<Vec<String>>>,
     }
 
-    /// Firecracker の vsock の握手と guest-agent の応答をまねる。
+    /// guest-agent の応答をまねる。
     ///
     /// 本物と同じく、コマンドの要求には先に `Started` を返し、終わる前に接続が閉じられたら
     /// プロセスを止めたことにする (再起動の要求なら、再起動は始まらない)。
@@ -656,13 +702,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
+            while let Ok((stream, _)) = listener.accept().await {
                 let busy = busy.clone();
                 let reboots = reboots.clone();
                 let env = env.clone();
                 tokio::spawn(async move {
-                    while stream.read_u8().await.ok() != Some(b'\n') {}
-                    stream.write_all(b"OK 1\n").await.unwrap();
                     let mut conn = chloe_agent_proto::Connection::new(stream);
                     let _ = match conn.recv::<ClientMessage>().await {
                         Ok(Some(ClientMessage::Activity)) => {
@@ -700,8 +744,18 @@ mod tests {
         });
     }
 
+    impl FakeBackend {
+        fn broker_socket(&self, key: &str) -> PathBuf {
+            self.dir.path().join(format!("{key}.broker.sock"))
+        }
+
+        fn vsock_path(&self, key: &str) -> PathBuf {
+            self.dir.path().join(format!("{key}.vsock"))
+        }
+    }
+
     impl RunnerBackend for Arc<FakeBackend> {
-        async fn start(&self, spec: RunnerSpec) -> Result<PathBuf, Error> {
+        async fn start(&self, spec: RunnerSpec) -> Result<(), Error> {
             self.starts.fetch_add(1, Ordering::SeqCst);
             self.allow
                 .lock()
@@ -718,7 +772,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(spec.key.clone(), spec.policy.inject.len());
-            Ok(self.vsock_path(&spec.key))
+            Ok(())
         }
 
         async fn stop(&self, key: &str) -> Result<(), Error> {
@@ -744,12 +798,13 @@ mod tests {
             Ok(())
         }
 
-        fn broker_socket(&self, key: &str) -> PathBuf {
-            self.dir.path().join(format!("{key}.broker.sock"))
+        async fn connect_agent(&self, key: &str, _wait: Duration) -> Result<AgentStream, Error> {
+            let stream = tokio::net::UnixStream::connect(self.vsock_path(key)).await?;
+            Ok(Box::new(stream))
         }
 
-        fn vsock_path(&self, key: &str) -> PathBuf {
-            self.dir.path().join(format!("{key}.vsock"))
+        fn local_broker_socket(&self, key: &str) -> Option<PathBuf> {
+            Some(self.broker_socket(key))
         }
 
         async fn list(&self) -> Result<Vec<String>, Error> {

@@ -4,12 +4,14 @@
 //! vsock、CA、ログ、本物の値の問い合わせ用ソケット)。本物の値はランナーに渡さない。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
+use chloe_agent_proto::AGENT_PORT;
 use tokio::process::Command;
 use tracing::info;
 
 use crate::Error;
-use crate::runner::{RunnerBackend, RunnerSpec};
+use crate::runner::{AgentStream, RunnerBackend, RunnerSpec};
 
 pub struct DockerBackend {
     /// ランナーのコンテナのイメージ。
@@ -32,10 +34,20 @@ impl DockerBackend {
     pub fn state_dir(&self, key: &str) -> PathBuf {
         self.state_root.join(key)
     }
+
+    /// ランナーのプロキシが本物の値を問い合わせる Unix ソケット。
+    pub fn broker_socket(&self, key: &str) -> PathBuf {
+        self.state_dir(key).join("broker.sock")
+    }
+
+    /// guest-agent につながる vsock の Unix ソケット (Firecracker の vsock の UDS)。
+    pub fn vsock_path(&self, key: &str) -> PathBuf {
+        self.state_dir(key).join("vsock.sock")
+    }
 }
 
 impl RunnerBackend for DockerBackend {
-    async fn start(&self, spec: RunnerSpec) -> Result<PathBuf, Error> {
+    async fn start(&self, spec: RunnerSpec) -> Result<(), Error> {
         let state = self.state_dir(&spec.key);
         let config = state.join("config");
         tokio::fs::create_dir_all(&config).await?;
@@ -96,7 +108,7 @@ impl RunnerBackend for DockerBackend {
             container = self.container(&spec.key),
             "runner container started"
         );
-        Ok(self.vsock_path(&spec.key))
+        Ok(())
     }
 
     async fn stop(&self, key: &str) -> Result<(), Error> {
@@ -150,12 +162,15 @@ impl RunnerBackend for DockerBackend {
         }
     }
 
-    fn broker_socket(&self, key: &str) -> PathBuf {
-        self.state_dir(key).join("broker.sock")
+    async fn connect_agent(&self, key: &str, wait: Duration) -> Result<AgentStream, Error> {
+        let stream =
+            chloe_agent_proto::firecracker::connect(&self.vsock_path(key), AGENT_PORT, wait)
+                .await?;
+        Ok(Box::new(stream))
     }
 
-    fn vsock_path(&self, key: &str) -> PathBuf {
-        self.state_dir(key).join("vsock.sock")
+    fn local_broker_socket(&self, key: &str) -> Option<PathBuf> {
+        Some(self.broker_socket(key))
     }
 
     async fn list(&self) -> Result<Vec<String>, Error> {

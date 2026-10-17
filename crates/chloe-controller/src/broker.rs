@@ -65,7 +65,7 @@ pub(crate) fn serve(
     }))
 }
 
-async fn answer(line: &str, workspace: &Workspace, resolver: &Resolver) -> String {
+pub(crate) async fn answer(line: &str, workspace: &Workspace, resolver: &Resolver) -> String {
     let error = |message: &str| format!("{}\n", serde_json::json!({ "error": message }));
     let Ok(question) = serde_json::from_str::<Question>(line) else {
         return error("invalid question");

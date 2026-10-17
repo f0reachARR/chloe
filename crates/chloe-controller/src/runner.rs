@@ -1,19 +1,27 @@
 //! ランナー (ワークスペースの VM とプロキシ) の起動と停止。
 //!
-//! ランナーには本物の値を渡さない。ランナーのプロキシは差し替えのたびに controller の
-//! 問い合わせ用ソケット ([`RunnerBackend::broker_socket`]) へ尋ねる ([`crate::broker`])。
+//! ランナーには本物の値を渡さない。ランナーのプロキシは差し替えのたびに問い合わせ用の
+//! ソケットへ尋ね、controller が答える ([`crate::broker`]、[`crate::Controller::answer_secret`])。
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chloe_policy::{InjectRuleConfig, PolicyConfig};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::Error;
 use crate::catalog;
 use crate::workspace::{RootMode, Workspace};
 
+/// guest-agent への接続。vsock か、それを中継した接続。
+pub trait AgentIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AgentIo for T {}
+pub type AgentStream = Box<dyn AgentIo>;
+
 /// ランナーを起動するのに必要なもの。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerSpec {
     /// ランナーの識別子 ([`Workspace::key`])。
     pub key: String,
@@ -25,19 +33,25 @@ pub struct RunnerSpec {
 }
 
 pub trait RunnerBackend: Send + Sync + 'static {
-    /// ランナーを起動し、guest-agent につながる vsock の Unix ソケットを返す。
-    /// 起動する前に、controller は [`RunnerBackend::broker_socket`] で待ち受けを始めている。
-    fn start(&self, spec: RunnerSpec) -> impl Future<Output = Result<PathBuf, Error>> + Send;
+    /// ランナーを起動する。起動する前に、controller は [`RunnerBackend::local_broker_socket`]
+    /// があればそこで問い合わせの待ち受けを始めている。
+    fn start(&self, spec: RunnerSpec) -> impl Future<Output = Result<(), Error>> + Send;
     /// ランナーを止める。VM の中のファイルシステムは、先に VM を止めて閉じておく。
     fn stop(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
     fn is_running(&self, key: &str) -> impl Future<Output = Result<bool, Error>> + Send;
     /// 動いているランナーのプロキシの方針を入れ替える。VM の環境変数 (プレースホルダー) は
-    /// 変えないので、起動時になかった種類のシークレットには再起動が要る。
+    /// controller が guest-agent に送る。
     fn update(&self, spec: RunnerSpec) -> impl Future<Output = Result<(), Error>> + Send;
-    /// ランナーのプロキシが本物の値を問い合わせる Unix ソケットの置き場所。
-    fn broker_socket(&self, key: &str) -> PathBuf;
-    /// 動いているランナーの guest-agent につながる vsock の Unix ソケット。
-    fn vsock_path(&self, key: &str) -> PathBuf;
+    /// 動いているランナーの guest-agent につなぐ。VM が起動しきるまで `wait` だけ待つ。
+    fn connect_agent(
+        &self,
+        key: &str,
+        wait: Duration,
+    ) -> impl Future<Output = Result<AgentStream, Error>> + Send;
+    /// ランナーのプロキシが本物の値を問い合わせる Unix ソケットを、controller が同じホストで
+    /// 待ち受けるときの置き場所。ほかのホストのランナーでは `None` (そのホストの `chloe-node`
+    /// が待ち受けて、controller に中継する)。
+    fn local_broker_socket(&self, key: &str) -> Option<PathBuf>;
     /// 実際に動いているランナーの識別子の一覧。reconcile で記録と突き合わせる。
     fn list(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// ランナーが動くホストの名前。段階 9 で、複数のホストを区別するのに使う。

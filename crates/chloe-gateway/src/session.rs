@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chloe_agent_proto::{
-    AGENT_PORT, AgentMessage, ClientMessage, ConnectRequest, Connection as AgentConnection,
-    ExecRequest, PROTOCOL_VERSION, TtyRequest, WindowSize, firecracker,
+    AgentMessage, ClientMessage, ConnectRequest, Connection as AgentConnection, ExecRequest,
+    PROTOCOL_VERSION, TtyRequest, WindowSize,
 };
 use chloe_controller::docker::DockerBackend;
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
@@ -552,7 +552,11 @@ async fn relay(
             .await?;
         // セッションを持っているあいだは、ランナーが止められない。
         let session = shared.controller.open(&workspace).await?;
-        relay_inner(&handle, channel, &session.vsock, request, input).await
+        let stream = session
+            .connect_agent(AGENT_CONNECT_WAIT)
+            .await
+            .context("the workspace VM is not reachable")?;
+        relay_inner(&handle, channel, stream, request, input).await
     }
     .await;
     let code = match result {
@@ -578,13 +582,10 @@ async fn relay(
 async fn relay_inner(
     handle: &Handle,
     channel: ChannelId,
-    vsock: &std::path::Path,
+    stream: chloe_controller::runner::AgentStream,
     request: ExecRequest,
     mut input: mpsc::Receiver<ClientMessage>,
 ) -> Result<Option<u32>> {
-    let stream = firecracker::connect(vsock, AGENT_PORT, AGENT_CONNECT_WAIT)
-        .await
-        .context("the workspace VM is not reachable")?;
     let mut conn = AgentConnection::new(stream);
     conn.send(&ClientMessage::Exec(request)).await?;
     let (mut tx, mut rx) = conn.split();
@@ -637,7 +638,8 @@ async fn forward(
             let held = shared.controller.open(&workspace).await?;
             hold.lock().unwrap().get_or_insert(held);
         }
-        let stream = firecracker::connect(&session.vsock, AGENT_PORT, AGENT_CONNECT_WAIT)
+        let stream = session
+            .connect_agent(AGENT_CONNECT_WAIT)
             .await
             .context("the workspace VM is not reachable")?;
         let mut conn = AgentConnection::new(stream);
