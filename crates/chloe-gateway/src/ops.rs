@@ -6,7 +6,7 @@
 use chloe_controller::catalog::{self, SecretInput, SecretSpec};
 use chloe_controller::runner::{PolicyLayer, most_specific};
 use chloe_controller::store::{ApiToken, SshKey};
-use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
+use chloe_controller::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
 use chloe_secrets::{ExposeSecret, Owner};
 use serde::Serialize;
 
@@ -122,7 +122,7 @@ pub async fn create_workspace(
     let ws = shared
         .controller
         .store()
-        .create(&target, root, login)
+        .create(&target, root, DiskSizes::default(), login)
         .await?;
     Ok(info(&ws, false))
 }

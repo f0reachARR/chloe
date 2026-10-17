@@ -43,12 +43,129 @@ impl FromStr for RootMode {
     }
 }
 
+/// ワークスペースのディスクの大きさ (GiB)。`None` はゲートウェイの設定の既定
+/// ([`DiskConfig`])。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiskSizes {
+    /// ワークスペースのディスク (`/workspace`、ホームディレクトリ、永続のルートの層)。
+    pub workspace_gib: Option<u32>,
+    /// Docker のディスク (`/var/lib/docker`、`/var/lib/containerd`)。
+    pub docker_gib: Option<u32>,
+}
+
+/// ディスクの大きさの既定と上限 (ゲートウェイの `[disks]`)。
+///
+/// ディスクは疎なファイルなので、大きくしても使うまではホストの容量を取らない。そのぶん
+/// いくらでも大きくできてしまうので、上限を置く。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DiskConfig {
+    pub workspace_gib: u32,
+    pub docker_gib: u32,
+    pub max_workspace_gib: u32,
+    pub max_docker_gib: u32,
+}
+
+impl Default for DiskConfig {
+    fn default() -> Self {
+        Self {
+            workspace_gib: 20,
+            docker_gib: 40,
+            max_workspace_gib: 200,
+            max_docker_gib: 400,
+        }
+    }
+}
+
+impl DiskConfig {
+    /// 既定が 1 以上で、上限を超えていないかを確かめる。
+    pub fn check(&self) -> Result<(), String> {
+        for (name, default, max) in [
+            ("workspace", self.workspace_gib, self.max_workspace_gib),
+            ("docker", self.docker_gib, self.max_docker_gib),
+        ] {
+            if default == 0 || default > max {
+                return Err(format!(
+                    "disks.{name}_gib must be between 1 and disks.max_{name}_gib ({max})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// 既定を当てはめたワークスペースのディスクの大きさ。
+    pub fn workspace_gib(&self, disks: DiskSizes) -> u32 {
+        disks.workspace_gib.unwrap_or(self.workspace_gib)
+    }
+
+    /// 既定を当てはめた Docker のディスクの大きさ。
+    pub fn docker_gib(&self, disks: DiskSizes) -> u32 {
+        disks.docker_gib.unwrap_or(self.docker_gib)
+    }
+
+    /// 作るワークスペースのディスクの大きさを確かめる。
+    pub fn validate_new(&self, requested: DiskSizes) -> Result<(), Error> {
+        self.validate(None, requested).map(|_| ())
+    }
+
+    /// `current` を `requested` に変えた大きさを返す。書かなかったほうは変えない。
+    /// 小さくはできない (ext4 を縮めるのは時間がかかり、中身が収まらなければ失敗する)。
+    pub fn validate_change(
+        &self,
+        current: DiskSizes,
+        requested: DiskSizes,
+    ) -> Result<DiskSizes, Error> {
+        self.validate(Some(current), requested)
+    }
+
+    fn validate(
+        &self,
+        current: Option<DiskSizes>,
+        requested: DiskSizes,
+    ) -> Result<DiskSizes, Error> {
+        let check = |name: &str, requested: Option<u32>, now: Option<u32>, max: u32| {
+            let Some(gib) = requested else {
+                return Ok(());
+            };
+            if gib == 0 || gib > max {
+                return Err(Error::Invalid(format!(
+                    "the {name} disk must be between 1 and {max} GiB"
+                )));
+            }
+            match now {
+                Some(now) if gib < now => Err(Error::Invalid(format!(
+                    "the {name} disk is {now} GiB and cannot be shrunk (remove the workspace with its disks to start over)"
+                ))),
+                _ => Ok(()),
+            }
+        };
+        check(
+            "workspace",
+            requested.workspace_gib,
+            current.map(|c| self.workspace_gib(c)),
+            self.max_workspace_gib,
+        )?;
+        check(
+            "docker",
+            requested.docker_gib,
+            current.map(|c| self.docker_gib(c)),
+            self.max_docker_gib,
+        )?;
+        let current = current.unwrap_or_default();
+        Ok(DiskSizes {
+            workspace_gib: requested.workspace_gib.or(current.workspace_gib),
+            docker_gib: requested.docker_gib.or(current.docker_gib),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub id: i64,
     pub owner: Owner,
     pub name: String,
     pub root_mode: RootMode,
+    pub disks: DiskSizes,
 }
 
 impl Workspace {
@@ -165,11 +282,60 @@ mod tests {
                 owner: r.owner,
                 name: r.name,
                 root_mode: RootMode::Ephemeral,
+                disks: DiskSizes::default(),
             }
         };
         assert_eq!(ws("default").hostname(), "default");
         assert_eq!(ws("Acme/dev/my_api").hostname(), "acme-dev-my-api");
         assert_eq!(ws("_x_").hostname(), "x");
         assert_eq!(ws(&"a".repeat(64)).hostname().len(), 63);
+    }
+
+    #[test]
+    fn disks_only_grow_within_limits() {
+        let config = DiskConfig::default();
+        config.check().unwrap();
+        let sizes = |w, d| DiskSizes {
+            workspace_gib: w,
+            docker_gib: d,
+        };
+        // 既定 (20 GiB) から広げる。書かなかった Docker のディスクは既定のまま。
+        let grown = config
+            .validate_change(DiskSizes::default(), sizes(Some(50), None))
+            .unwrap();
+        assert_eq!(grown, sizes(Some(50), None));
+        assert_eq!(config.docker_gib(grown), 40);
+        // 同じ大きさは受け付ける。
+        config
+            .validate_change(grown, sizes(Some(50), None))
+            .unwrap();
+        // 小さくはできない。既定より小さくもできない。
+        assert!(
+            config
+                .validate_change(grown, sizes(Some(49), None))
+                .is_err()
+        );
+        assert!(
+            config
+                .validate_change(DiskSizes::default(), sizes(None, Some(39)))
+                .is_err()
+        );
+        // 上限を超えられない。
+        assert!(
+            config
+                .validate_change(grown, sizes(None, Some(401)))
+                .is_err()
+        );
+        // 作るときは既定より小さくてよい。
+        config.validate_new(sizes(Some(10), Some(10))).unwrap();
+        assert!(config.validate_new(sizes(Some(0), None)).is_err());
+        assert!(
+            DiskConfig {
+                workspace_gib: 300,
+                ..config
+            }
+            .check()
+            .is_err()
+        );
     }
 }

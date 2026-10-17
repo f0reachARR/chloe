@@ -11,7 +11,7 @@ use sqlx::{Row, SqlitePool};
 use crate::Error;
 use crate::catalog::{self, SecretSpec};
 use crate::runner::PolicyLayer;
-use crate::workspace::{RootMode, Workspace, WorkspaceRef};
+use crate::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
 
 #[derive(Clone)]
 pub struct Store {
@@ -28,15 +28,18 @@ impl Store {
         &self,
         target: &WorkspaceRef,
         root_mode: RootMode,
+        disks: DiskSizes,
         created_by: &str,
     ) -> Result<Workspace, Error> {
         let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
-            "INSERT INTO workspaces (owner, name, root_mode, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO workspaces (owner, name, root_mode, workspace_disk_gib, docker_disk_gib, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(target.owner.to_string())
         .bind(&target.name)
         .bind(root_mode.as_str())
+        .bind(disks.workspace_gib)
+        .bind(disks.docker_gib)
         .bind(created_by)
         .bind(now())
         .execute(&mut *tx)
@@ -54,12 +57,13 @@ impl Store {
             owner: target.owner.clone(),
             name: target.name.clone(),
             root_mode,
+            disks,
         })
     }
 
     pub async fn find(&self, target: &WorkspaceRef) -> Result<Option<Workspace>, Error> {
         let row = sqlx::query(
-            "SELECT id, owner, name, root_mode FROM workspaces WHERE owner = ?1 AND name = ?2",
+            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib FROM workspaces WHERE owner = ?1 AND name = ?2",
         )
         .bind(target.owner.to_string())
         .bind(&target.name)
@@ -69,10 +73,12 @@ impl Store {
     }
 
     pub async fn get(&self, id: i64) -> Result<Option<Workspace>, Error> {
-        let row = sqlx::query("SELECT id, owner, name, root_mode FROM workspaces WHERE id = ?1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib FROM workspaces WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|row| workspace_from_row(&row)).transpose()
     }
 
@@ -81,8 +87,8 @@ impl Store {
         let mut workspaces = Vec::new();
         for owner in owners {
             let rows = sqlx::query(
-                "SELECT id, owner, name, root_mode FROM workspaces WHERE owner = ?1 ORDER BY name",
-            )
+            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib FROM workspaces WHERE owner = ?1 ORDER BY name",
+        )
             .bind(owner.to_string())
             .fetch_all(&self.pool)
             .await?;
@@ -113,6 +119,18 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    pub async fn set_disk_sizes(&self, id: i64, disks: DiskSizes) -> Result<(), Error> {
+        sqlx::query(
+            "UPDATE workspaces SET workspace_disk_gib = ?2, docker_disk_gib = ?3 WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(disks.workspace_gib)
+        .bind(disks.docker_gib)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -558,6 +576,10 @@ fn workspace_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Workspace, Error>
             .map_err(|e: chloe_secrets::Error| Error::Invalid(e.to_string()))?,
         name: row.try_get("name")?,
         root_mode: root_mode.parse()?,
+        disks: DiskSizes {
+            workspace_gib: row.try_get("workspace_disk_gib")?,
+            docker_gib: row.try_get("docker_disk_gib")?,
+        },
     })
 }
 
@@ -657,18 +679,28 @@ pub(crate) mod tests {
         let store = Store::new(pool().await);
         let api = WorkspaceRef::parse("api", "alice").unwrap();
         let ws = store
-            .create(&api, RootMode::Ephemeral, "alice")
+            .create(&api, RootMode::Ephemeral, DiskSizes::default(), "alice")
             .await
             .unwrap();
         assert!(matches!(
-            store.create(&api, RootMode::Ephemeral, "alice").await,
+            store
+                .create(&api, RootMode::Ephemeral, DiskSizes::default(), "alice")
+                .await,
             Err(Error::AlreadyExists(_))
         ));
         assert_eq!(store.find(&api).await.unwrap(), Some(ws.clone()));
+        assert_eq!(ws.disks, DiskSizes::default());
+        let disks = DiskSizes {
+            workspace_gib: Some(50),
+            docker_gib: None,
+        };
+        store.set_disk_sizes(ws.id, disks).await.unwrap();
+        let ws = store.get(ws.id).await.unwrap().unwrap();
+        assert_eq!(ws.disks, disks);
 
         let org = WorkspaceRef::parse("fortefibre/web", "alice").unwrap();
         store
-            .create(&org, RootMode::Persistent, "alice")
+            .create(&org, RootMode::Persistent, DiskSizes::default(), "alice")
             .await
             .unwrap();
         let listed = store
@@ -774,6 +806,7 @@ pub(crate) mod tests {
             .create(
                 &WorkspaceRef::parse("a", "alice").unwrap(),
                 RootMode::Ephemeral,
+                DiskSizes::default(),
                 "alice",
             )
             .await
@@ -873,6 +906,7 @@ pub(crate) mod tests {
             .create(
                 &WorkspaceRef::parse("a", "alice").unwrap(),
                 RootMode::Ephemeral,
+                DiskSizes::default(),
                 "alice",
             )
             .await
@@ -881,6 +915,7 @@ pub(crate) mod tests {
             .create(
                 &WorkspaceRef::parse("b", "alice").unwrap(),
                 RootMode::Ephemeral,
+                DiskSizes::default(),
                 "alice",
             )
             .await

@@ -323,6 +323,7 @@ mod tests {
             owner: Owner::User("alice".into()),
             name: "api".into(),
             root_mode: RootMode::Ephemeral,
+            disks: Default::default(),
         };
         let placeholders = [
             ("anthropic_api_key", "value", "sk-ant-api03-chloeA"),

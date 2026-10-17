@@ -761,7 +761,7 @@ impl<B: RunnerBackend> Controller<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::{RootMode, WorkspaceRef};
+    use crate::workspace::{DiskSizes, RootMode, WorkspaceRef};
     use chloe_agent_proto::ExitStatus;
     use chloe_secrets::{MasterKey, Owner};
     use std::path::PathBuf;
@@ -1009,6 +1009,7 @@ mod tests {
             .create(
                 &WorkspaceRef::parse(name, login).unwrap(),
                 RootMode::Ephemeral,
+                DiskSizes::default(),
                 login,
             )
             .await
@@ -1308,6 +1309,7 @@ mod tests {
             .create(
                 &WorkspaceRef::parse("w", "alice").unwrap(),
                 RootMode::Ephemeral,
+                DiskSizes::default(),
                 "alice",
             )
             .await
@@ -1317,6 +1319,7 @@ mod tests {
             .create(
                 &WorkspaceRef::parse("w", "bob").unwrap(),
                 RootMode::Ephemeral,
+                DiskSizes::default(),
                 "bob",
             )
             .await
