@@ -440,6 +440,9 @@ pub async fn set_policy(
     layer: &PolicyLayer,
 ) -> Result<usize> {
     check_policy_admin(shared, login, owner).await?;
+    layer
+        .check(shared.controller.base_policy())
+        .map_err(Error::Invalid)?;
     shared
         .controller
         .store()

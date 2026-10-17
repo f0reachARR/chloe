@@ -78,6 +78,10 @@ async fn main() -> Result<()> {
         &std::fs::read_to_string(&cli.config)
             .with_context(|| format!("read {}", cli.config.display()))?,
     )?;
+    config
+        .policy
+        .check()
+        .map_err(|e| anyhow::anyhow!("invalid [policy]: {e}"))?;
     if let Some(Command::Node { command }) = cli.command {
         return node_command(&config, command).await;
     }

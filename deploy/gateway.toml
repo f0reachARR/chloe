@@ -25,10 +25,20 @@ allowed_users = ["your-github-login"]
 # GitHub で Organization の管理者である利用者は、ここに書かなくてもその Organization のものを変えられる。
 admins = ["your-github-login"]
 
-# すべてのワークスペースに共通の許可リスト。シークレットの差し替え先 (api.anthropic.com など) は
+# すべてのワークスペースに共通の、外への通信の規則。宛先、メソッド、パスで、上から順に評価し、
+# 最初に一致した規則で決める。どれにも一致しなければ遮断する。書き方は docs/configuration.md にある。
+# シークレットの差し替え先 (api.anthropic.com など) は、どの規則にも書いていなければ、
 # シークレットを登録すると自動で加わる。
-[policy]
-allow = [
+[[policy.rules]]
+name = "github-no-delete"
+hosts = ["api.github.com"]
+methods = ["DELETE"]
+paths = ["/repos/**"]
+action = "deny"
+
+[[policy.rules]]
+name = "default"
+hosts = [
     "api.anthropic.com",
     "statsig.anthropic.com",
     "claude.ai",
@@ -46,21 +56,19 @@ allow = [
     "static.crates.io",
     "index.crates.io",
 ]
-passthrough = [
+action = "allow"
+
+# 復号せずに中継だけする宛先 (証明書を固定するクライアント向け)。メソッドとパスは書けず、
+# ほかの規則と宛先が重なると起動しない。
+[[policy.rules]]
+name = "passthrough"
+hosts = [
     "registry-1.docker.io",
     "auth.docker.io",
     "*.docker.com",
     "*.ubuntu.com",
 ]
-
-# 宛先、メソッド、パスの規則。上から順に評価し、最初に一致した規則で決める。
-# どれにも一致しなければ許可リストだけで判定する。書き方は docs/configuration.md にある。
-[[policy.rules]]
-name = "github-no-delete"
-hosts = ["api.github.com"]
-methods = ["DELETE"]
-paths = ["/repos/**"]
-action = "deny"
+action = "passthrough"
 
 # GitHub のトークン (github_token) を VM に渡す定義。省くと github.com 向けの既定を使う。
 # GitHub Enterprise Server に向けるときなどに書く。書き方はシークレットの定義 (docs/usage.md) から値を除いたもの。

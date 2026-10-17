@@ -1,13 +1,14 @@
 //! 宛先、メソッド、パスで要求を許すか拒否するかを決める規則。
 //!
-//! 規則は上から順に評価し、最初に一致した規則の `action` で決める。どれにも一致しなければ、
-//! 規則では決めない (許可リストだけで判定する)。
+//! 規則は上から順に評価し、最初に一致した規則の `action` で決める。どれにも一致しなければ
+//! 遮断する。許可リストと中継のみの宛先も、規則から作る ([`crate::Policy::new`])。
 //!
 //! パスはグロブで書く。`*` は `/` を含まない任意の文字列に、一つの階層まるごとの `**` は
 //! 0 個以上の階層に一致する。照合の前にパスを正規化し (パーセントエンコードを戻し、`//`、
 //! `.`、`..` を解決する)、大文字と小文字は区別しない (GitHub の所有者とリポジトリの名前は
 //! 大文字と小文字を区別しない)。クエリは照合に含めない。
-//! 中継のみの宛先は復号しないので、規則は効かない。
+//! 中継のみ (`passthrough`) の宛先は復号しないので、メソッドとパスは書けず、ほかの規則と
+//! 宛先が重なってはいけない ([`crate::check_rules`])。
 
 use serde::{Deserialize, Serialize};
 
@@ -17,14 +18,14 @@ use crate::host_matches;
 #[serde(deny_unknown_fields)]
 pub struct PathRuleConfig {
     /// ログに残す名前。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub hosts: Vec<String>,
     /// 空ならすべてのメソッドに一致する。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<String>,
     /// 空ならすべてのパスに一致する。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
     pub action: Action,
 }
@@ -34,6 +35,8 @@ pub struct PathRuleConfig {
 pub enum Action {
     Allow,
     Deny,
+    /// 復号せずに中継する。平文の HTTP では `Allow` と同じ。
+    Passthrough,
 }
 
 pub(crate) struct PathRule {

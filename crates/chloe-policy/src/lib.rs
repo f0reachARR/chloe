@@ -2,9 +2,10 @@
 //!
 //! プロキシの実装 (HTTP ライブラリ) には依存せず、要求の見え方だけを受け取って判定する。
 //!
-//! - 中継のみの宛先は、SNI を見て復号せずに中継する ([`Policy::tls_decision`])。
-//! - 許可リストにない宛先、SNI のない TLS、SNI と Host が食い違う要求は遮断する。
-//! - 宛先、メソッド、パスの規則 ([`PathRuleConfig`]) で、許可した宛先への要求をさらに絞る。
+//! - 宛先、メソッド、パスの規則 ([`PathRuleConfig`]) を上から順に評価し、最初に一致した規則で
+//!   許すか拒否するかを決める。どの規則にも一致しなければ遮断する。
+//! - 中継のみの規則の宛先は、SNI を見て復号せずに中継する ([`Policy::tls_decision`])。
+//! - SNI のない TLS、SNI と Host が食い違う要求は遮断する。
 //! - プレースホルダーは、規則に登録した宛先と場所に限って本物に差し替える。
 //!   それ以外の宛先でプレースホルダーを見つけたら遮断する。
 //! - 署名の規則 ([`SignRuleConfig`]) では、プレースホルダーの鍵で作った署名を本物の鍵で作り直す。
@@ -30,16 +31,76 @@ pub const CA_HOST: &str = "ca.chloe.internal";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyConfig {
     #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub passthrough: Vec<String>,
-    #[serde(default)]
     pub inject: Vec<InjectRuleConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sign: Vec<SignRuleConfig>,
-    /// 宛先、メソッド、パスの規則。上から順に評価する。
+    /// 宛先、メソッド、パスの規則。上から順に評価し、どれにも一致しなければ遮断する。
     #[serde(default)]
     pub rules: Vec<PathRuleConfig>,
+}
+
+/// 規則が成り立っているかを確かめる。
+///
+/// 中継のみの規則は復号しないので、メソッドとパスを書けない。また、ほかの規則と宛先が重なると
+/// 接続の時点 (SNI) で中継に決まり、もう一方の規則が効かないので、重なりも誤りにする。
+pub fn check_rules(rules: &[PathRuleConfig]) -> Result<(), String> {
+    let label = |rule: &PathRuleConfig| match &rule.name {
+        Some(name) => format!("rule {name:?}"),
+        None => format!("the rule for {}", rule.hosts.join(", ")),
+    };
+    for rule in rules {
+        if rule.hosts.is_empty() {
+            return Err(format!("{} has no hosts", label(rule)));
+        }
+        if rule.action == Action::Passthrough
+            && (!rule.methods.is_empty() || !rule.paths.is_empty())
+        {
+            return Err(format!(
+                "{} is passthrough and cannot have methods or paths",
+                label(rule)
+            ));
+        }
+    }
+    for (i, a) in rules.iter().enumerate() {
+        if a.action != Action::Passthrough {
+            continue;
+        }
+        for (j, b) in rules.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            for host in &a.hosts {
+                if let Some(other) = b.hosts.iter().find(|other| hosts_overlap(host, other)) {
+                    return Err(format!(
+                        "{} (passthrough {host}) overlaps {} ({other})",
+                        label(a),
+                        label(b)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// つないでよい宛先 (許すか中継のみの規則の宛先)。VM の DNS で引ける名前にも使う。
+pub fn reachable_hosts(rules: &[PathRuleConfig]) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for rule in rules.iter().filter(|r| r.action != Action::Deny) {
+        for host in &rule.hosts {
+            if !hosts.contains(host) {
+                hosts.push(host.clone());
+            }
+        }
+    }
+    hosts
+}
+
+/// 二つの宛先の書き方に、どちらにも一致するホストがあるか。
+pub fn hosts_overlap(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+        || host_matches(a, &[b.to_string()])
+        || host_matches(b, &[a.to_string()])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,8 +333,13 @@ impl Policy {
                 });
             }
         }
-        let mut allow = config.allow;
-        allow.extend(config.passthrough.iter().cloned());
+        let allow = reachable_hosts(&config.rules);
+        let passthrough = config
+            .rules
+            .iter()
+            .filter(|rule| rule.action == Action::Passthrough)
+            .flat_map(|rule| rule.hosts.iter().cloned())
+            .collect();
         let path_rules = config
             .rules
             .iter()
@@ -282,7 +348,7 @@ impl Policy {
             .collect();
         Self {
             allow,
-            passthrough: config.passthrough,
+            passthrough,
             rules,
             sign: config.sign,
             bindings,
@@ -423,19 +489,21 @@ impl Policy {
         if !host_matches(&host, &self.allow) {
             return Err(blocked(BlockReason::NotAllowed, None));
         }
-        if !self.path_rules.is_empty() {
-            let Some(path) = path::normalize(request.path_and_query) else {
-                return Err(blocked(BlockReason::BadPath, None));
-            };
-            let method = request.method.to_ascii_uppercase();
-            if let Some(rule) = self
-                .path_rules
-                .iter()
-                .find(|rule| rule.matches(&host, &method, &path))
-                && rule.action == Action::Deny
-            {
+        let Some(path) = path::normalize(request.path_and_query) else {
+            return Err(blocked(BlockReason::BadPath, None));
+        };
+        let method = request.method.to_ascii_uppercase();
+        // 中継のみの規則に一致するのは、ここでは平文の HTTP だけ (TLS は復号せずに中継している)。
+        match self
+            .path_rules
+            .iter()
+            .find(|rule| rule.matches(&host, &method, &path))
+        {
+            None => return Err(blocked(BlockReason::NotAllowed, None)),
+            Some(rule) if rule.action == Action::Deny => {
                 return Err(blocked(BlockReason::PathDenied, Some(&rule.name)));
             }
+            Some(_) => {}
         }
 
         // 同じプレースホルダーを複数の規則で差し替えることがある (git と API など)。
@@ -652,8 +720,10 @@ mod tests {
 
     fn policy() -> Policy {
         let config: PolicyConfig = serde_json::from_value(serde_json::json!({
-            "allow": ["httpbin.org", "example.org", "github.com", "*.githubusercontent.com"],
-            "passthrough": ["registry-1.docker.io", "*.docker.com"],
+            "rules": [
+                { "hosts": ["httpbin.org", "example.org", "github.com", "*.githubusercontent.com"], "action": "allow" },
+                { "hosts": ["registry-1.docker.io", "*.docker.com"], "action": "passthrough" }
+            ],
             "inject": [
                 {
                     "name": "test",
@@ -755,6 +825,13 @@ mod tests {
         assert_eq!(p.tls_decision(Some("httpbin.org")), TlsDecision::Intercept);
         assert_eq!(p.tls_decision(None), TlsDecision::Intercept);
         assert!(p.is_allowed("auth.cloudflare.docker.com"));
+    }
+
+    #[test]
+    fn passthrough_hosts_allow_plain_http() {
+        let mut req = Req::https("registry-1.docker.io:80");
+        req.sni = None;
+        assert_eq!(req.eval(&policy()), Decision::Allowed { injected: vec![] });
     }
 
     #[test]
@@ -876,7 +953,7 @@ mod tests {
     #[test]
     fn one_placeholder_with_rules_for_different_hosts() {
         let config: PolicyConfig = serde_json::from_value(serde_json::json!({
-            "allow": ["github.com", "api.github.com", "example.org"],
+            "rules": [{ "hosts": ["github.com", "api.github.com", "example.org"], "action": "allow" }],
             "inject": [
                 { "name": "gh-git", "placeholder": GH_PH, "hosts": ["github.com"], "header": "authorization", "format": "basic-password", "secret_env": "G" },
                 { "name": "gh-api", "placeholder": GH_PH, "hosts": ["api.github.com"], "header": "authorization", "secret_env": "G" }
@@ -902,12 +979,12 @@ mod tests {
     #[test]
     fn path_rules_first_match_wins() {
         let config: PolicyConfig = serde_json::from_value(serde_json::json!({
-            "allow": ["api.github.com", "github.com"],
             "rules": [
                 { "name": "no-delete", "hosts": ["api.github.com"], "methods": ["DELETE"], "paths": ["/repos/**"], "action": "deny" },
                 { "hosts": ["api.github.com"], "paths": ["/repos/ForteFibre/**", "/user", "/graphql"], "action": "allow" },
                 { "name": "github-default", "hosts": ["api.github.com"], "action": "deny" },
-                { "name": "no-push", "hosts": ["github.com"], "methods": ["POST"], "paths": ["/*/*/git-receive-pack", "/*/*.git/git-receive-pack"], "action": "deny" }
+                { "name": "no-push", "hosts": ["github.com"], "methods": ["POST"], "paths": ["/*/*/git-receive-pack", "/*/*.git/git-receive-pack"], "action": "deny" },
+                { "hosts": ["github.com"], "action": "allow" }
             ]
         }))
         .unwrap();
@@ -951,7 +1028,6 @@ mod tests {
                 rule: None
             }
         );
-        // どの規則にも当たらなければ許可リストだけで判定する。
         assert_eq!(
             eval(
                 "github.com",
@@ -975,6 +1051,102 @@ mod tests {
                 "/ForteFibre/chloe.git/git-upload-pack"
             ),
             allowed
+        );
+    }
+
+    #[test]
+    fn unmatched_requests_are_blocked() {
+        let config: PolicyConfig = serde_json::from_value(serde_json::json!({
+            "rules": [
+                { "hosts": ["api.github.com"], "paths": ["/repos/acme/**"], "action": "allow" },
+                { "hosts": ["*.example.com"], "methods": ["GET"], "action": "allow" }
+            ]
+        }))
+        .unwrap();
+        let p = Policy::new(config);
+        let eval = |host: &'static str, method: &'static str, path: &'static str| {
+            let mut req = Req::https(host);
+            req.method = method;
+            req.path = path;
+            req.eval(&p)
+        };
+        let allowed = Decision::Allowed { injected: vec![] };
+        assert_eq!(eval("api.github.com", "GET", "/repos/acme/x"), allowed);
+        // 規則で許した場所のほかは、同じ宛先でも通さない。
+        assert_eq!(
+            reason(eval("api.github.com", "GET", "/user")),
+            BlockReason::NotAllowed
+        );
+        assert_eq!(eval("a.example.com", "GET", "/"), allowed);
+        assert_eq!(
+            reason(eval("a.example.com", "POST", "/")),
+            BlockReason::NotAllowed
+        );
+        assert_eq!(
+            reason(eval("example.com", "GET", "/")),
+            BlockReason::NotAllowed
+        );
+        assert!(p.is_allowed("api.github.com"));
+        assert!(!p.is_allowed("github.com"));
+    }
+
+    fn rules(value: serde_json::Value) -> Vec<PathRuleConfig> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn passthrough_must_not_overlap_other_rules() {
+        let ok = rules(serde_json::json!([
+            { "hosts": ["*.docker.com"], "action": "passthrough" },
+            { "hosts": ["docker.com", "github.com"], "action": "allow" }
+        ]));
+        check_rules(&ok).unwrap();
+        for other in [
+            "*.docker.com",
+            "hub.docker.com",
+            "*.cloudfront.docker.com",
+            "HUB.docker.com",
+        ] {
+            let overlapping = rules(serde_json::json!([
+                { "hosts": ["*.docker.com"], "action": "passthrough" },
+                { "hosts": [other], "paths": ["/v2/**"], "action": "deny" }
+            ]));
+            assert!(check_rules(&overlapping).is_err(), "{other}");
+        }
+        // 中継のみの宛先どうしも重ねない。
+        let twice = rules(serde_json::json!([
+            { "hosts": ["*.docker.com"], "action": "passthrough" },
+            { "hosts": ["auth.docker.com"], "action": "passthrough" }
+        ]));
+        assert!(check_rules(&twice).is_err());
+        let with_path = rules(serde_json::json!([
+            { "hosts": ["registry-1.docker.io"], "paths": ["/v2/**"], "action": "passthrough" }
+        ]));
+        assert!(check_rules(&with_path).is_err());
+        let no_hosts = rules(serde_json::json!([{ "hosts": [], "action": "allow" }]));
+        assert!(check_rules(&no_hosts).is_err());
+    }
+
+    /// 開発用のランナーの方針が読めて、規則が成り立っていること。
+    #[test]
+    fn dev_policy_is_valid() {
+        let config: PolicyConfig =
+            serde_json::from_str(include_str!("../../../images/guest/dev/policy.dev.json"))
+                .unwrap();
+        check_rules(&config.rules).unwrap();
+    }
+
+    #[test]
+    fn reachable_hosts_skip_deny_rules() {
+        let config = rules(serde_json::json!([
+            { "hosts": ["api.github.com"], "methods": ["DELETE"], "action": "deny" },
+            { "hosts": ["deny.example"], "action": "deny" },
+            { "hosts": ["api.github.com", "github.com"], "action": "allow" },
+            { "hosts": ["*.docker.com"], "action": "passthrough" }
+        ]));
+        assert_eq!(
+            reachable_hosts(&config),
+            ["api.github.com", "github.com", "*.docker.com"]
         );
     }
 
@@ -1009,7 +1181,7 @@ mod tests {
         let vectors: serde_json::Value = serde_json::from_str(SIGV4).unwrap();
         let ph = &vectors["placeholder"];
         let config: PolicyConfig = serde_json::from_value(serde_json::json!({
-            "allow": ["*.amazonaws.com", "example.org"],
+            "rules": [{ "hosts": ["*.amazonaws.com", "example.org"], "action": "allow" }],
             "sign": [{
                 "name": "aws",
                 "hosts": ["*.amazonaws.com"],

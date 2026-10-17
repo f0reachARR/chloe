@@ -31,37 +31,11 @@ admins = ["your-github-login"]
 # "org:your-org" = ["your-github-login"]
 # "team:your-org/your-team" = ["your-github-login"]
 
-# すべてのワークスペースに共通の許可リスト。シークレットの差し替え先 (api.anthropic.com など) は
+# すべてのワークスペースに共通の、外への通信の規則。宛先、メソッド、パスで、上から順に評価し、
+# 最初に一致した規則で決める。どれにも一致しなければ遮断する。パスの * は一つの階層の中、
+# ** は 0 個以上の階層に一致し、大文字と小文字は区別しない。
+# シークレットの差し替え先 (api.anthropic.com など) は、どの規則にも書いていなければ、
 # シークレットを登録すると自動で加わる。
-[policy]
-allow = [
-    "api.anthropic.com",
-    "statsig.anthropic.com",
-    "claude.ai",
-    "platform.claude.com",
-    "api.openai.com",
-    "auth.openai.com",
-    "chatgpt.com",
-    "github.com",
-    "api.github.com",
-    "*.githubusercontent.com",
-    "registry.npmjs.org",
-    "pypi.org",
-    "files.pythonhosted.org",
-    "crates.io",
-    "static.crates.io",
-    "index.crates.io",
-]
-passthrough = [
-    "registry-1.docker.io",
-    "auth.docker.io",
-    "*.docker.com",
-    "*.ubuntu.com",
-]
-
-# 宛先、メソッド、パスの規則。上から順に評価し、最初に一致した規則で決める。
-# どれにも一致しなければ許可リストだけで判定する。パスの * は一つの階層の中、** は 0 個以上の
-# 階層に一致し、大文字と小文字は区別しない。中継のみ (passthrough) の宛先には効かない。
 [[policy.rules]]
 name = "github-no-delete"
 hosts = ["api.github.com"]
@@ -69,6 +43,8 @@ methods = ["DELETE"]
 paths = ["/repos/**"]
 action = "deny"
 
+# api.github.com を自分の Organization のリポジトリに限るなら、下の default の前に置く
+# (一致しなかった api.github.com への要求は default で許されるので、拒否も書く)。
 # [[policy.rules]]
 # name = "github-org-only"
 # hosts = ["api.github.com"]
@@ -87,6 +63,40 @@ action = "deny"
 # methods = ["POST"]
 # paths = ["/*/*/git-receive-pack", "/*/*.git/git-receive-pack"]
 # action = "deny"
+
+[[policy.rules]]
+name = "default"
+hosts = [
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "claude.ai",
+    "platform.claude.com",
+    "api.openai.com",
+    "auth.openai.com",
+    "chatgpt.com",
+    "github.com",
+    "api.github.com",
+    "*.githubusercontent.com",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+]
+action = "allow"
+
+# 復号せずに中継だけする宛先 (証明書を固定するクライアント向け)。メソッドとパスは書けず、
+# ほかの規則と宛先が重なると起動しない。
+[[policy.rules]]
+name = "passthrough"
+hosts = [
+    "registry-1.docker.io",
+    "auth.docker.io",
+    "*.docker.com",
+    "*.ubuntu.com",
+]
+action = "passthrough"
 
 [runner]
 guest_dir = "build/guest"

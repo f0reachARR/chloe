@@ -7,7 +7,9 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chloe_policy::{Credential, InjectRuleConfig, PolicyConfig, SignRuleConfig, SignScheme};
+use chloe_policy::{
+    Action, Credential, InjectRuleConfig, PathRuleConfig, PolicyConfig, SignRuleConfig, SignScheme,
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -62,49 +64,43 @@ pub trait RunnerBackend: Send + Sync + 'static {
     }
 }
 
-/// すべてのワークスペースに共通の許可リスト。
+/// すべてのワークスペースに共通の、外への通信の規則。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BasePolicy {
+    /// 宛先、メソッド、パスの規則。上から順に評価し、どれにも一致しなければ遮断する。
     #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub passthrough: Vec<String>,
-    /// 宛先、メソッド、パスの規則。上から順に評価する。
-    #[serde(default)]
-    pub rules: Vec<chloe_policy::PathRuleConfig>,
+    pub rules: Vec<PathRuleConfig>,
 }
 
 impl BasePolicy {
     /// 全体の設定に、Organization と team の設定を (上の層から順に) 重ねる。
     ///
-    /// 許可リストは足し合わせる。パスの規則は上の層のものを先に並べるので、最初に一致した
-    /// 規則で決まる評価では、上の層 (サーバーの運用者、Organization) の規則を下の層が覆せない。
-    /// 中継のみの宛先は復号せず規則が効かないので、全体の設定でしか決められない。
+    /// 規則は上の層のものを先に並べるので、最初に一致した規則で決まる評価では、上の層
+    /// (サーバーの運用者、Organization) の規則を下の層が覆せない。
     pub fn with_layers(&self, layers: &[PolicyLayer]) -> BasePolicy {
         let mut merged = self.clone();
         for layer in layers {
-            for host in &layer.allow {
-                if !merged.allow.contains(host) {
-                    merged.allow.push(host.clone());
-                }
-            }
             merged.rules.extend(layer.rules.iter().cloned());
         }
         merged
+    }
+
+    /// 規則が成り立っているかを確かめる ([`chloe_policy::check_rules`])。
+    pub fn check(&self) -> Result<(), String> {
+        chloe_policy::check_rules(&self.rules)
     }
 }
 
 /// Organization か team の設定 (データベースの `policies`)。
 ///
-/// 中継のみの宛先 (`passthrough`) は置けない。復号しないのでパスの規則が効かず、置けると
+/// 中継のみ (`passthrough`) の規則は置けない。復号しないのでほかの規則が効かず、置けると
 /// 上の層の規則を素通りする宛先を作れてしまうためである。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyLayer {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rules: Vec<chloe_policy::PathRuleConfig>,
+    pub rules: Vec<PathRuleConfig>,
     /// 新しく作るワークスペースのルートの扱いの既定。下の層が優先する。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<RootMode>,
@@ -125,6 +121,17 @@ pub struct GitHubScope {
     pub permissions: Option<std::collections::BTreeMap<String, String>>,
 }
 
+impl PolicyLayer {
+    /// `base` に重ねられるかを確かめる。中継のみの規則は `base` にしかないので、ほかの層は
+    /// 見なくてよい。
+    pub fn check(&self, base: &BasePolicy) -> Result<(), String> {
+        if self.rules.iter().any(|r| r.action == Action::Passthrough) {
+            return Err("passthrough rules can only be set in the gateway's [policy]".to_string());
+        }
+        base.with_layers(std::slice::from_ref(self)).check()
+    }
+}
+
 /// 層を重ねたときに、もっとも下の層で決めた値。
 pub fn most_specific<T: Clone>(
     layers: &[PolicyLayer],
@@ -138,7 +145,8 @@ pub fn most_specific<T: Clone>(
 /// 差し替えと署名の規則とプレースホルダーの環境変数は、`specs` (そのワークスペースで使える
 /// シークレット) だけに作る。使えない種類のプレースホルダーを VM に入れると、
 /// ツールがそれを使おうとして、サブスクリプションのログインなどほかの手段を試さなくなる。
-/// 規則の宛先は許可リストにも足す。
+/// 差し替えと署名の宛先は、許す規則として一番後ろに足す。ただし、すでにどれかの規則に
+/// 書いた宛先には足さない (書いた規則で、許すかどうかと場所を決める)。
 pub fn build_spec(
     workspace: &Workspace,
     base: &BasePolicy,
@@ -146,8 +154,6 @@ pub fn build_spec(
     specs: &[(String, SecretSpec)],
 ) -> RunnerSpec {
     let mut policy = PolicyConfig {
-        allow: base.allow.clone(),
-        passthrough: base.passthrough.clone(),
         inject: vec![],
         sign: vec![],
         rules: base.rules.clone(),
@@ -158,11 +164,26 @@ pub fn build_spec(
         ("CHLOE_WORKSPACE".into(), workspace.display_name()),
         ("CHLOE_HOSTNAME".into(), workspace.hostname()),
     ];
-    fn allow(hosts: &[String], policy: &mut PolicyConfig) {
-        for host in hosts {
-            if !policy.allow.contains(host) {
-                policy.allow.push(host.clone());
-            }
+    fn allow(name: &str, hosts: &[String], policy: &mut PolicyConfig) {
+        let hosts: Vec<String> = hosts
+            .iter()
+            .filter(|host| {
+                !policy.rules.iter().any(|rule| {
+                    rule.hosts
+                        .iter()
+                        .any(|other| chloe_policy::hosts_overlap(host, other))
+                })
+            })
+            .cloned()
+            .collect();
+        if !hosts.is_empty() {
+            policy.rules.push(PathRuleConfig {
+                name: Some(name.to_string()),
+                hosts,
+                methods: vec![],
+                paths: vec![],
+                action: Action::Allow,
+            });
         }
     }
     for (name, spec) in specs {
@@ -175,15 +196,16 @@ pub fn build_spec(
             secret_env: catalog::secret_ref(name, field),
         };
         for (index, rule) in spec.inject.iter().enumerate() {
+            let rule_name = format!("{name}-{index}");
+            allow(&rule_name, &rule.hosts, &mut policy);
             policy.inject.push(InjectRuleConfig {
-                name: format!("{name}-{index}"),
+                name: rule_name,
                 placeholder: credential(&rule.field).placeholder,
                 hosts: rule.hosts.clone(),
                 header: rule.header.clone(),
                 format: rule.format,
                 secret_env: catalog::secret_ref(name, &rule.field),
             });
-            allow(&rule.hosts, &mut policy);
         }
         for (index, rule) in spec.sign.iter().enumerate() {
             let scheme = match rule.scheme {
@@ -196,12 +218,13 @@ pub fn build_spec(
                         .then(|| credential("session_token")),
                 },
             };
+            let rule_name = format!("{name}-sign-{index}");
+            allow(&rule_name, &rule.hosts, &mut policy);
             policy.sign.push(SignRuleConfig {
-                name: format!("{name}-sign-{index}"),
+                name: rule_name,
                 hosts: rule.hosts.clone(),
                 scheme,
             });
-            allow(&rule.hosts, &mut policy);
         }
         for (field, field_spec) in &spec.fields {
             for env in &field_spec.env {
@@ -228,37 +251,22 @@ mod tests {
     use chloe_secrets::Owner;
 
     #[test]
-    fn layers_add_hosts_and_keep_upper_rules_first() {
-        let rule = |name: &str, action| chloe_policy::PathRuleConfig {
-            name: Some(name.into()),
-            hosts: vec!["api.github.com".into()],
-            methods: vec![],
-            paths: vec![],
-            action,
-        };
+    fn layers_keep_upper_rules_first() {
         let base = BasePolicy {
-            allow: vec!["a.example".into()],
-            passthrough: vec![],
-            rules: vec![rule("global", chloe_policy::Action::Deny)],
+            rules: vec![rule("global", "api.github.com", Action::Deny)],
         };
         let org = PolicyLayer {
-            allow: vec!["a.example".into(), "b.example".into()],
-            rules: vec![rule("org", chloe_policy::Action::Allow)],
+            rules: vec![rule("org", "api.github.com", Action::Allow)],
             root: Some(RootMode::Persistent),
             ..Default::default()
         };
         let team = PolicyLayer {
-            allow: vec!["c.example".into()],
-            rules: vec![rule("team", chloe_policy::Action::Allow)],
+            rules: vec![rule("team", "api.github.com", Action::Allow)],
             root: Some(RootMode::Ephemeral),
             ..Default::default()
         };
         let layers = [org, team];
         let merged = base.with_layers(&layers);
-        assert_eq!(merged.allow, ["a.example", "b.example", "c.example"]);
-        assert!(merged.passthrough.is_empty());
-        // 中継のみの宛先は層には書けない。
-        assert!(serde_json::from_str::<PolicyLayer>(r#"{"passthrough": ["x.example"]}"#).is_err());
         let names: Vec<_> = merged
             .rules
             .iter()
@@ -270,6 +278,42 @@ mod tests {
             Some(RootMode::Ephemeral)
         );
         assert_eq!(most_specific(&layers, |l| l.github.as_ref()), None);
+    }
+
+    fn rule(name: &str, host: &str, action: Action) -> PathRuleConfig {
+        PathRuleConfig {
+            name: Some(name.into()),
+            hosts: vec![host.into()],
+            methods: vec![],
+            paths: vec![],
+            action,
+        }
+    }
+
+    #[test]
+    fn layers_cannot_pass_through_or_overlap_passthrough() {
+        let base = BasePolicy {
+            rules: vec![rule("docker", "*.docker.com", Action::Passthrough)],
+        };
+        base.check().unwrap();
+        let passthrough = PolicyLayer {
+            rules: vec![rule("org", "x.example", Action::Passthrough)],
+            ..Default::default()
+        };
+        assert!(passthrough.check(&base).is_err());
+        let overlapping = PolicyLayer {
+            rules: vec![rule("team", "hub.docker.com", Action::Deny)],
+            ..Default::default()
+        };
+        assert!(overlapping.check(&base).is_err());
+        let fine = PolicyLayer {
+            rules: vec![rule("team", "docker.com", Action::Allow)],
+            ..Default::default()
+        };
+        fine.check(&base).unwrap();
+        // 古い書き方 (allow、passthrough) は受け付けない。
+        assert!(serde_json::from_str::<PolicyLayer>(r#"{"allow": ["x.example"]}"#).is_err());
+        assert!(toml::from_str::<BasePolicy>(r#"allow = ["x.example"]"#).is_err());
     }
 
     #[test]
@@ -291,9 +335,14 @@ mod tests {
         .map(|(k, f, v)| ((k.to_string(), f.to_string()), v.to_string()))
         .collect();
         let base = BasePolicy {
-            allow: vec!["api.anthropic.com".into()],
-            passthrough: vec!["registry-1.docker.io".into()],
-            rules: vec![],
+            rules: vec![
+                rule("anthropic", "api.anthropic.com", Action::Allow),
+                rule("docker", "registry-1.docker.io", Action::Passthrough),
+                PathRuleConfig {
+                    paths: vec!["/repos/acme/**".into()],
+                    ..rule("acme-only", "api.github.com", Action::Allow)
+                },
+            ],
         };
         let aws: catalog::SecretInput = toml::from_str(
             r#"
@@ -350,7 +399,8 @@ mod tests {
                 },
             }]
         );
-        assert!(spec.policy.allow.iter().any(|a| a == "*.amazonaws.com"));
+        let reachable = chloe_policy::reachable_hosts(&spec.policy.rules);
+        assert!(reachable.iter().any(|a| a == "*.amazonaws.com"));
         assert!(
             spec.guest_env
                 .contains(&("AWS_SECRET_ACCESS_KEY".into(), "chloeS".into()))
@@ -365,15 +415,22 @@ mod tests {
             spec.policy.inject[0].secret_env,
             "CHLOE_SECRET_ANTHROPIC_API_KEY"
         );
-        assert!(spec.policy.allow.iter().any(|a| a == "github.com"));
-        assert_eq!(
+        assert!(reachable.iter().any(|a| a == "github.com"));
+        // すでに規則に書いた宛先には足さない (書いた規則で絞った場所が広がらない)。
+        let mentions = |host: &str| {
             spec.policy
-                .allow
+                .rules
                 .iter()
-                .filter(|a| *a == "api.anthropic.com")
-                .count(),
-            1
+                .filter(|r| r.hosts.iter().any(|h| h == host))
+                .count()
+        };
+        assert_eq!(mentions("api.anthropic.com"), 1);
+        assert_eq!(mentions("api.github.com"), 1);
+        assert_eq!(
+            spec.policy.rules.last().unwrap().name.as_deref(),
+            Some("aws-sign-0")
         );
+        chloe_policy::check_rules(&spec.policy.rules).unwrap();
         assert!(
             spec.guest_env
                 .contains(&("ANTHROPIC_API_KEY".into(), "sk-ant-api03-chloeA".into()))

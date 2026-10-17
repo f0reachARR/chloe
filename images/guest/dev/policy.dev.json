@@ -1,25 +1,4 @@
 {
-  "allow": [
-    "api.anthropic.com",
-    "statsig.anthropic.com",
-    "sentry.io",
-    "*.sentry.io",
-    "api.openai.com",
-    "auth.openai.com",
-    "chatgpt.com",
-    "*.chatgpt.com",
-    "github.com",
-    "api.github.com",
-    "*.githubusercontent.com",
-    "httpbin.org",
-    "example.org"
-  ],
-  "passthrough": [
-    "registry-1.docker.io",
-    "auth.docker.io",
-    "*.docker.com",
-    "*.ubuntu.com"
-  ],
   "inject": [
     {
       "name": "test",
@@ -84,6 +63,35 @@
         "/anything/**"
       ],
       "action": "deny"
+    },
+    {
+      "name": "default",
+      "hosts": [
+        "api.anthropic.com",
+        "statsig.anthropic.com",
+        "sentry.io",
+        "*.sentry.io",
+        "api.openai.com",
+        "auth.openai.com",
+        "chatgpt.com",
+        "*.chatgpt.com",
+        "github.com",
+        "api.github.com",
+        "*.githubusercontent.com",
+        "httpbin.org",
+        "example.org"
+      ],
+      "action": "allow"
+    },
+    {
+      "name": "passthrough",
+      "hosts": [
+        "registry-1.docker.io",
+        "auth.docker.io",
+        "*.docker.com",
+        "*.ubuntu.com"
+      ],
+      "action": "passthrough"
     }
   ]
 }

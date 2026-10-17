@@ -1,5 +1,5 @@
 #!/bin/sh
-# 方針 (policy.json) の許可リストから、dnsmasq が上流に問い合わせる名前の一覧を作り直す。
+# 方針 (policy.json) の規則 (拒否を除く) の宛先から、dnsmasq が上流に問い合わせる名前の一覧を作り直す。
 #
 #   dns-update.sh <policy.json> [--no-reload]
 #
@@ -10,7 +10,7 @@ policy="$1"
 upstream="$(cat /run/chloe-upstream-dns)"
 tmp=/run/dnsmasq-servers.conf.tmp
 : > "$tmp"
-for name in $(jq -r '(.allow + .passthrough)[] | ltrimstr("*.")' "$policy"); do
+for name in $(jq -r '[.rules[] | select(.action != "deny") | .hosts[]] | unique | .[] | ltrimstr("*.")' "$policy"); do
     echo "server=/$name/$upstream" >> "$tmp"
 done
 mv "$tmp" /run/dnsmasq-servers.conf

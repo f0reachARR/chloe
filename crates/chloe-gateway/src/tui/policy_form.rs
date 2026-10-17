@@ -17,11 +17,9 @@ pub fn form(owner: &str, layer: Option<&PolicyLayer>, inherited: &[(String, Poli
         fields.push(Field::note(format!("From {name}").as_str(), summary(upper)));
     }
     fields.extend([
-        Field::text("allow", "Allowed hosts", "").help(
-            "Hosts the VMs may reach, separated by commas. Added to the upper layers' hosts.",
-        ),
-        Field::rows("rules", "Path rules", RULE_ROW, vec![]).help(
-            "Allow or deny by host, method and path. The upper layers' rules are checked first.",
+        Field::rows("rules", "Rules", RULE_ROW, vec![]).help(
+            "Allow or deny by host, method and path. The upper layers' rules are checked first; \
+             requests no rule matches are blocked.",
         ),
         Field::choice(
             "root",
@@ -49,7 +47,7 @@ pub fn form(owner: &str, layer: Option<&PolicyLayer>, inherited: &[(String, Poli
 }
 
 const RULE_ROW: RowKind = RowKind {
-    make: || rule_row("", &[], &[], &[], "deny"),
+    make: || rule_row("", &[], &[], &[], "allow"),
     summary: |row| {
         let name = row.text("name");
         let target = format!("{} {}", row.choice("action"), row.text("hosts"));
@@ -69,7 +67,7 @@ fn rule_row(
     action: &str,
 ) -> Form {
     Form::new(
-        "Path rule",
+        "Rule",
         vec![
             Field::text("name", "Name", name).help("Shown in the logs."),
             Field::text("hosts", "Hosts", &hosts.join(", ")),
@@ -100,9 +98,6 @@ fn permission_row(name: &str, level: &str) -> Form {
 /// 上の層の設定を一行にする。
 fn summary(layer: &PolicyLayer) -> String {
     let mut parts = Vec::new();
-    if !layer.allow.is_empty() {
-        parts.push(format!("allow {}", layer.allow.join(", ")));
-    }
     if !layer.rules.is_empty() {
         parts.push(format!("{} rule(s)", layer.rules.len()));
     }
@@ -129,7 +124,6 @@ fn fill(form: &mut Form, json: &Value) {
             })
             .unwrap_or_default()
     };
-    form.set_text("allow", &strings(&json["allow"]).join(", "));
     let rules = json["rules"]
         .as_array()
         .into_iter()
@@ -171,12 +165,11 @@ fn set_rows(form: &mut Form, key: &str, rows: Vec<Form>) {
 
 pub fn to_layer(form: &Form) -> Result<PolicyLayer, String> {
     let mut json = Map::new();
-    json.insert("allow".into(), json!(form.list("allow")));
     let mut rules = Vec::new();
     for row in form.rows("rules") {
         let hosts = row.list("hosts");
         if hosts.is_empty() {
-            return Err("every path rule needs hosts".into());
+            return Err("every rule needs hosts".into());
         }
         let mut rule = Map::new();
         let name = row.text("name");
@@ -235,8 +228,10 @@ mod tests {
     fn round_trips_settings() {
         let layer: PolicyLayer = toml::from_str(
             r#"
-            allow = ["example.org", "pypi.org"]
             root = "persistent"
+            [[rules]]
+            hosts = ["example.org", "pypi.org"]
+            action = "allow"
             [[rules]]
             name = "no-push"
             hosts = ["github.com"]
@@ -250,7 +245,6 @@ mod tests {
         )
         .unwrap();
         let form = form("acme", Some(&layer), &[]);
-        assert_eq!(form.text("allow"), "example.org, pypi.org");
         assert_eq!(form.choice("repos"), LISTED);
         assert_eq!(to_layer(&form).unwrap(), layer);
         assert_eq!(
@@ -262,7 +256,7 @@ mod tests {
     #[test]
     fn shows_inherited_settings() {
         let org = PolicyLayer {
-            allow: vec!["example.org".into()],
+            root: Some(chloe_controller::workspace::RootMode::Persistent),
             ..Default::default()
         };
         let form = form("acme/dev", None, &[("acme".into(), org)]);

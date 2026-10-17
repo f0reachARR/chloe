@@ -107,7 +107,7 @@ mod tests {
     fn update(placeholder: &str) -> String {
         serde_json::json!({
             "policy": {
-                "allow": ["api.github.com"],
+                "rules": [{ "hosts": ["api.github.com"], "action": "allow" }],
                 "inject": [{ "name": "gh", "placeholder": placeholder, "hosts": ["api.github.com"], "header": "authorization", "secret_env": "CHLOE_SECRET_GITHUB_TOKEN" }]
             }
         })
@@ -120,7 +120,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("egress.sock");
         let shared = SharedPolicy::new(Policy::new(PolicyConfig {
-            allow: vec!["api.github.com".into()],
+            rules: vec![chloe_policy::PathRuleConfig {
+                name: None,
+                hosts: vec!["api.github.com".into()],
+                methods: vec![],
+                paths: vec![],
+                action: chloe_policy::Action::Allow,
+            }],
             ..Default::default()
         }));
         tokio::spawn({

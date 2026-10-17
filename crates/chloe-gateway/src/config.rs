@@ -61,7 +61,7 @@ pub struct Config {
     /// 定義から値を除いたもの。GitHub Enterprise Server に向けるときに変える。
     #[serde(default)]
     pub github_token: Option<chloe_controller::catalog::DefinitionInput>,
-    /// すべてのワークスペースに共通の許可リスト。
+    /// すべてのワークスペースに共通の、外への通信の規則。
     #[serde(default)]
     pub policy: BasePolicy,
     /// 同じホストの Docker にランナーを置くときの設定。`cluster` とどちらか一方を書く。
@@ -156,8 +156,9 @@ mod tests {
             [memberships]
             "org:fortefibre" = ["alice"]
 
-            [policy]
-            allow = ["httpbin.org"]
+            [[policy.rules]]
+            hosts = ["httpbin.org"]
+            action = "allow"
 
             [runner]
             guest_dir = "build/guest"
@@ -206,6 +207,7 @@ mod tests {
         ] {
             let config: Config = toml::from_str(example).unwrap();
             assert!(config.runner.is_some());
+            config.policy.check().unwrap();
         }
     }
 }

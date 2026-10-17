@@ -56,9 +56,13 @@ listen = "127.0.0.1:$api_port"
 [memberships]
 "org:acme" = ["alice"]
 
-[policy]
-allow = ["httpbin.org", "statsig.anthropic.com"]
-passthrough = ["registry-1.docker.io", "auth.docker.io", "*.docker.com"]
+[[policy.rules]]
+hosts = ["httpbin.org", "statsig.anthropic.com"]
+action = "allow"
+
+[[policy.rules]]
+hosts = ["registry-1.docker.io", "auth.docker.io", "*.docker.com"]
+action = "passthrough"
 
 [runner]
 guest_dir = "$root/build/guest"
@@ -198,11 +202,11 @@ check ws-create-not-member "not a member" as bob chloe ws create acme/proj2
 check ws-org-member "user" as alice+acme/proj 'id -un'
 check ws-org-not-member "Permission denied" as bob+acme/proj true
 check ws-org-list "acme/proj	persistent" as alice chloe ws list
-check admin-policy "saved the settings of acme" sh -c 'printf "allow = [\"example.org\"]\n" | "$@"' _ \
+check admin-policy "saved the settings of acme" sh -c 'printf "[[rules]]\nhosts = [\"example.org\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
-check not-admin-policy "only the administrators" sh -c 'printf "allow = []\n" | "$@"' _ \
+check not-admin-policy "only the administrators" sh -c 'printf "rules = []\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe policy set acme
-check no-passthrough-in-policy "invalid settings" sh -c 'printf "passthrough = [\"x.example\"]\n" | "$@"' _ \
+check no-passthrough-in-policy "passthrough rules can only be set" sh -c 'printf "[[rules]]\nhosts = [\"x.example\"]\naction = \"passthrough\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
 check not-admin-org-secret "cannot change the secrets of acme" sh -c 'echo x | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe secret set --owner acme openai_api_key
@@ -270,11 +274,11 @@ check api-secret-show '"placeholder":"sk-proj-{id}"' api "$alice_token" GET /v1/
 check api-secret-list '"names":["anthropic_api_key","openai_api_key"]' api "$alice_token" GET /v1/secrets
 check api-secret-ssh "openai_api_key" as alice chloe secret list
 check api-org-secret-denied "403" api "$bob_token" PUT '/v1/secrets/openai_api_key?owner=acme' -d '{"value":"x"}'
-check api-policy-set '"updated_runners":' api "$alice_token" PUT /v1/policies/acme -d '{"allow":["api.example"]}'
-check api-policy-show '{"allow":["api.example"]} 200' api "$alice_token" GET /v1/policies/acme
+check api-policy-set '"updated_runners":' api "$alice_token" PUT /v1/policies/acme -d '{"rules":[{"hosts":["api.example"],"action":"allow"}]}'
+check api-policy-show '{"rules":[{"hosts":["api.example"],"action":"allow"}]} 200' api "$alice_token" GET /v1/policies/acme
 check api-policy-ssh "api.example" as alice chloe policy show acme
-check api-policy-denied "only the administrators" api "$bob_token" PUT /v1/policies/acme -d '{"allow":[]}'
-check api-policy-invalid "invalid settings" api "$alice_token" PUT /v1/policies/acme -d '{"passthrough":["x.example"]}'
+check api-policy-denied "only the administrators" api "$bob_token" PUT /v1/policies/acme -d '{"rules":[]}'
+check api-policy-invalid "overlaps" api "$alice_token" PUT /v1/policies/acme -d '{"rules":[{"hosts":["hub.docker.com"],"action":"deny"}]}'
 check api-delete "204" api "$alice_token" DELETE /v1/workspaces/acme/from-api
 check api-deleted "404" api "$alice_token" GET /v1/workspaces/acme/from-api
 check api-token-list '"name":"ci"' api "$alice_token" GET /v1/tokens

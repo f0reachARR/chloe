@@ -298,6 +298,11 @@ impl<B: RunnerBackend> Controller<B> {
         self.inner.resolver.preset(name)
     }
 
+    /// すべてのワークスペースに共通の規則 (ゲートウェイの `[policy]`)。
+    pub fn base_policy(&self) -> &BasePolicy {
+        &self.inner.base
+    }
+
     pub fn store(&self) -> &Store {
         &self.inner.store
     }
@@ -449,12 +454,16 @@ impl<B: RunnerBackend> Controller<B> {
             .ensure_placeholders(workspace.id, &specs)
             .await?;
         let layers = self.inner.store.policy_layers(&workspace.owner).await?;
-        Ok(build_spec(
+        let spec = build_spec(
             workspace,
             &self.inner.base.with_layers(&layers),
             &placeholders,
             &specs,
-        ))
+        );
+        // 全体の設定をあとから変えて、保存してある層と重なることがある。そのまま起動すると
+        // 層の規則が黙って効かなくなるので、起動しない。
+        chloe_policy::check_rules(&spec.policy.rules).map_err(Error::Invalid)?;
+        Ok(spec)
     }
 
     fn close(&self, workspace_id: i64) {
@@ -851,10 +860,10 @@ mod tests {
     impl RunnerBackend for Arc<FakeBackend> {
         async fn start(&self, spec: RunnerSpec) -> Result<(), Error> {
             self.starts.fetch_add(1, Ordering::SeqCst);
-            self.allow
-                .lock()
-                .unwrap()
-                .insert(spec.key.clone(), spec.policy.allow.clone());
+            self.allow.lock().unwrap().insert(
+                spec.key.clone(),
+                chloe_policy::reachable_hosts(&spec.policy.rules),
+            );
             fake_agent(
                 self.vsock_path(&spec.key),
                 self.busy.clone(),
@@ -889,10 +898,10 @@ mod tests {
 
         async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
             self.updates.fetch_add(1, Ordering::SeqCst);
-            self.allow
-                .lock()
-                .unwrap()
-                .insert(spec.key.clone(), spec.policy.allow.clone());
+            self.allow.lock().unwrap().insert(
+                spec.key.clone(),
+                chloe_policy::reachable_hosts(&spec.policy.rules),
+            );
             self.running.lock().unwrap().insert(
                 spec.key.clone(),
                 spec.policy.inject.len() + spec.policy.sign.len(),
@@ -1249,7 +1258,13 @@ mod tests {
         let (controller, backend) = controller(Duration::from_secs(60)).await;
         let org = Owner::Org("acme".into());
         let layer = |host: &str| crate::runner::PolicyLayer {
-            allow: vec![host.into()],
+            rules: vec![chloe_policy::PathRuleConfig {
+                name: None,
+                hosts: vec![host.into()],
+                methods: vec![],
+                paths: vec![],
+                action: chloe_policy::Action::Allow,
+            }],
             ..Default::default()
         };
         let store = controller.store();

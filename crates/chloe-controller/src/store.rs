@@ -801,7 +801,13 @@ pub(crate) mod tests {
             team: "dev".into(),
         };
         let layer = |host: &str| PolicyLayer {
-            allow: vec![host.into()],
+            rules: vec![chloe_policy::PathRuleConfig {
+                name: None,
+                hosts: vec![host.into()],
+                methods: vec![],
+                paths: vec![],
+                action: chloe_policy::Action::Allow,
+            }],
             ..Default::default()
         };
         store
@@ -823,7 +829,11 @@ pub(crate) mod tests {
         );
 
         let hosts = |layers: Vec<PolicyLayer>| -> Vec<String> {
-            layers.into_iter().flat_map(|l| l.allow).collect()
+            layers
+                .into_iter()
+                .flat_map(|l| l.rules)
+                .flat_map(|r| r.hosts)
+                .collect()
         };
         assert_eq!(
             hosts(store.policy_layers(&team).await.unwrap()),
