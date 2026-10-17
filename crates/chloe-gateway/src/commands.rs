@@ -119,7 +119,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 }
 
 fn help() -> String {
-    let kinds: Vec<&str> = catalog::KINDS.iter().map(|k| k.name).collect();
+    let kinds = catalog::PRESETS;
     format!(
         "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret set [--owner OWNER] KIND   (reads the value from stdin)\n  chloe secret rm [--owner OWNER] KIND\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nsecret kinds: {}\n",
         kinds.join(", ")

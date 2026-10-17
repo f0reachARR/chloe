@@ -1,8 +1,8 @@
 //! ランナーのプロキシからの本物の値の問い合わせに答える。
 //!
 //! ランナーごとに専用の Unix ソケット (権限 600) で待ち受ける。どのランナーからの問い合わせかは
-//! ソケットで決まるので、そのワークスペースで使える種類のシークレットだけを答える。
-//! 答えるたびに、ワークスペースとシークレットの種類を記録する (値は記録しない)。
+//! ソケットで決まるので、そのワークスペースで使えるシークレットだけを答える。
+//! 答えるたびに、ワークスペースとシークレットの名前と欄を記録する (値は記録しない)。
 //!
 //! やり取りは接続ごとに JSON を一行ずつ。段階 9 で HTTPS (相互 TLS) に置き換えやすい形にしてある。
 //!
@@ -70,27 +70,29 @@ pub(crate) async fn answer(line: &str, workspace: &Workspace, resolver: &Resolve
     let Ok(question) = serde_json::from_str::<Question>(line) else {
         return error("invalid question");
     };
-    // 問い合わせは環境変数の名前 (CHLOE_SECRET_<種類>) で来る。
-    let Some(kind) = catalog::KINDS
-        .iter()
-        .find(|k| catalog::secret_env(k.name) == question.secret)
-    else {
+    // 問い合わせは環境変数の名前 (CHLOE_SECRET_<名前>[__<欄>]) で来る。
+    let Some((name, field)) = catalog::parse_secret_ref(&question.secret) else {
         return error("unknown secret");
     };
-    match resolver.resolve(workspace, kind.name).await {
-        Ok(Some(value)) => {
-            info!(target: "audit", workspace = %workspace.display_name(), secret = kind.name, "secret served");
-            let mut encoded = serde_json::to_string(value.expose_secret()).unwrap_or_default();
+    match resolver.resolve(workspace, &name).await {
+        Ok(Some((stored, spec))) => {
+            let Some(mut value) = spec.field_value(stored.expose_secret(), &field) else {
+                warn!(target: "audit", workspace = %workspace.display_name(), secret = %name, field = %field, "no such field");
+                return error("not available for this workspace");
+            };
+            info!(target: "audit", workspace = %workspace.display_name(), secret = %name, field = %field, "secret served");
+            let mut encoded = serde_json::to_string(&value).unwrap_or_default();
+            value.zeroize();
             let answer = format!("{{\"value\":{encoded}}}\n");
             encoded.zeroize();
             answer
         }
         Ok(None) => {
-            warn!(target: "audit", workspace = %workspace.display_name(), secret = kind.name, "secret not available");
+            warn!(target: "audit", workspace = %workspace.display_name(), secret = %name, field = %field, "secret not available");
             error("not available for this workspace")
         }
         Err(e) => {
-            warn!(target: "audit", workspace = %workspace.display_name(), secret = kind.name, "failed to resolve a secret: {e}");
+            warn!(target: "audit", workspace = %workspace.display_name(), secret = %name, field = %field, "failed to resolve a secret: {e}");
             error("failed to resolve the secret")
         }
     }

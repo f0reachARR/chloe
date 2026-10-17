@@ -201,7 +201,7 @@ pub fn owner_arg(owner: &Owner) -> String {
 }
 
 pub fn known_kind(kind: &str) -> Result<()> {
-    match catalog::kind(kind) {
+    match catalog::preset(kind) {
         Some(_) => Ok(()),
         None => Err(Error::Invalid(format!("unknown secret kind: {kind}"))),
     }

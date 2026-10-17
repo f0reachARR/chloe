@@ -7,12 +7,12 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chloe_policy::{InjectRuleConfig, PolicyConfig};
+use chloe_policy::{Credential, InjectRuleConfig, PolicyConfig, SignRuleConfig, SignScheme};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::Error;
-use crate::catalog;
+use crate::catalog::{self, SecretSpec, SignKind};
 use crate::workspace::{RootMode, Workspace};
 
 /// guest-agent への接続。vsock か、それを中継した接続。
@@ -133,14 +133,15 @@ pub fn most_specific<T: Clone>(
 
 /// ワークスペースのランナーの起動に必要なものを組み立てる。
 ///
-/// 差し替えの規則とプレースホルダーの環境変数は、`kinds` (そのワークスペースで使える
-/// シークレットの種類) だけに作る。使えない種類のプレースホルダーを VM に入れると、
+/// 差し替えと署名の規則とプレースホルダーの環境変数は、`specs` (そのワークスペースで使える
+/// シークレット) だけに作る。使えない種類のプレースホルダーを VM に入れると、
 /// ツールがそれを使おうとして、サブスクリプションのログインなどほかの手段を試さなくなる。
+/// 規則の宛先は許可リストにも足す。
 pub fn build_spec(
     workspace: &Workspace,
     base: &BasePolicy,
-    placeholders: &std::collections::BTreeMap<String, String>,
-    kinds: &[String],
+    placeholders: &std::collections::BTreeMap<(String, String), String>,
+    specs: &[(String, SecretSpec)],
 ) -> RunnerSpec {
     let mut policy = PolicyConfig {
         allow: base.allow.clone(),
@@ -149,28 +150,61 @@ pub fn build_spec(
         sign: vec![],
         rules: base.rules.clone(),
     };
-    let mut guest_env = Vec::new();
-    for name in kinds {
-        let (Some(kind), Some(placeholder)) = (catalog::kind(name), placeholders.get(name)) else {
-            continue;
-        };
-        for (index, rule) in kind.rules.iter().enumerate() {
-            policy.inject.push(InjectRuleConfig {
-                name: format!("{}-{index}", kind.name),
-                placeholder: placeholder.clone(),
-                hosts: rule.hosts.iter().map(|h| h.to_string()).collect(),
-                header: rule.header.to_string(),
-                format: rule.format,
-                secret_env: catalog::secret_env(kind.name),
-            });
-            for host in rule.hosts {
-                if !policy.allow.iter().any(|a| a == host) {
-                    policy.allow.push(host.to_string());
-                }
+    let mut guest_env: Vec<(String, String)> = Vec::new();
+    fn allow(hosts: &[String], policy: &mut PolicyConfig) {
+        for host in hosts {
+            if !policy.allow.contains(host) {
+                policy.allow.push(host.clone());
             }
         }
-        for env in kind.env {
-            guest_env.push((env.to_string(), placeholder.clone()));
+    }
+    for (name, spec) in specs {
+        let placeholder = |field: &str| placeholders.get(&(name.clone(), field.to_string()));
+        if spec.fields.keys().any(|field| placeholder(field).is_none()) {
+            continue;
+        }
+        let credential = |field: &str| Credential {
+            placeholder: placeholder(field).cloned().unwrap_or_default(),
+            secret_env: catalog::secret_ref(name, field),
+        };
+        for (index, rule) in spec.inject.iter().enumerate() {
+            policy.inject.push(InjectRuleConfig {
+                name: format!("{name}-{index}"),
+                placeholder: credential(&rule.field).placeholder,
+                hosts: rule.hosts.clone(),
+                header: rule.header.clone(),
+                format: rule.format,
+                secret_env: catalog::secret_ref(name, &rule.field),
+            });
+            allow(&rule.hosts, &mut policy);
+        }
+        for (index, rule) in spec.sign.iter().enumerate() {
+            let scheme = match rule.scheme {
+                SignKind::AwsSigV4 => SignScheme::AwsSigV4 {
+                    access_key_id: credential("access_key_id"),
+                    secret_access_key: credential("secret_access_key"),
+                    session_token: spec
+                        .fields
+                        .contains_key("session_token")
+                        .then(|| credential("session_token")),
+                },
+            };
+            policy.sign.push(SignRuleConfig {
+                name: format!("{name}-sign-{index}"),
+                hosts: rule.hosts.clone(),
+                scheme,
+            });
+            allow(&rule.hosts, &mut policy);
+        }
+        for (field, field_spec) in &spec.fields {
+            for env in &field_spec.env {
+                // 同じ環境変数を二つのシークレットが使うなら、名前の順で先のほうを渡す。
+                if guest_env.iter().any(|(e, _)| e == env) {
+                    tracing::warn!(workspace = %workspace.display_name(), secret = %name, env = %env, "environment variable is already used by another secret");
+                    continue;
+                }
+                guest_env.push((env.clone(), credential(field).placeholder));
+            }
         }
     }
     RunnerSpec {
@@ -240,30 +274,79 @@ mod tests {
             root_mode: RootMode::Ephemeral,
         };
         let placeholders = [
-            ("anthropic_api_key", "sk-ant-api03-chloeA"),
-            ("openai_api_key", "sk-proj-chloeO"),
-            ("github_token", "ghu_chloeG"),
+            ("anthropic_api_key", "value", "sk-ant-api03-chloeA"),
+            ("openai_api_key", "value", "sk-proj-chloeO"),
+            ("github_token", "value", "ghu_chloeG"),
+            ("aws", "access_key_id", "AKIAchloeK"),
+            ("aws", "secret_access_key", "chloeS"),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, f, v)| ((k.to_string(), f.to_string()), v.to_string()))
         .collect();
         let base = BasePolicy {
             allow: vec!["api.anthropic.com".into()],
             passthrough: vec!["registry-1.docker.io".into()],
             rules: vec![],
         };
+        let aws: catalog::SecretInput = toml::from_str(
+            r#"
+            [fields.access_key_id]
+            env = ["AWS_ACCESS_KEY_ID"]
+            placeholder = "AKIA{id}"
+            value = "x"
+            [fields.secret_access_key]
+            env = ["AWS_SECRET_ACCESS_KEY"]
+            value = "y"
+            [[sign]]
+            scheme = "aws-sigv4"
+            hosts = ["*.amazonaws.com"]
+            "#,
+        )
+        .unwrap();
+        let preset = |name: &str| (name.to_string(), catalog::preset(name).unwrap());
         let spec = build_spec(
             &ws,
             &base,
             &placeholders,
             &[
-                "anthropic_api_key".into(),
-                "github_token".into(),
-                "unknown".into(),
+                preset("anthropic_api_key"),
+                preset("github_token"),
+                ("aws".into(), aws.into_parts().unwrap().0.unwrap()),
+                // プレースホルダーのないものは使わない。
+                preset("claude_oauth_token"),
             ],
         );
         assert_eq!(spec.key, "ws-7");
         assert_eq!(spec.policy.inject.len(), 3);
+        assert_eq!(
+            spec.policy.sign,
+            [SignRuleConfig {
+                name: "aws-sign-0".into(),
+                hosts: vec!["*.amazonaws.com".into()],
+                scheme: SignScheme::AwsSigV4 {
+                    access_key_id: Credential {
+                        placeholder: "AKIAchloeK".into(),
+                        secret_env: "CHLOE_SECRET_AWS__ACCESS_KEY_ID".into(),
+                    },
+                    secret_access_key: Credential {
+                        placeholder: "chloeS".into(),
+                        secret_env: "CHLOE_SECRET_AWS__SECRET_ACCESS_KEY".into(),
+                    },
+                    session_token: None,
+                },
+            }]
+        );
+        assert!(spec.policy.allow.iter().any(|a| a == "*.amazonaws.com"));
+        assert!(
+            spec.guest_env
+                .contains(&("AWS_SECRET_ACCESS_KEY".into(), "chloeS".into()))
+        );
+        assert!(
+            !spec
+                .guest_env
+                .iter()
+                .any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN")
+        );
         assert_eq!(
             spec.policy.inject[0].secret_env,
             "CHLOE_SECRET_ANTHROPIC_API_KEY"

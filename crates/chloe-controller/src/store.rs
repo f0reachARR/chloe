@@ -9,7 +9,7 @@ use chloe_secrets::Owner;
 use sqlx::{Row, SqlitePool};
 
 use crate::Error;
-use crate::catalog;
+use crate::catalog::{self, SecretSpec};
 use crate::runner::PolicyLayer;
 use crate::workspace::{RootMode, Workspace, WorkspaceRef};
 
@@ -23,7 +23,7 @@ impl Store {
         Self { pool }
     }
 
-    /// ワークスペースを作り、シークレットの種類ごとのプレースホルダーを決める。
+    /// ワークスペースを作る。プレースホルダーは使うときに作る ([`Store::ensure_placeholders`])。
     pub async fn create(
         &self,
         target: &WorkspaceRef,
@@ -48,17 +48,6 @@ impl Store {
             }
             Err(e) => return Err(e.into()),
         };
-        for kind in catalog::KINDS {
-            sqlx::query(
-                "INSERT INTO placeholders (workspace_id, secret_name, field, template, placeholder) VALUES (?1, ?2, 'value', ?3, ?4)",
-            )
-            .bind(id)
-            .bind(kind.name)
-            .bind(format!("{}{{id}}", kind.placeholder_prefix))
-            .bind(new_placeholder(kind.placeholder_prefix))
-            .execute(&mut *tx)
-            .await?;
-        }
         tx.commit().await?;
         Ok(Workspace {
             id,
@@ -410,33 +399,73 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
-    /// シークレットの名前からプレースホルダーへの対応。
-    pub async fn placeholders(&self, id: i64) -> Result<BTreeMap<String, String>, Error> {
+    /// 定義に合わせてプレースホルダーを用意し、(シークレット, 欄) からプレースホルダーへの対応を返す。
+    /// まだないか、形の変わった欄のプレースホルダーを作る。ほかはワークスペースごとに同じものを使い続ける。
+    pub async fn ensure_placeholders(
+        &self,
+        id: i64,
+        specs: &[(String, SecretSpec)],
+    ) -> Result<BTreeMap<(String, String), String>, Error> {
         let rows = sqlx::query(
-            "SELECT secret_name, placeholder FROM placeholders WHERE workspace_id = ?1",
+            "SELECT secret_name, field, template, placeholder FROM placeholders WHERE workspace_id = ?1",
         )
         .bind(id)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter()
-            .map(|row| Ok((row.try_get("secret_name")?, row.try_get("placeholder")?)))
-            .collect()
+        let mut existing = BTreeMap::new();
+        for row in rows {
+            let key: (String, String) = (row.try_get("secret_name")?, row.try_get("field")?);
+            let value: (String, String) = (row.try_get("template")?, row.try_get("placeholder")?);
+            existing.insert(key, value);
+        }
+        let mut placeholders = BTreeMap::new();
+        for (name, spec) in specs {
+            for (field, field_spec) in &spec.fields {
+                let key = (name.clone(), field.clone());
+                let template = &field_spec.placeholder;
+                let placeholder = match existing.get(&key) {
+                    Some((t, placeholder)) if t == template => placeholder.clone(),
+                    _ => {
+                        // 同時に作っても、先に書いたほうを使う。
+                        sqlx::query(
+                            "INSERT INTO placeholders (workspace_id, secret_name, field, template, placeholder)
+                             VALUES (?1, ?2, ?3, ?4, ?5)
+                             ON CONFLICT (workspace_id, secret_name, field) DO UPDATE SET
+                                template = excluded.template,
+                                placeholder = excluded.placeholder
+                             WHERE placeholders.template <> excluded.template",
+                        )
+                        .bind(id)
+                        .bind(name)
+                        .bind(field)
+                        .bind(template)
+                        .bind(new_placeholder(template))
+                        .execute(&self.pool)
+                        .await?;
+                        sqlx::query_scalar(
+                            "SELECT placeholder FROM placeholders
+                             WHERE workspace_id = ?1 AND secret_name = ?2 AND field = ?3",
+                        )
+                        .bind(id)
+                        .bind(name)
+                        .bind(field)
+                        .fetch_one(&self.pool)
+                        .await?
+                    }
+                };
+                placeholders.insert(key, placeholder);
+            }
+        }
+        Ok(placeholders)
     }
 
-    /// プレースホルダーを作り直す。
+    /// シークレットのプレースホルダーを捨てる。次に用意するときに作り直す。
     pub async fn rotate_placeholder(&self, id: i64, secret_name: &str) -> Result<(), Error> {
-        let kind = catalog::kind(secret_name)
-            .ok_or_else(|| Error::Invalid(format!("unknown secret: {secret_name}")))?;
-        sqlx::query(
-            "INSERT INTO placeholders (workspace_id, secret_name, field, template, placeholder) VALUES (?1, ?2, 'value', ?3, ?4)
-             ON CONFLICT (workspace_id, secret_name, field) DO UPDATE SET placeholder = excluded.placeholder",
-        )
-        .bind(id)
-        .bind(secret_name)
-        .bind(format!("{}{{id}}", kind.placeholder_prefix))
-        .bind(new_placeholder(kind.placeholder_prefix))
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("DELETE FROM placeholders WHERE workspace_id = ?1 AND secret_name = ?2")
+            .bind(id)
+            .bind(secret_name)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
@@ -454,13 +483,14 @@ fn workspace_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Workspace, Error>
     })
 }
 
-/// 接頭辞のあとに "chloe" と乱数を続けたプレースホルダー。
-fn new_placeholder(prefix: &str) -> String {
+/// 形の `{id}` を "chloe" と乱数に置き換えたプレースホルダー。
+fn new_placeholder(template: &str) -> String {
     let random: [u8; 24] = rand::random();
-    format!(
-        "{prefix}chloe{}",
+    let id = format!(
+        "chloe{}",
         URL_SAFE_NO_PAD.encode(random).replace(['-', '_'], "x")
-    )
+    );
+    template.replacen(catalog::ID, &id, 1)
 }
 
 /// 管理 API のトークン (値は含まない)。時刻は UNIX 時刻の秒。
@@ -564,9 +594,18 @@ pub(crate) mod tests {
                 .is_empty()
         );
 
+        let presets = [(
+            "anthropic_api_key".to_string(),
+            catalog::preset("anthropic_api_key").unwrap(),
+        )];
+        store.ensure_placeholders(ws.id, &presets).await.unwrap();
         store.delete(ws.id).await.unwrap();
         assert_eq!(store.find(&api).await.unwrap(), None);
-        assert!(store.placeholders(ws.id).await.unwrap().is_empty());
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM placeholders")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[tokio::test]
@@ -717,18 +756,97 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        let first = store.placeholders(a.id).await.unwrap();
-        assert_eq!(first, store.placeholders(a.id).await.unwrap());
-        assert_ne!(first, store.placeholders(b.id).await.unwrap());
-        assert!(first["anthropic_api_key"].starts_with("sk-ant-api03-chloe"));
-        assert!(first["github_token"].starts_with("ghu_chloe"));
+        let presets: Vec<(String, SecretSpec)> = catalog::PRESETS
+            .iter()
+            .map(|name| (name.to_string(), catalog::preset(name).unwrap()))
+            .collect();
+        let key = |name: &str| (name.to_string(), catalog::VALUE.to_string());
+        let first = store.ensure_placeholders(a.id, &presets).await.unwrap();
+        assert_eq!(
+            first,
+            store.ensure_placeholders(a.id, &presets).await.unwrap()
+        );
+        assert_ne!(
+            first,
+            store.ensure_placeholders(b.id, &presets).await.unwrap()
+        );
+        assert!(first[&key("anthropic_api_key")].starts_with("sk-ant-api03-chloe"));
+        assert!(first[&key("github_token")].starts_with("ghu_chloe"));
 
         store
             .rotate_placeholder(a.id, "anthropic_api_key")
             .await
             .unwrap();
-        let rotated = store.placeholders(a.id).await.unwrap();
-        assert_ne!(first["anthropic_api_key"], rotated["anthropic_api_key"]);
-        assert_eq!(first["openai_api_key"], rotated["openai_api_key"]);
+        let rotated = store.ensure_placeholders(a.id, &presets).await.unwrap();
+        assert_ne!(
+            first[&key("anthropic_api_key")],
+            rotated[&key("anthropic_api_key")]
+        );
+        assert_eq!(
+            first[&key("openai_api_key")],
+            rotated[&key("openai_api_key")]
+        );
+
+        // 形を変えた欄だけを作り直す。
+        let mut changed = presets.clone();
+        changed[0]
+            .1
+            .fields
+            .get_mut(catalog::VALUE)
+            .unwrap()
+            .placeholder = "x_{id}_y".into();
+        let after = store.ensure_placeholders(a.id, &changed).await.unwrap();
+        let name = &changed[0].0;
+        assert!(after[&key(name)].starts_with("x_chloe") && after[&key(name)].ends_with("_y"));
+        assert_eq!(
+            after[&key("openai_api_key")],
+            rotated[&key("openai_api_key")]
+        );
+    }
+
+    /// 0006 より前に作ったプレースホルダーを、組み込みの種類ではそのまま使い続ける。
+    #[tokio::test]
+    async fn keeps_placeholders_made_before_fields() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        chloe_secrets::MIGRATOR.run_to(5, &pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, owner, name, created_by, created_at) VALUES (1, 'user:alice', 'a', 'alice', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let old: Vec<(String, String)> = catalog::PRESETS
+            .iter()
+            .map(|name| {
+                let template = &catalog::preset(name).unwrap().fields[catalog::VALUE].placeholder;
+                (name.to_string(), new_placeholder(template))
+            })
+            .collect();
+        for (name, placeholder) in &old {
+            sqlx::query(
+                "INSERT INTO placeholders (workspace_id, secret_name, placeholder) VALUES (1, ?1, ?2)",
+            )
+            .bind(name)
+            .bind(placeholder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        chloe_secrets::MIGRATOR.run(&pool).await.unwrap();
+        let presets: Vec<(String, SecretSpec)> = catalog::PRESETS
+            .iter()
+            .map(|name| (name.to_string(), catalog::preset(name).unwrap()))
+            .collect();
+        let now = Store::new(pool)
+            .ensure_placeholders(1, &presets)
+            .await
+            .unwrap();
+        for (name, placeholder) in old {
+            assert_eq!(now[&(name, catalog::VALUE.to_string())], placeholder);
+        }
     }
 }

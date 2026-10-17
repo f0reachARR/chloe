@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::Error;
-use crate::catalog;
+use crate::catalog::{self, SecretSpec};
 use crate::runner::{AgentStream, BasePolicy, RunnerBackend, RunnerSpec, build_spec};
 use crate::store::Store;
 use crate::workspace::Workspace;
@@ -56,46 +56,76 @@ pub fn secret_owners(owner: &Owner) -> Vec<Owner> {
 }
 
 impl Resolver {
-    /// ワークスペースで使えるシークレットの種類。持ち主 (team なら Organization も) が
-    /// データベースに登録した種類と、動的に作る種類を合わせたもの。
-    pub async fn kinds(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
-        let mut kinds = Vec::new();
-        for owner in secret_owners(&workspace.owner) {
-            kinds.extend(
-                self.secrets
-                    .list(&owner)
-                    .await?
-                    .into_iter()
-                    .filter(|name| catalog::kind(name).is_some()),
-            );
-        }
+    /// ワークスペースで使えるシークレットと、その定義。持ち主 (team なら Organization も) が
+    /// データベースに登録したものと、動的に作る種類を合わせたもの。
+    ///
+    /// 定義は値を復号して確かめたものだけを使う (定義だけを書き換えて別の宛先へ送らせないため)。
+    /// 定義がなく組み込みの種類でもない行 (GitHub のユーザートークンなど) は含めない。
+    pub async fn specs(&self, workspace: &Workspace) -> Result<Vec<(String, SecretSpec)>, Error> {
+        let mut specs = std::collections::BTreeMap::new();
         if let Some(dynamic) = &self.dynamic {
-            kinds.extend(dynamic.kinds(workspace).await);
+            for kind in dynamic.kinds(workspace).await {
+                if let Some(spec) = catalog::preset(&kind) {
+                    specs.insert(kind, spec);
+                }
+            }
         }
-        kinds.sort();
-        kinds.dedup();
-        Ok(kinds)
+        for owner in secret_owners(&workspace.owner) {
+            for name in self.secrets.list(&owner).await? {
+                if specs.contains_key(&name) {
+                    continue;
+                }
+                match self.secrets.get_with_spec(&owner, &name).await {
+                    Ok(Some((_, stored))) => {
+                        if let Some(spec) = spec_of(&name, stored.as_deref()) {
+                            specs.insert(name, spec);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(workspace = %workspace.display_name(), secret = %name, "skipped a secret that cannot be read: {e}");
+                    }
+                }
+            }
+        }
+        Ok(specs.into_iter().collect())
     }
 
+    /// シークレットの値 (保存した形のまま) と定義。
     pub async fn resolve(
         &self,
         workspace: &Workspace,
-        kind: &str,
-    ) -> Result<Option<SecretString>, Error> {
-        if catalog::kind(kind).is_none() {
-            return Ok(None);
-        }
+        name: &str,
+    ) -> Result<Option<(SecretString, SecretSpec)>, Error> {
         if let Some(dynamic) = &self.dynamic
-            && dynamic.kinds(workspace).await.iter().any(|k| k == kind)
+            && let Some(spec) = catalog::preset(name)
+            && dynamic.kinds(workspace).await.iter().any(|k| k == name)
         {
-            return dynamic.resolve(workspace, kind).await;
+            return Ok(dynamic
+                .resolve(workspace, name)
+                .await?
+                .map(|value| (value, spec)));
         }
         for owner in secret_owners(&workspace.owner) {
-            if let Some(value) = self.secrets.get(&owner, kind).await? {
-                return Ok(Some(value));
+            if let Some((value, stored)) = self.secrets.get_with_spec(&owner, name).await? {
+                return Ok(spec_of(name, stored.as_deref()).map(|spec| (value, spec)));
             }
         }
         Ok(None)
+    }
+}
+
+/// 保存した定義か、なければ組み込みの種類の定義。
+fn spec_of(name: &str, stored: Option<&str>) -> Option<SecretSpec> {
+    match stored {
+        Some(text) => match serde_json::from_str(text) {
+            Ok(spec) => Some(spec),
+            Err(e) => {
+                warn!(secret = %name, "ignored an invalid secret definition: {e}");
+                None
+            }
+        },
+        None => catalog::preset(name),
     }
 }
 
@@ -376,14 +406,18 @@ impl<B: RunnerBackend> Controller<B> {
     }
 
     async fn build(&self, workspace: &Workspace) -> Result<RunnerSpec, Error> {
-        let placeholders = self.inner.store.placeholders(workspace.id).await?;
-        let kinds = self.inner.resolver.kinds(workspace).await?;
+        let specs = self.inner.resolver.specs(workspace).await?;
+        let placeholders = self
+            .inner
+            .store
+            .ensure_placeholders(workspace.id, &specs)
+            .await?;
         let layers = self.inner.store.policy_layers(&workspace.owner).await?;
         Ok(build_spec(
             workspace,
             &self.inner.base.with_layers(&layers),
             &placeholders,
-            &kinds,
+            &specs,
         ))
     }
 
@@ -768,10 +802,10 @@ mod tests {
                 self.env.clone(),
             )
             .await;
-            self.running
-                .lock()
-                .unwrap()
-                .insert(spec.key.clone(), spec.policy.inject.len());
+            self.running.lock().unwrap().insert(
+                spec.key.clone(),
+                spec.policy.inject.len() + spec.policy.sign.len(),
+            );
             Ok(())
         }
 
@@ -791,10 +825,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(spec.key.clone(), spec.policy.allow.clone());
-            self.running
-                .lock()
-                .unwrap()
-                .insert(spec.key.clone(), spec.policy.inject.len());
+            self.running.lock().unwrap().insert(
+                spec.key.clone(),
+                spec.policy.inject.len() + spec.policy.sign.len(),
+            );
             Ok(())
         }
 
@@ -1236,5 +1270,121 @@ mod tests {
         let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"GH_TOKEN"), "{names:?}");
         assert!(!names.contains(&"ANTHROPIC_API_KEY"), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn serves_registered_definitions_by_field() {
+        let backend = backend();
+        let pool = crate::store::tests::pool().await;
+        let controller = controller_on(pool.clone(), backend.clone(), Duration::from_secs(60));
+        let alice = Owner::User("alice".into());
+        let register = |name: &'static str, toml_text: &'static str| {
+            let controller = controller.clone();
+            let alice = alice.clone();
+            async move {
+                let input: catalog::SecretInput = toml::from_str(toml_text).unwrap();
+                let (spec, values) = input.into_parts().unwrap();
+                let spec = spec.unwrap();
+                spec.validate().unwrap();
+                let value = spec.encode_values(&values).unwrap();
+                controller
+                    .secrets()
+                    .set_with_spec(
+                        &alice,
+                        name,
+                        &value.into(),
+                        Some(&serde_json::to_string(&spec).unwrap()),
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        register(
+            "aws",
+            r#"
+            [fields.access_key_id]
+            env = ["AWS_ACCESS_KEY_ID"]
+            placeholder = "AKIA{id}"
+            value = "AKIDEXAMPLE"
+            [fields.secret_access_key]
+            env = ["AWS_SECRET_ACCESS_KEY"]
+            value = "aws-secret"
+            [[sign]]
+            scheme = "aws-sigv4"
+            hosts = ["*.amazonaws.com"]
+            "#,
+        )
+        .await;
+        register(
+            "hf_token",
+            r#"
+            env = ["HF_TOKEN"]
+            placeholder = "hf_{id}"
+            value = "hf-real"
+            [[inject]]
+            hosts = ["huggingface.co"]
+            header = "authorization"
+            "#,
+        )
+        .await;
+        // 定義がなく組み込みの種類でもない行は使わない。
+        controller
+            .secrets()
+            .set(&alice, "github_user_token", &"{}".to_string().into())
+            .await
+            .unwrap();
+
+        let ws = workspace(&controller, "w", "alice").await;
+        let _c = controller.open(&ws).await.unwrap();
+        // github (動的) の二つ、aws の署名、hf_token の差し替え。
+        assert_eq!(backend.running.lock().unwrap()[&ws.key()], 4);
+        let allow = backend.allow.lock().unwrap()[&ws.key()].clone();
+        assert!(allow.contains(&"*.amazonaws.com".to_string()), "{allow:?}");
+        assert!(allow.contains(&"huggingface.co".to_string()), "{allow:?}");
+
+        let socket = backend.broker_socket(&ws.key());
+        assert!(
+            ask(&socket, "CHLOE_SECRET_AWS__ACCESS_KEY_ID")
+                .await
+                .contains("AKIDEXAMPLE")
+        );
+        assert!(
+            ask(&socket, "CHLOE_SECRET_AWS__SECRET_ACCESS_KEY")
+                .await
+                .contains("aws-secret")
+        );
+        assert!(ask(&socket, "CHLOE_SECRET_AWS").await.contains("error"));
+        assert!(
+            ask(&socket, "CHLOE_SECRET_HF_TOKEN")
+                .await
+                .contains("hf-real")
+        );
+        assert!(
+            ask(&socket, "CHLOE_SECRET_GITHUB_USER_TOKEN")
+                .await
+                .contains("error")
+        );
+
+        // 定義だけを書き換えた行は、方針にも問い合わせにも使わない。
+        sqlx::query(
+            "UPDATE secrets SET spec = replace(spec, 'huggingface.co', 'evil.example') WHERE name = 'hf_token'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(controller.refresh(&ws).await.unwrap());
+        assert_eq!(backend.running.lock().unwrap()[&ws.key()], 3);
+        let allow = backend.allow.lock().unwrap()[&ws.key()].clone();
+        assert!(!allow.contains(&"evil.example".to_string()), "{allow:?}");
+        let env = backend.env.lock().unwrap().clone().unwrap();
+        let env: HashMap<_, _> = env.into_iter().collect();
+        assert!(env["AWS_ACCESS_KEY_ID"].starts_with("AKIAchloe"));
+        assert!(env["AWS_SECRET_ACCESS_KEY"].starts_with("chloe"));
+        assert!(!env.contains_key("HF_TOKEN"));
+        assert!(
+            ask(&socket, "CHLOE_SECRET_HF_TOKEN")
+                .await
+                .contains("error")
+        );
     }
 }
