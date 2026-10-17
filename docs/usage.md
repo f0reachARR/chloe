@@ -105,7 +105,8 @@ ssh alice@chloe.example.com chloe secret set anthropic_api_key --spec < anthropi
 - 規則の宛先以外へプレースホルダーを送ると、プロキシが要求を遮断する。ヘッダーと URL のほか、本文も 1 MiB までなら調べる。
 
 定義を変えるときは、`--spec` で定義と値をまとめて渡し直す。
-GitHub のトークン（`github_token`）だけは chloe が扱いを決めているので、定義を付けて登録できない（[GitHub を使う](#github-を使う)）。
+GitHub のトークン（`github_token`）は、定義を付けずに値だけを登録する（[GitHub を使う](#github-を使う)）。
+渡す環境変数や宛先は、運用者がゲートウェイの設定の [`[github_token]`](configuration.md#github_token) で変える。
 
 ### 署名する方式（AWS）
 

@@ -30,6 +30,7 @@ systemd で動かすときは、すべて絶対パスで書く。
 | `activity_poll_secs` | `60` | エージェントが作業中のとき、作業中かを尋ね直す間隔の秒数 |
 | `max_busy_wait_secs` | `43200` | エージェントが作業中でも、この秒数が経ったら止める |
 | `reconcile_interval_secs` | `60` | 動いているランナーと記録を突き合わせる間隔の秒数 |
+| `[github_token]` | github.com 向け | GitHub のトークンを VM に渡す定義（下を参照） |
 | `[policy]` | 空 | すべてのワークスペースに共通の許可リストと規則 |
 | `[runner]` | — | 同じホストの Docker にランナーを置く。`[cluster]` とどちらか一方を書く |
 | `[cluster]` | — | 複数のホスト（`chloe-node`）にランナーを置く |
@@ -42,6 +43,31 @@ systemd で動かすときは、すべて絶対パスで書く。
 "org:acme" = ["alice"]
 "team:acme/dev" = ["alice", "bob"]
 ```
+
+### `[github_token]`
+
+GitHub のトークン（`github_token`）を、VM のどの環境変数に入れ、どの宛先のどのヘッダーで差し替えるかを決める。
+書き方は、[シークレットの定義](usage.md#シークレット)から値を除いたものである。
+欄は一つ（`value`）に限る（値は GitHub App やトークンの登録から決まるため）。
+省くと次の定義を使う。
+
+```toml
+[github_token]
+env = ["GH_TOKEN", "GITHUB_TOKEN"]
+placeholder = "ghu_{id}"
+
+[[github_token.inject]]
+hosts = ["github.com"]
+header = "authorization"
+format = "basic-password"          # git の HTTPS（Basic 認証のパスワード）
+
+[[github_token.inject]]
+hosts = ["api.github.com", "uploads.github.com"]
+header = "authorization"
+```
+
+GitHub Enterprise Server に向けるときは、`hosts` をそのホストに書き換える。
+GitHub App の設定の `api_url` と `web_url` も、同じホストに合わせる。
 
 ### `[policy]`
 
