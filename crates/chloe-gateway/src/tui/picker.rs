@@ -178,6 +178,8 @@ mod tests {
             name: name.into(),
             root: RootMode::Ephemeral,
             running,
+            workspace_disk_gib: 20,
+            docker_disk_gib: 40,
         }
     }
 

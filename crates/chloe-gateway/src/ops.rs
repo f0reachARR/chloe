@@ -71,13 +71,20 @@ pub struct WorkspaceInfo {
     pub name: String,
     pub root: RootMode,
     pub running: bool,
+    /// ワークスペースのディスクの大きさ (GiB)。既定を当てはめたもの。
+    pub workspace_disk_gib: u32,
+    /// Docker のディスクの大きさ (GiB)。既定を当てはめたもの。
+    pub docker_disk_gib: u32,
 }
 
-fn info(ws: &Workspace, running: bool) -> WorkspaceInfo {
+fn info(shared: &Shared, ws: &Workspace, running: bool) -> WorkspaceInfo {
+    let disks = shared.controller.disks();
     WorkspaceInfo {
         name: ws.display_name(),
         root: ws.root_mode,
         running,
+        workspace_disk_gib: disks.workspace_gib(ws.disks),
+        docker_disk_gib: disks.docker_gib(ws.disks),
     }
 }
 
@@ -90,16 +97,18 @@ pub async fn list_workspaces(shared: &Shared, login: &str) -> Result<Vec<Workspa
     let running = shared.controller.running().await?;
     Ok(workspaces
         .iter()
-        .map(|ws| info(ws, running.iter().any(|r| r.id == ws.id)))
+        .map(|ws| info(shared, ws, running.iter().any(|r| r.id == ws.id)))
         .collect())
 }
 
 /// ワークスペースを作る。`root` がなければ、Organization と team の設定の既定を使う。
+/// `disks` で書かなかったディスクは、ゲートウェイの設定の既定の大きさで作る。
 pub async fn create_workspace(
     shared: &Shared,
     login: &str,
     name: &str,
     root: Option<RootMode>,
+    disks: DiskSizes,
 ) -> Result<WorkspaceInfo> {
     let target = WorkspaceRef::parse(name, login).map_err(|e| Error::Invalid(e.to_string()))?;
     if !shared.can_access(login, &target.owner).await? {
@@ -108,6 +117,7 @@ pub async fn create_workspace(
             target.owner
         )));
     }
+    shared.controller.disks().validate_new(disks)?;
     let root = match root {
         Some(root) => root,
         None => {
@@ -122,9 +132,9 @@ pub async fn create_workspace(
     let ws = shared
         .controller
         .store()
-        .create(&target, root, DiskSizes::default(), login)
+        .create(&target, root, disks, login)
         .await?;
-    Ok(info(&ws, false))
+    Ok(info(shared, &ws, false))
 }
 
 /// 利用者が入れるワークスペースを探す。入れないものは、ないものとして扱う。
@@ -145,7 +155,7 @@ pub async fn find_workspace(shared: &Shared, login: &str, name: &str) -> Result<
 pub async fn workspace_info(shared: &Shared, login: &str, name: &str) -> Result<WorkspaceInfo> {
     let ws = find_workspace(shared, login, name).await?;
     let running = shared.controller.running().await?;
-    Ok(info(&ws, running.iter().any(|r| r.id == ws.id)))
+    Ok(info(shared, &ws, running.iter().any(|r| r.id == ws.id)))
 }
 
 pub async fn set_root(
@@ -157,6 +167,24 @@ pub async fn set_root(
     let mut ws = find_workspace(shared, login, name).await?;
     shared.controller.store().set_root_mode(ws.id, root).await?;
     ws.root_mode = root;
+    Ok(ws)
+}
+
+/// ディスクの大きさを変える。書かなかったほうは変えない。小さくはできず、次の起動から効く。
+pub async fn set_disks(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    disks: DiskSizes,
+) -> Result<Workspace> {
+    let mut ws = find_workspace(shared, login, name).await?;
+    let disks = shared.controller.disks().validate_change(ws.disks, disks)?;
+    shared
+        .controller
+        .store()
+        .set_disk_sizes(ws.id, disks)
+        .await?;
+    ws.disks = disks;
     Ok(ws)
 }
 

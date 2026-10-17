@@ -1127,6 +1127,8 @@ mod tests {
             name: "default".into(),
             root: RootMode::Ephemeral,
             running: true,
+            workspace_disk_gib: 20,
+            docker_disk_gib: 40,
         }]));
         let more = app.apply(Outcome::Owners(vec![
             Owner::User("alice".into()),

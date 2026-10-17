@@ -7,9 +7,9 @@
 //! ```text
 //! GET    /v1/me
 //! GET    /v1/workspaces
-//! POST   /v1/workspaces                 {"name": "acme/web", "root": "persistent"}
+//! POST   /v1/workspaces                 {"name": "acme/web", "root": "persistent", "workspace_disk_gib": 50}
 //! GET    /v1/workspaces/{name}          name は SSH と同じ書き方 (acme/dev/tools など)
-//! PATCH  /v1/workspaces/{name}          {"root": "ephemeral"} か {"running": false}
+//! PATCH  /v1/workspaces/{name}          {"root": "ephemeral"}、{"docker_disk_gib": 80} か {"running": false}
 //! DELETE /v1/workspaces/{name}[?disks=true]   disks=true ならディスクも消す
 //! GET    /v1/secrets[?owner=acme]       シークレットの名前の一覧
 //! GET    /v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
@@ -33,7 +33,7 @@ use axum::routing::{delete, get};
 use axum::{Extension, Json, Router};
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::PolicyLayer;
-use chloe_controller::workspace::RootMode;
+use chloe_controller::workspace::{DiskSizes, RootMode};
 use serde::Deserialize;
 use tracing::info;
 
@@ -177,6 +177,10 @@ struct CreateWorkspace {
     name: String,
     #[serde(default)]
     root: Option<RootMode>,
+    #[serde(default)]
+    workspace_disk_gib: Option<u32>,
+    #[serde(default)]
+    docker_disk_gib: Option<u32>,
 }
 
 async fn create_workspace(
@@ -184,7 +188,11 @@ async fn create_workspace(
     Extension(caller): Extension<Caller>,
     Json(body): Json<CreateWorkspace>,
 ) -> Result<Response, ops::Error> {
-    let ws = ops::create_workspace(&shared, &caller.login, &body.name, body.root).await?;
+    let disks = DiskSizes {
+        workspace_gib: body.workspace_disk_gib,
+        docker_gib: body.docker_disk_gib,
+    };
+    let ws = ops::create_workspace(&shared, &caller.login, &body.name, body.root, disks).await?;
     Ok((StatusCode::CREATED, Json(ws)).into_response())
 }
 
@@ -201,6 +209,11 @@ async fn show_workspace(
 struct UpdateWorkspace {
     #[serde(default)]
     root: Option<RootMode>,
+    /// ディスクの大きさ (GiB)。大きくするだけで、次の起動から効く。
+    #[serde(default)]
+    workspace_disk_gib: Option<u32>,
+    #[serde(default)]
+    docker_disk_gib: Option<u32>,
     /// `false` で止める。起動は SSH でつないだときに行うので、`true` は受け付けない。
     #[serde(default)]
     running: Option<bool>,
@@ -216,6 +229,13 @@ async fn update_workspace(
         return Err(ops::Error::Invalid(
             "a workspace starts when you connect to it; only \"running\": false is accepted".into(),
         ));
+    }
+    let disks = DiskSizes {
+        workspace_gib: body.workspace_disk_gib,
+        docker_gib: body.docker_disk_gib,
+    };
+    if disks != DiskSizes::default() {
+        ops::set_disks(&shared, &caller.login, &name, disks).await?;
     }
     if let Some(root) = body.root {
         ops::set_root(&shared, &caller.login, &name, root).await?;

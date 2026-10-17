@@ -3,8 +3,9 @@
 //! ```text
 //! chloe whoami              (接続した利用者の GitHub のログイン名)
 //! chloe ws list
-//! chloe ws create NAME [--root persistent|ephemeral]
+//! chloe ws create NAME [--root persistent|ephemeral] [--workspace 50G] [--docker 80G]
 //! chloe ws root NAME persistent|ephemeral
+//! chloe ws disk NAME [--workspace 50G] [--docker 80G]   (大きくするだけ。次の起動から効く)
 //! chloe ws stop NAME
 //! chloe ws rm NAME [--disks]   (--disks ならランナーのホストのディスクも消す)
 //! chloe secret list [--owner OWNER]
@@ -29,7 +30,7 @@
 
 use chloe_controller::catalog::{self, SecretInput};
 use chloe_controller::runner::PolicyLayer;
-use chloe_controller::workspace::RootMode;
+use chloe_controller::workspace::{DiskSizes, RootMode};
 
 use crate::ops::{self, owner_arg, parse_owner, secret_owner};
 use crate::session::Shared;
@@ -77,14 +78,18 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
     let result = match args.as_slice() {
         ["whoami"] => Ok(format!("{login}\n")),
         ["ws", "list"] => ws_list(shared, login).await,
-        ["ws", "create", name] => ws_create(shared, login, name, None).await,
-        ["ws", "create", name, "--root", mode] => match mode.parse() {
-            Ok(mode) => ws_create(shared, login, name, Some(mode)).await,
-            Err(e) => Err(e.to_string()),
+        ["ws", "create", name, options @ ..] => match parse_ws_options(options, true) {
+            Ok((root, disks)) => ws_create(shared, login, name, root, disks).await,
+            Err(e) => Err(e),
         },
         ["ws", "root", name, mode] => match mode.parse() {
             Ok(mode) => ws_root(shared, login, name, mode).await,
             Err(e) => Err(e.to_string()),
+        },
+        ["ws", "disk", name] => ws_disk_show(shared, login, name).await,
+        ["ws", "disk", name, options @ ..] => match parse_ws_options(options, false) {
+            Ok((_, disks)) => ws_disk(shared, login, name, disks).await,
+            Err(e) => Err(e),
         },
         ["ws", "stop", name] => ws_stop(shared, login, name).await,
         ["ws", "rm", name] => ws_rm(shared, login, name, false).await,
@@ -138,9 +143,45 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nSIZE is in GiB (50G or 50).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
+}
+
+/// `ws create` と `ws disk` のオプション。`--root` は `allow_root` のときだけ受け付ける。
+fn parse_ws_options(
+    options: &[&str],
+    allow_root: bool,
+) -> Result<(Option<RootMode>, DiskSizes), String> {
+    let mut root = None;
+    let mut disks = DiskSizes::default();
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        let mut value = || {
+            options
+                .next()
+                .copied()
+                .ok_or_else(|| format!("{option} needs a value"))
+        };
+        match *option {
+            "--root" if allow_root => root = Some(value()?.parse().map_err(|e| format!("{e}"))?),
+            "--workspace" => disks.workspace_gib = Some(parse_gib(value()?)?),
+            "--docker" => disks.docker_gib = Some(parse_gib(value()?)?),
+            _ => return Err(format!("unknown option: {option}\n{}", help())),
+        }
+    }
+    Ok((root, disks))
+}
+
+/// ディスクの大きさ (`50G`、`50GiB`、`50`。単位は GiB)。
+fn parse_gib(size: &str) -> Result<u32, String> {
+    let number = size
+        .strip_suffix("GiB")
+        .or_else(|| size.strip_suffix('G'))
+        .unwrap_or(size);
+    number
+        .parse()
+        .map_err(|_| format!("invalid size: {size} (write it in GiB, like 50G)"))
 }
 
 /// 操作の失敗をコマンドの表示にする。
@@ -159,7 +200,13 @@ async fn ws_list(shared: &Shared, login: &str) -> Result<String, String> {
         .iter()
         .map(|ws| {
             let state = if ws.running { "running" } else { "stopped" };
-            format!("{}\t{}\t{state}\n", ws.name, ws.root.as_str())
+            format!(
+                "{}\t{}\t{state}\t{}G\t{}G\n",
+                ws.name,
+                ws.root.as_str(),
+                ws.workspace_disk_gib,
+                ws.docker_disk_gib
+            )
         })
         .collect())
 }
@@ -169,8 +216,9 @@ async fn ws_create(
     login: &str,
     name: &str,
     root: Option<RootMode>,
+    disks: DiskSizes,
 ) -> Result<String, String> {
-    let ws = ops::create_workspace(shared, login, name, root)
+    let ws = ops::create_workspace(shared, login, name, root, disks)
         .await
         .map_err(shown)?;
     Ok(format!("created {}\n", ws.name))
@@ -189,6 +237,35 @@ async fn ws_root(
         "{} will use the {} root from the next start (run `chloe ws stop {}` to restart now)\n",
         ws.display_name(),
         root.as_str(),
+        ws.display_name()
+    ))
+}
+
+async fn ws_disk_show(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
+    let ws = ops::workspace_info(shared, login, name)
+        .await
+        .map_err(shown)?;
+    Ok(format!(
+        "workspace\t{}G\ndocker\t{}G\n",
+        ws.workspace_disk_gib, ws.docker_disk_gib
+    ))
+}
+
+async fn ws_disk(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    disks: DiskSizes,
+) -> Result<String, String> {
+    let ws = ops::set_disks(shared, login, name, disks)
+        .await
+        .map_err(shown)?;
+    let config = shared.controller.disks();
+    Ok(format!(
+        "{} will have a {}G workspace disk and a {}G Docker disk from the next start (run `chloe ws stop {}` to restart now)\n",
+        ws.display_name(),
+        config.workspace_gib(ws.disks),
+        config.docker_gib(ws.disks),
         ws.display_name()
     ))
 }
@@ -445,5 +522,20 @@ mod tests {
         assert!(needs_stdin(&["secret".into(), "set".into(), "x".into()]));
         assert!(needs_stdin(&["policy".into(), "set".into(), "acme".into()]));
         assert!(!needs_stdin(&["ws".into(), "list".into()]));
+    }
+
+    #[test]
+    fn parses_workspace_options() {
+        let (root, disks) =
+            parse_ws_options(&["--workspace", "50G", "--root", "persistent"], true).unwrap();
+        assert_eq!(root, Some(RootMode::Persistent));
+        assert_eq!(disks.workspace_gib, Some(50));
+        assert_eq!(disks.docker_gib, None);
+        let (_, disks) = parse_ws_options(&["--docker", "80GiB"], false).unwrap();
+        assert_eq!(disks.docker_gib, Some(80));
+        assert_eq!(parse_gib("30"), Ok(30));
+        assert!(parse_gib("1T").is_err());
+        assert!(parse_ws_options(&["--root", "persistent"], false).is_err());
+        assert!(parse_ws_options(&["--workspace"], true).is_err());
     }
 }

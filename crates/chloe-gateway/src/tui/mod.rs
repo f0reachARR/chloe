@@ -153,7 +153,7 @@ async fn perform(
                 Outcome::Workspaces(ops::list_workspaces(shared, login).await.map_err(shown)?)
             }
             Action::CreateWorkspace { name, root } => {
-                let ws = ops::create_workspace(shared, login, &name, root)
+                let ws = ops::create_workspace(shared, login, &name, root, Default::default())
                     .await
                     .map_err(shown)?;
                 done(format!("created {}", ws.name), vec![Action::LoadWorkspaces])
