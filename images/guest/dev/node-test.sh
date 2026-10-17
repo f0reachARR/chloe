@@ -170,6 +170,12 @@ check other-node-fine "user" as alice 'id -un'
 start_node n2
 check back-again "user" as bob 'id -un'
 
+section "orphans and node removal"
+docker run -d --name chloe-n1-ws-999 ubuntu:26.04 sleep 600 >/dev/null
+wait_until 20 bash -c '[ -z "$(docker ps -q --filter "name=^chloe-n1-ws-999\$")" ]' || true
+check orphan-stopped-on-node "gone" sh -c '[ -z "$(docker ps -q --filter "name=^chloe-n1-ws-999\$")" ] && echo gone'
+check node-rm-refused "placed on n1" sh -c '"$0" --config "$1" node rm n1 2>&1 || true' "$gateway" "$work/gateway.toml"
+
 section "gateway restart"
 kill "$gateway_pid"; wait "$gateway_pid" 2>/dev/null || true
 start_gateway

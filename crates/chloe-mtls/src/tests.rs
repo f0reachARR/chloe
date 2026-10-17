@@ -98,6 +98,36 @@ async fn ca_is_fetched_only_with_the_right_fingerprint() {
     assert!(fetch_ca(&url, &"0".repeat(64)).await.is_err());
 }
 
+#[tokio::test]
+async fn plain_tls_does_not_ask_for_client_certificates() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = Ca::load_or_create(dir.path()).unwrap();
+    let server = ca.issue(&Role::ControlPlane, &names()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = tls_server_config(&server.cert_pem, &server.key_pem).unwrap();
+    tokio::spawn(serve(
+        listener,
+        config,
+        Router::new().route("/whoami", get(whoami)),
+    ));
+    // 証明書を出すクライアントでも、役割は読まない (求めていないので送られない)。
+    for client in [
+        client_trusting(ca.cert_pem()).unwrap(),
+        client(&server).unwrap(),
+    ] {
+        let body = client
+            .get(format!("https://127.0.0.1:{port}/whoami"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "None");
+    }
+}
+
 #[test]
 fn node_names() {
     assert!(valid_node_name("node-1"));
