@@ -346,6 +346,69 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// 管理 API のトークンを作り、(ID, トークン) を返す。トークンはここでしか見えない。
+    pub async fn create_api_token(
+        &self,
+        login: &str,
+        name: &str,
+        ttl_secs: Option<i64>,
+    ) -> Result<(i64, String), Error> {
+        let token = format!("chloe_{}", random_token());
+        let row = sqlx::query(
+            "INSERT INTO api_tokens (login, name, token_hash, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+        )
+        .bind(login)
+        .bind(name)
+        .bind(token_hash(&token))
+        .bind(now())
+        .bind(ttl_secs.map(|ttl| now() + ttl))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((row.try_get("id")?, token))
+    }
+
+    /// 有効な (失効しておらず、期限内の) トークンの持ち主を返し、使った時刻を記録する。
+    pub async fn authenticate_api_token(&self, token: &str) -> Result<Option<ApiToken>, Error> {
+        let row = sqlx::query(
+            "UPDATE api_tokens SET last_used_at = ?2
+             WHERE token_hash = ?1 AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?2)
+             RETURNING id, login, name, created_at, expires_at, last_used_at",
+        )
+        .bind(token_hash(token))
+        .bind(now())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| api_token(&row)).transpose()
+    }
+
+    /// 利用者の、失効していないトークンの一覧。
+    pub async fn api_tokens(&self, login: &str) -> Result<Vec<ApiToken>, Error> {
+        let rows = sqlx::query(
+            "SELECT id, login, name, created_at, expires_at, last_used_at FROM api_tokens
+             WHERE login = ?1 AND revoked_at IS NULL ORDER BY id",
+        )
+        .bind(login)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(api_token).collect()
+    }
+
+    /// 利用者のトークンを失効させる。失効させたら `true`。
+    pub async fn revoke_api_token(&self, login: &str, id: i64) -> Result<bool, Error> {
+        let result = sqlx::query(
+            "UPDATE api_tokens SET revoked_at = ?3
+             WHERE id = ?1 AND login = ?2 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .bind(login)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// シークレットの名前からプレースホルダーへの対応。
     pub async fn placeholders(&self, id: i64) -> Result<BTreeMap<String, String>, Error> {
         let rows = sqlx::query(
@@ -396,6 +459,28 @@ fn new_placeholder(prefix: &str) -> String {
         "{prefix}chloe{}",
         URL_SAFE_NO_PAD.encode(random).replace(['-', '_'], "x")
     )
+}
+
+/// 管理 API のトークン (値は含まない)。時刻は UNIX 時刻の秒。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ApiToken {
+    pub id: i64,
+    pub login: String,
+    pub name: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub last_used_at: Option<i64>,
+}
+
+fn api_token(row: &sqlx::sqlite::SqliteRow) -> Result<ApiToken, Error> {
+    Ok(ApiToken {
+        id: row.try_get("id")?,
+        login: row.try_get("login")?,
+        name: row.try_get("name")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        last_used_at: row.try_get("last_used_at")?,
+    })
 }
 
 /// ランナーのホスト。
@@ -480,6 +565,31 @@ pub(crate) mod tests {
         store.delete(ws.id).await.unwrap();
         assert_eq!(store.find(&api).await.unwrap(), None);
         assert!(store.placeholders(ws.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_tokens_expire_and_revoke() {
+        let store = Store::new(pool().await);
+        let (id, token) = store.create_api_token("alice", "ci", None).await.unwrap();
+        assert!(token.starts_with("chloe_"));
+        let found = store.authenticate_api_token(&token).await.unwrap().unwrap();
+        assert_eq!((found.id, found.login.as_str()), (id, "alice"));
+        assert!(found.last_used_at.is_some());
+        assert_eq!(
+            store.authenticate_api_token("chloe_wrong").await.unwrap(),
+            None
+        );
+        let (_, expired) = store
+            .create_api_token("alice", "old", Some(-1))
+            .await
+            .unwrap();
+        assert_eq!(store.authenticate_api_token(&expired).await.unwrap(), None);
+        assert_eq!(store.api_tokens("alice").await.unwrap().len(), 2);
+        // ほかの利用者のトークンは失効させられない。
+        assert!(!store.revoke_api_token("bob", id).await.unwrap());
+        assert!(store.revoke_api_token("alice", id).await.unwrap());
+        assert_eq!(store.authenticate_api_token(&token).await.unwrap(), None);
+        assert_eq!(store.api_tokens("alice").await.unwrap().len(), 1);
     }
 
     #[tokio::test]
