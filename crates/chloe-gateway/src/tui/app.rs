@@ -6,7 +6,7 @@
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::PolicyLayer;
 use chloe_controller::store::{ApiToken, SshKey};
-use chloe_controller::workspace::RootMode;
+use chloe_controller::workspace::{DiskSizes, RootMode};
 use chloe_secrets::Owner;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -26,6 +26,11 @@ pub enum Action {
     CreateWorkspace {
         name: String,
         root: Option<RootMode>,
+        disks: DiskSizes,
+    },
+    SetDisks {
+        name: String,
+        disks: DiskSizes,
     },
     SetRoot {
         name: String,
@@ -79,6 +84,7 @@ impl Action {
         Some(match self {
             Self::CreateWorkspace { .. } => "ws create",
             Self::SetRoot { .. } => "ws root",
+            Self::SetDisks { .. } => "ws disk",
             Self::StopWorkspace(_) => "ws stop",
             Self::RemoveWorkspace { .. } => "ws rm",
             Self::SaveSecret { .. } => "secret set",
@@ -166,7 +172,7 @@ impl Tab {
 
     fn hints(self) -> &'static str {
         match self {
-            Self::Workspaces => "n new  r switch root  s stop  d delete",
+            Self::Workspaces => "n new  r switch root  g disks  s stop  d delete",
             Self::Secrets => "o owner  n new  Enter edit  d delete",
             Self::Settings => "Enter edit  d delete",
             Self::Tokens => "n new  d revoke",
@@ -180,6 +186,12 @@ impl Tab {
 #[derive(Clone, Debug)]
 enum Purpose {
     NewWorkspace,
+    /// ワークスペースのディスクの大きさ。開いたときの大きさを持ち、変えた欄だけを送る。
+    Disks {
+        name: String,
+        workspace_gib: u32,
+        docker_gib: u32,
+    },
     Secret {
         owner: Owner,
         /// 登録したものを編集するなら、その名前。
@@ -388,11 +400,45 @@ impl App {
                             "(settings default)",
                         )
                         .help("persistent keeps changes to the root file system (apt install) across restarts."),
+                        Field::text("workspace", "Workspace disk", "")
+                            .help("in GiB, like 50G. Empty for the default. Holds /workspace and the home directory."),
+                        Field::text("docker", "Docker disk", "")
+                            .help("in GiB, like 80G. Empty for the default. Holds Docker images and containers."),
                     ],
                 ),
                 purpose: Purpose::NewWorkspace,
                 saving: false,
             }),
+            (Tab::Workspaces, KeyCode::Char('g')) => {
+                if let Some(ws) = self.workspaces.get(selected) {
+                    let help = "in GiB. Disks only grow; the new size applies from the next start.";
+                    self.modals.push(Modal::Form {
+                        form: Form::new(
+                            format!("Disks of {}", ws.name),
+                            vec![
+                                Field::text(
+                                    "workspace",
+                                    "Workspace disk",
+                                    &format!("{}G", ws.workspace_disk_gib),
+                                )
+                                .help(help),
+                                Field::text(
+                                    "docker",
+                                    "Docker disk",
+                                    &format!("{}G", ws.docker_disk_gib),
+                                )
+                                .help(help),
+                            ],
+                        ),
+                        purpose: Purpose::Disks {
+                            name: ws.name.clone(),
+                            workspace_gib: ws.workspace_disk_gib,
+                            docker_gib: ws.docker_disk_gib,
+                        },
+                        saving: false,
+                    });
+                }
+            }
             (Tab::Workspaces, KeyCode::Char('d')) => {
                 if let Some(ws) = self.workspaces.get(selected) {
                     self.modals.push(Modal::RemoveWorkspace {
@@ -839,7 +885,13 @@ impl App {
                 .iter()
                 .map(|ws| {
                     let state = if ws.running { "running" } else { "stopped" };
-                    ListItem::new(format!("{:<32} {:<11} {state}", ws.name, ws.root.as_str()))
+                    ListItem::new(format!(
+                        "{:<32} {:<11} {state:<8} {}G/{}G",
+                        ws.name,
+                        ws.root.as_str(),
+                        ws.workspace_disk_gib,
+                        ws.docker_disk_gib
+                    ))
                 })
                 .collect(),
             Tab::Secrets => {
@@ -909,6 +961,17 @@ impl App {
     }
 }
 
+/// ディスクの大きさの欄。空なら `None`。
+fn optional_gib(form: &Form, key: &str) -> Result<Option<u32>, String> {
+    let text = form.text(key);
+    if text.is_empty() {
+        return Ok(None);
+    }
+    crate::ops::parse_gib(&text)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 /// フォームを、保存する操作にする。
 fn submit(form: &Form, purpose: &Purpose) -> Result<Action, String> {
     match purpose {
@@ -922,7 +985,31 @@ fn submit(form: &Form, purpose: &Purpose) -> Result<Action, String> {
                 "persistent" => Some(RootMode::Persistent),
                 _ => None,
             };
-            Ok(Action::CreateWorkspace { name, root })
+            let disks = DiskSizes {
+                workspace_gib: optional_gib(form, "workspace")?,
+                docker_gib: optional_gib(form, "docker")?,
+            };
+            Ok(Action::CreateWorkspace { name, root, disks })
+        }
+        Purpose::Disks {
+            name,
+            workspace_gib,
+            docker_gib,
+        } => {
+            // 変えなかった欄は送らない (既定のままのディスクを、今の既定の値に固定しない)。
+            let changed =
+                |key, now| Ok::<_, String>(optional_gib(form, key)?.filter(|gib| *gib != now));
+            let disks = DiskSizes {
+                workspace_gib: changed("workspace", *workspace_gib)?,
+                docker_gib: changed("docker", *docker_gib)?,
+            };
+            if disks == DiskSizes::default() {
+                return Err("change a size".into());
+            }
+            Ok(Action::SetDisks {
+                name: name.clone(),
+                disks,
+            })
         }
         Purpose::Secret {
             owner,
@@ -1161,6 +1248,32 @@ mod tests {
     }
 
     #[test]
+    fn grows_disks_with_a_form() {
+        let mut app = app();
+        assert!(screen(&app).contains("20G/40G"));
+        app.handle_key(key(KeyCode::Char('g')));
+        // 今の大きさが入っている。変えた欄だけを送る。
+        for _ in 0.."20G".len() {
+            form_mut(&mut app).handle_key(key(KeyCode::Backspace));
+        }
+        type_text(form_mut(&mut app), "50G");
+        let actions = app.handle_key(ctrl('s'));
+        assert!(matches!(
+            &actions[..],
+            [Action::SetDisks { name, disks }] if name == "default"
+                && *disks == DiskSizes { workspace_gib: Some(50), docker_gib: None }
+        ));
+        // 何も変えなければ送らない。
+        app.apply(Outcome::Done {
+            message: "ok".into(),
+            reload: vec![],
+        });
+        app.handle_key(key(KeyCode::Char('g')));
+        assert!(app.handle_key(ctrl('s')).is_empty());
+        assert!(screen(&app).contains("change a size"));
+    }
+
+    #[test]
     fn creates_a_workspace_with_a_form() {
         let mut app = app();
         app.handle_key(key(KeyCode::Char('n')));
@@ -1170,7 +1283,8 @@ mod tests {
         let actions = app.handle_key(ctrl('s'));
         assert!(matches!(
             &actions[..],
-            [Action::CreateWorkspace { name, root: Some(RootMode::Ephemeral) }] if name == "api"
+            [Action::CreateWorkspace { name, root: Some(RootMode::Ephemeral), disks }]
+                if name == "api" && *disks == DiskSizes::default()
         ));
         // 失敗すると、フォームに理由を出して開いたままにする。
         app.apply(Outcome::Failed("already exists: api".into()));

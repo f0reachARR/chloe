@@ -490,6 +490,17 @@ pub async fn remove_policy(shared: &Shared, login: &str, owner: &Owner) -> Resul
     Ok(shared.refresh_running_under(owner).await)
 }
 
+/// ディスクの大きさ (`50G`、`50GiB`、`50`。単位は GiB)。
+pub fn parse_gib(size: &str) -> Result<u32> {
+    let number = size
+        .strip_suffix("GiB")
+        .or_else(|| size.strip_suffix('G'))
+        .unwrap_or(size);
+    number
+        .parse()
+        .map_err(|_| Error::Invalid(format!("invalid size: {size} (write it in GiB, like 50G)")))
+}
+
 /// `30d`、`12h` のような期間を秒にする。
 pub fn parse_duration(text: &str) -> Result<i64> {
     let invalid = || Error::Invalid(format!("invalid duration: {text} (use e.g. 30d or 12h)"));
@@ -585,6 +596,15 @@ mod tests {
         assert!(parse_duration("0d").is_err());
         assert!(parse_duration("5m").is_err());
         assert!(parse_duration("d").is_err());
+    }
+
+    #[test]
+    fn parses_disk_sizes() {
+        assert_eq!(parse_gib("50G").unwrap(), 50);
+        assert_eq!(parse_gib("80GiB").unwrap(), 80);
+        assert_eq!(parse_gib("30").unwrap(), 30);
+        assert!(parse_gib("1T").is_err());
+        assert!(parse_gib("-1").is_err());
     }
 
     const HF: &str = r#"

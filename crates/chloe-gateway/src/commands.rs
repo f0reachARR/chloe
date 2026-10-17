@@ -165,23 +165,12 @@ fn parse_ws_options(
         };
         match *option {
             "--root" if allow_root => root = Some(value()?.parse().map_err(|e| format!("{e}"))?),
-            "--workspace" => disks.workspace_gib = Some(parse_gib(value()?)?),
-            "--docker" => disks.docker_gib = Some(parse_gib(value()?)?),
+            "--workspace" => disks.workspace_gib = Some(ops::parse_gib(value()?).map_err(shown)?),
+            "--docker" => disks.docker_gib = Some(ops::parse_gib(value()?).map_err(shown)?),
             _ => return Err(format!("unknown option: {option}\n{}", help())),
         }
     }
     Ok((root, disks))
-}
-
-/// ディスクの大きさ (`50G`、`50GiB`、`50`。単位は GiB)。
-fn parse_gib(size: &str) -> Result<u32, String> {
-    let number = size
-        .strip_suffix("GiB")
-        .or_else(|| size.strip_suffix('G'))
-        .unwrap_or(size);
-    number
-        .parse()
-        .map_err(|_| format!("invalid size: {size} (write it in GiB, like 50G)"))
 }
 
 /// 操作の失敗をコマンドの表示にする。
@@ -533,8 +522,6 @@ mod tests {
         assert_eq!(disks.docker_gib, None);
         let (_, disks) = parse_ws_options(&["--docker", "80GiB"], false).unwrap();
         assert_eq!(disks.docker_gib, Some(80));
-        assert_eq!(parse_gib("30"), Ok(30));
-        assert!(parse_gib("1T").is_err());
         assert!(parse_ws_options(&["--root", "persistent"], false).is_err());
         assert!(parse_ws_options(&["--workspace"], true).is_err());
     }

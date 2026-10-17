@@ -152,8 +152,8 @@ async fn perform(
             Action::LoadWorkspaces => {
                 Outcome::Workspaces(ops::list_workspaces(shared, login).await.map_err(shown)?)
             }
-            Action::CreateWorkspace { name, root } => {
-                let ws = ops::create_workspace(shared, login, &name, root, Default::default())
+            Action::CreateWorkspace { name, root, disks } => {
+                let ws = ops::create_workspace(shared, login, &name, root, disks)
                     .await
                     .map_err(shown)?;
                 done(format!("created {}", ws.name), vec![Action::LoadWorkspaces])
@@ -167,6 +167,21 @@ async fn perform(
                         "{} will use the {} root from the next start",
                         ws.display_name(),
                         root.as_str()
+                    ),
+                    vec![Action::LoadWorkspaces],
+                )
+            }
+            Action::SetDisks { name, disks } => {
+                let ws = ops::set_disks(shared, login, &name, disks)
+                    .await
+                    .map_err(shown)?;
+                let config = shared.controller.disks();
+                done(
+                    format!(
+                        "{} will have a {}G workspace disk and a {}G Docker disk from the next start",
+                        ws.display_name(),
+                        config.workspace_gib(ws.disks),
+                        config.docker_gib(ws.disks)
                     ),
                     vec![Action::LoadWorkspaces],
                 )
