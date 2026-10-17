@@ -34,6 +34,7 @@ SSH がコードを表示するので、`https://github.com/login/device` で入
 ワークスペースごとに一つの VM がある。
 
 - **OS と利用者**：Ubuntu 26.04。利用者は `user` で、`sudo` を使える。
+- **ホスト名**：ワークスペースの名前になり、プロンプトに出る（`acme/dev/tools` は `acme-dev-tools`）。正確な名前は環境変数 `CHLOE_WORKSPACE` にある。
 - **入っているもの**：Claude Code、Codex、Docker、git、Python 3、curl、tmux など。
 - **残るもの**：`/workspace` と、ホームディレクトリ（`/home/user`）は、ワークスペースのディスクにあり、VM を止めても残る。Docker のイメージとコンテナのデータも、別のディスクに残る。
 - **残らないもの**：ルートファイルシステムへの変更（`apt install` で入れたものなど）は、既定では VM を止めると消える。残したいときは、ワークスペースのルートの扱いを `persistent` にする（`chloe ws root <名前> persistent`）。
