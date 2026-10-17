@@ -5,10 +5,12 @@
 
 mod app;
 mod form;
+mod picker;
 mod policy_form;
 mod secret_form;
 mod term;
 
+use std::io;
 use std::sync::Arc;
 
 use chloe_agent_proto::{ClientMessage, WindowSize};
@@ -20,6 +22,8 @@ use russh::server::Handle;
 use terminput::{Event, KeyEventKind};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+
+pub use self::picker::{Picked, Picker, pick};
 
 use self::app::{Action, App, Outcome};
 use self::term::{ENTER, InputParser, LEAVE, Output, SshBackend};
@@ -42,13 +46,7 @@ pub async fn run(
         async move { handle.data(channel, data).await.is_ok() }
     };
     let output = Output::default();
-    let size = Size::new(size.cols, size.rows);
-    let mut terminal = match Terminal::with_options(
-        SshBackend::new(output.clone(), size),
-        TerminalOptions {
-            viewport: Viewport::Fixed(Rect::from((ratatui::layout::Position::ORIGIN, size))),
-        },
-    ) {
+    let mut terminal = match terminal(output.clone(), Size::new(size.cols, size.rows)) {
         Ok(terminal) => terminal,
         Err(error) => {
             warn!("failed to start the TUI: {error}");
@@ -86,10 +84,7 @@ pub async fn run(
                     }
                 }
                 Some(ClientMessage::Resize(size)) => {
-                    let size = Size::new(size.cols, size.rows);
-                    terminal.backend_mut().set_size(size);
-                    let area = Rect::from((ratatui::layout::Position::ORIGIN, size));
-                    if terminal.resize(area).and_then(|()| terminal.clear()).is_err() {
+                    if resize(&mut terminal, size).is_err() {
                         break;
                     }
                 }
@@ -105,6 +100,24 @@ pub async fn run(
     let _ = send(output.take()).await;
     let _ = send(LEAVE.to_vec()).await;
     0
+}
+
+/// SSH のチャネルに描く、画面全体を使う端末。
+fn terminal(output: Output, size: Size) -> io::Result<Terminal<SshBackend>> {
+    Terminal::with_options(
+        SshBackend::new(output, size),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::from((ratatui::layout::Position::ORIGIN, size))),
+        },
+    )
+}
+
+/// 端末の大きさが変わった。描き直すため、画面を消しておく。
+fn resize(terminal: &mut Terminal<SshBackend>, size: WindowSize) -> io::Result<()> {
+    let size = Size::new(size.cols, size.rows);
+    terminal.backend_mut().set_size(size);
+    terminal.resize(Rect::from((ratatui::layout::Position::ORIGIN, size)))?;
+    terminal.clear()
 }
 
 fn spawn_all(
