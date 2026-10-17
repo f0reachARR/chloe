@@ -43,10 +43,14 @@ pub enum Error {
 pub struct AppConfig {
     pub app_id: u64,
     pub client_id: String,
-    /// 使う Organization を一つに限るときに指定する。なければ、アプリをインストールした
-    /// すべての Organization を使う。
+    /// 使う Organization を一つに限るときに指定する (`organizations` の一つだけの書き方)。
     #[serde(default)]
     pub organization: Option<String>,
+    /// 使う Organization を限るときに指定する。`organization` とどちらもなければ、アプリを
+    /// インストールしたすべての Organization を使う。アプリを公開して (だれでもインストール
+    /// できるようにして) 使うときは、ここで限る。
+    #[serde(default)]
+    pub organizations: Option<Vec<String>>,
     /// 秘密鍵 (PEM) への参照 (`file:`、`op://` など)。
     pub private_key: String,
     #[serde(default = "default_api_url")]
@@ -64,6 +68,16 @@ fn default_web_url() -> String {
 }
 
 impl AppConfig {
+    /// 設定で使う Organization を限っていれば、`org` がそのどれかか。限っていなければ `true`。
+    fn allows(&self, org: &str) -> bool {
+        let listed: Vec<&String> = self
+            .organization
+            .iter()
+            .chain(self.organizations.iter().flatten())
+            .collect();
+        listed.is_empty() || listed.iter().any(|o| o.eq_ignore_ascii_case(org))
+    }
+
     pub fn load(path: &Path) -> Result<Self, Error> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
@@ -249,11 +263,7 @@ impl GitHubApp {
             let last = entries.len() < 100;
             for entry in entries {
                 let org = entry.account.login.to_ascii_lowercase();
-                let wanted = self
-                    .config
-                    .organization
-                    .as_deref()
-                    .is_none_or(|only| only.eq_ignore_ascii_case(&org));
+                let wanted = self.config.allows(&org);
                 if entry.account.kind == "Organization" && wanted {
                     installations.insert(org, entry.id);
                 }

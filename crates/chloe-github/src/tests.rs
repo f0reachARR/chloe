@@ -78,6 +78,7 @@ async fn app(url: &str) -> GitHubApp {
         app_id: 123,
         client_id: "Iv-test".into(),
         organization: None,
+        organizations: None,
         private_key: format!("file:{key}"),
         api_url: url.into(),
         web_url: url.into(),
@@ -236,6 +237,7 @@ async fn organization_setting_limits_installations() {
         app_id: 123,
         client_id: "Iv-test".into(),
         organization: Some("acme".into()),
+        organizations: None,
         private_key: format!("file:{key}"),
         api_url: url.clone(),
         web_url: url,
@@ -245,6 +247,24 @@ async fn organization_setting_limits_installations() {
         .unwrap();
     assert_eq!(app.organizations().await.unwrap(), ["acme"]);
     assert!(!app.is_member_of_any("bob").await.unwrap());
+}
+
+#[test]
+fn organizations_setting() {
+    let config = |organization: Option<&str>, organizations: Option<Vec<&str>>| AppConfig {
+        app_id: 1,
+        client_id: "c".into(),
+        organization: organization.map(Into::into),
+        organizations: organizations.map(|o| o.into_iter().map(Into::into).collect()),
+        private_key: "file:/dev/null".into(),
+        api_url: String::new(),
+        web_url: String::new(),
+    };
+    assert!(config(None, None).allows("anything"));
+    assert!(config(Some("Acme"), None).allows("acme"));
+    assert!(!config(Some("acme"), None).allows("beta"));
+    let both = config(None, Some(vec!["acme", "beta"]));
+    assert!(both.allows("BETA") && !both.allows("gamma"));
 }
 
 #[tokio::test]
