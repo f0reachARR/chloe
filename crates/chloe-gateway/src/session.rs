@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -139,6 +140,8 @@ pub struct Connection {
     /// ワークスペースを書かずに入って選んだワークスペース。この接続のあとのシェルやポート転送も
     /// ここに入る。
     chosen: ChosenWorkspace,
+    /// 認証を通ったか。接続が終わったあと、受け付けた側が ban のために見る。
+    authenticated: Arc<AtomicBool>,
 }
 
 type ChosenWorkspace = Arc<std::sync::Mutex<Option<String>>>;
@@ -156,7 +159,18 @@ impl Connection {
             device_flow_started: false,
             forwarding: Arc::default(),
             chosen: Arc::default(),
+            authenticated: Arc::default(),
         }
+    }
+
+    /// 認証を通ったかを、接続が終わったあとに読むためのフラグ。
+    pub fn authenticated(&self) -> Arc<AtomicBool> {
+        self.authenticated.clone()
+    }
+
+    fn accept_user(&mut self, user: Authenticated) {
+        self.user = Some(user);
+        self.authenticated.store(true, Ordering::Relaxed);
     }
 
     /// ログイン名とワークスペースだけで判断できる確認。利用者がこのサーバーを使えて、
@@ -475,7 +489,7 @@ impl russh::server::Handler for Connection {
                     .store()
                     .touch_ssh_key(&fingerprint(public_key))
                     .await;
-                self.user = Some(authenticated);
+                self.accept_user(authenticated);
                 Ok(Auth::Accept)
             }
             // 鍵は通したことにして (部分的な成功)、Device Flow だけを続けさせる。
@@ -576,7 +590,7 @@ impl russh::server::Handler for Connection {
                     "device_flow"
                 };
                 info!(target: "audit", peer = %peer_name(self.peer), login = %authenticated.login, workspace = authenticated.workspace.as_deref().unwrap_or(DEFAULT_WORKSPACE), method, "authenticated");
-                self.user = Some(authenticated);
+                self.accept_user(authenticated);
                 Ok(Auth::Accept)
             }
             Ok(None) => {

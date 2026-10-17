@@ -90,6 +90,14 @@ action = "passthrough"
 # max_workspace_gib = 200
 # max_docker_gib = 400
 
+# 認証を通らない SSH の接続 (失敗も、何もせずに切ったのも) が window_secs のあいだに max_failures 回
+# に達した接続元を、ban_secs のあいだ受け付けない。max_failures = 0 で使わない。
+# [ban]
+# max_failures = 10
+# window_secs = 600
+# ban_secs = 600
+# ignore = ["127.0.0.0/8", "::1", "10.0.0.0/8"]  # 監視やヘルスチェックの接続元
+
 # 同じホストの Docker でランナーを動かす。
 [runner]
 guest_dir = "/usr/local/lib/chloe/guest"

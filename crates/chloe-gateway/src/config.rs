@@ -9,6 +9,8 @@ use chloe_controller::runner::BasePolicy;
 use chloe_controller::workspace::DiskConfig;
 use serde::Deserialize;
 
+use crate::ban::BanConfig;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -77,6 +79,9 @@ pub struct Config {
     /// HTTP(S) の管理 API。なければ待ち受けない。
     #[serde(default)]
     pub api: Option<ApiConfig>,
+    /// 認証を通らずに終わった SSH の接続が多い接続元を、しばらく受け付けない。
+    #[serde(default)]
+    pub ban: BanConfig,
 }
 
 /// HTTP(S) の管理 API の設定。
@@ -181,6 +186,40 @@ mod tests {
         assert!(config.is_allowed("alice"));
         assert!(!config.is_allowed("bob"));
         assert_eq!(config.runner.unwrap().image, "chloe-dev-runner");
+        assert_eq!(config.ban.max_failures, 10);
+    }
+
+    #[test]
+    fn parses_ban() {
+        let config: Config = toml::from_str(
+            r#"
+            listen = "127.0.0.1:2222"
+            host_key = "host_key"
+            database = "chloe.db"
+            master_key = "master.key"
+
+            [ban]
+            max_failures = 3
+            ignore = ["10.0.0.0/8", "192.0.2.1"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.ban.max_failures, 3);
+        assert_eq!(config.ban.window_secs, 600);
+        assert!(config.ban.ignore[1].contains("192.0.2.1".parse().unwrap()));
+        assert!(
+            toml::from_str::<Config>(
+                r#"
+                listen = "127.0.0.1:2222"
+                host_key = "host_key"
+                database = "chloe.db"
+                master_key = "master.key"
+                [ban]
+                ignore = ["10.0.0.0/40"]
+                "#,
+            )
+            .is_err()
+        );
     }
 
     #[test]

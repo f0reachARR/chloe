@@ -7,6 +7,7 @@ mod access;
 mod api;
 mod auth;
 mod backend;
+mod ban;
 mod commands;
 mod config;
 mod device_flow;
@@ -28,11 +29,11 @@ use chloe_secrets::{MasterKey, SecretDb};
 use clap::Parser;
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey};
-use russh::server::Server as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::auth::GitHubKeys;
 use crate::backend::Backend;
+use crate::ban::Bans;
 use crate::config::Config;
 use crate::session::{Connection, Shared};
 
@@ -192,10 +193,61 @@ async fn main() -> Result<()> {
             }
         }
     });
+    let bans = Arc::new(Bans::new(shared.config.ban.clone()));
+    let pruner = bans.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            pruner.prune(std::time::Instant::now());
+        }
+    });
+    let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(%listen, "listening");
-    let mut server = Server { shared };
-    server.run_on_address(ssh_config, listen).await?;
-    Ok(())
+    serve_ssh(listener, ssh_config, shared, bans).await
+}
+
+/// SSH の接続を受け付ける。ban している接続元は、SSH を始める前に切る。認証を通らずに終わった
+/// 接続 (認証に失敗した接続も、何もせずに切った接続も) を接続元ごとに数える。
+async fn serve_ssh(
+    listener: tokio::net::TcpListener,
+    config: Arc<russh::server::Config>,
+    shared: Arc<Shared>,
+    bans: Arc<Bans>,
+) -> Result<()> {
+    loop {
+        let (socket, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // ファイル記述子が尽きたときなど。少し待ってから受け付け直す。
+                tracing::warn!("failed to accept an SSH connection: {error}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        if bans.is_banned(peer.ip(), std::time::Instant::now()) {
+            tracing::debug!(%peer, "refused a banned peer");
+            continue;
+        }
+        let connection = Connection::new(shared.clone(), Some(peer));
+        let authenticated = connection.authenticated();
+        let config = config.clone();
+        let bans = bans.clone();
+        tokio::spawn(async move {
+            let result = match russh::server::run_stream(config, socket, connection).await {
+                Ok(session) => session.await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                tracing::debug!(%peer, "SSH connection closed: {error}");
+            }
+            if authenticated.load(std::sync::atomic::Ordering::Relaxed) {
+                bans.succeed(peer.ip());
+            } else if let Some(ban) = bans.fail(peer.ip(), std::time::Instant::now()) {
+                tracing::warn!(target: "audit", peer = %peer.ip(), ban_secs = ban.as_secs(), "banned after repeated unauthenticated connections");
+            }
+        });
+    }
 }
 
 /// 複数のホストで動かすときの、内部 API の設定、CA、コントロールプレーンの証明書。
@@ -344,18 +396,6 @@ async fn node_command(config: &Config, command: NodeCommand) -> Result<()> {
         }
     }
     Ok(())
-}
-
-struct Server {
-    shared: Arc<Shared>,
-}
-
-impl russh::server::Server for Server {
-    type Handler = Connection;
-
-    fn new_client(&mut self, peer: Option<std::net::SocketAddr>) -> Connection {
-        Connection::new(self.shared.clone(), peer)
-    }
 }
 
 /// 先頭の `~/` をホームディレクトリに直す。
