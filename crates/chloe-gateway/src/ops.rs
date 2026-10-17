@@ -5,7 +5,7 @@
 
 use chloe_controller::catalog::{self, SecretInput, SecretSpec};
 use chloe_controller::runner::{PolicyLayer, most_specific};
-use chloe_controller::store::ApiToken;
+use chloe_controller::store::{ApiToken, SshKey};
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
 use chloe_secrets::Owner;
 use serde::Serialize;
@@ -455,6 +455,25 @@ pub async fn revoke_token(shared: &Shared, login: &str, id: i64) -> Result<()> {
         Ok(())
     } else {
         Err(Error::NotFound(format!("no such token: {id}")))
+    }
+}
+
+/// Device Flow で利用者に結び付けた SSH の公開鍵。
+pub async fn list_ssh_keys(shared: &Shared, login: &str) -> Result<Vec<SshKey>> {
+    Ok(shared.controller.store().ssh_keys(login).await?)
+}
+
+/// SSH の公開鍵の結び付けを消す。その鍵では、予約したユーザー名で入れなくなる。
+pub async fn remove_ssh_key(shared: &Shared, login: &str, fingerprint: &str) -> Result<()> {
+    if shared
+        .controller
+        .store()
+        .remove_ssh_key(login, fingerprint)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(Error::NotFound(format!("no such key: {fingerprint}")))
     }
 }
 

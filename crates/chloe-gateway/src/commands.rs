@@ -1,6 +1,7 @@
 //! `chloe` で始まる管理コマンド。ゲートウェイが受け取り、VM には渡さない。
 //!
 //! ```text
+//! chloe whoami              (接続した利用者の GitHub のログイン名)
 //! chloe ws list
 //! chloe ws create NAME [--root persistent|ephemeral]
 //! chloe ws root NAME persistent|ephemeral
@@ -15,6 +16,8 @@
 //! chloe token create NAME [--expires 30d]   (管理 API のトークン。値はこのときだけ表示する)
 //! chloe token list
 //! chloe token revoke ID
+//! chloe key list            (Device Flow で結び付けた SSH の公開鍵)
+//! chloe key rm FINGERPRINT
 //! chloe github login         (Device Flow で GitHub のトークンを得る)
 //! chloe github status
 //! chloe github logout
@@ -72,6 +75,7 @@ pub fn needs_stdin(args: &[String]) -> bool {
 pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) -> Output {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
+        ["whoami"] => Ok(format!("{login}\n")),
         ["ws", "list"] => ws_list(shared, login).await,
         ["ws", "create", name] => ws_create(shared, login, name, None).await,
         ["ws", "create", name, "--root", mode] => match mode.parse() {
@@ -113,6 +117,8 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
         }
         ["token", "list"] => token_list(shared, login).await,
         ["token", "revoke", id] => token_revoke(shared, login, id).await,
+        ["key", "list"] => key_list(shared, login).await,
+        ["key", "rm", fingerprint] => key_rm(shared, login, fingerprint).await,
         ["github", "status"] => github_status(shared, login).await,
         ["github", "logout"] => github_logout(shared, login).await,
         [] | ["help"] => Ok(help()),
@@ -131,7 +137,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -391,6 +397,31 @@ async fn token_revoke(shared: &Shared, login: &str, id: &str) -> Result<String, 
     let id: i64 = id.parse().map_err(|_| format!("invalid token id: {id}"))?;
     ops::revoke_token(shared, login, id).await.map_err(shown)?;
     Ok(format!("revoked token {id}\n"))
+}
+
+async fn key_list(shared: &Shared, login: &str) -> Result<String, String> {
+    let keys = ops::list_ssh_keys(shared, login).await.map_err(shown)?;
+    Ok(keys
+        .iter()
+        .map(|k| {
+            let kind = k.public_key.split_whitespace().next().unwrap_or("");
+            let used = k
+                .last_used_at
+                .map(|at| format!("last used at {at}"))
+                .unwrap_or_else(|| "never used".into());
+            format!(
+                "{}\t{kind}\tadded at {}\t{used}\n",
+                k.fingerprint, k.created_at
+            )
+        })
+        .collect())
+}
+
+async fn key_rm(shared: &Shared, login: &str, fingerprint: &str) -> Result<String, String> {
+    ops::remove_ssh_key(shared, login, fingerprint)
+        .await
+        .map_err(shown)?;
+    Ok(format!("removed {fingerprint}\n"))
 }
 
 #[cfg(test)]
