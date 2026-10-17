@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 段階 6f と 8 の確認。GitHub のふりをするサーバーに GitHub App の API を答えさせ、
-# 所属の確認、chloe github login (Device Flow)、GitHub のトークンの差し替えを確かめる。
+# 所属の確認、SSH の Device Flow と予約したユーザー名、chloe github login、
+# GitHub のトークンの差し替えを確かめる。
 #
 # アプリは acme と beta の二つの Organization にインストールしてある。
 # 利用者は alice (acme の管理者で、team dev のメンバー)、bob (どちらのメンバーでもないが
@@ -34,13 +35,21 @@ for user in alice bob carol dave erin; do
     ssh-keygen -q -t ed25519 -N '' -C "$user" -f "$work/$user"
     cp "$work/$user.pub" "$work/keys/$user.keys"
 done
+# GitHub に登録していない鍵。予約したユーザー名で、Device Flow を通して結び付ける。
+ssh-keygen -q -t ed25519 -N '' -C laptop -f "$work/laptop"
+# Device Flow のコードを承認する GitHub のアカウント (スタブが読む)。
+echo alice > "$work/approver"
+# keyboard-interactive の問いに Enter だけを返す。
+printf '#!/bin/sh\necho\n' > "$work/askpass"
+chmod +x "$work/askpass"
 
 cat > "$work/stub.py" <<'EOF'
 import json, sys, threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-keys_dir, port, token_log = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-polls = {"n": 0}
+keys_dir, port, token_log, approver = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+# Device Flow のコードの数と、一度は「まだ承認されていない」と答えたコード。
+codes = {"n": 0, "polled": set()}
 lock = threading.Lock()
 # インストールごとのトークンと、そのトークンで答える所属 (パス → 役割)。
 tokens = {"1": "ghs_acme", "2": "ghs_beta"}
@@ -91,8 +100,8 @@ class Handler(BaseHTTPRequestHandler):
             if role:
                 return self.reply(200, {"state": "active", "role": role})
             return self.reply(404, {})
-        if path == "/user" and auth == "Bearer ghu_stub_alice":
-            return self.reply(200, {"login": "alice"})
+        if path == "/user" and auth.startswith("Bearer ghu_stub_"):
+            return self.reply(200, {"login": auth.removeprefix("Bearer ghu_stub_")})
         self.reply(404, {"message": "Not Found"})
 
     def do_POST(self):
@@ -105,21 +114,27 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(f"{parts[3]} {body}\n")
             return self.reply(201, {"token": tokens[parts[3]], "expires_at": "2099-01-01T00:00:00Z"})
         if self.path == "/login/device/code":
-            return self.reply(200, {"device_code": "dc", "user_code": "ABCD-1234",
+            with lock:
+                codes["n"] += 1
+                n = codes["n"]
+            return self.reply(200, {"device_code": f"dc{n}", "user_code": "ABCD-1234",
                 "verification_uri": "https://github.com/login/device", "expires_in": 60, "interval": 1})
         if self.path == "/login/oauth/access_token":
+            code = next((p.split("=", 1)[1] for p in body.split("&") if p.startswith("device_code=")), body)
             with lock:
-                polls["n"] += 1
-                n = polls["n"]
-            if n == 1:
+                first = code not in codes["polled"]
+                codes["polled"].add(code)
+            if first:
                 return self.reply(200, {"error": "authorization_pending"})
-            return self.reply(200, {"access_token": "ghu_stub_alice", "expires_in": 28800,
+            # トークンは、そのとき承認するアカウントのものにする。
+            login = open(approver).read().strip()
+            return self.reply(200, {"access_token": f"ghu_stub_{login}", "expires_in": 28800,
                 "refresh_token": "ghr_stub", "refresh_token_expires_in": 15897600})
         self.reply(404, {})
 
 ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 EOF
-python3 -I "$work/stub.py" "$work/keys" "$stub_port" "$work/token-requests.log" &
+python3 -I "$work/stub.py" "$work/keys" "$stub_port" "$work/token-requests.log" "$work/approver" &
 stub_pid=$!
 
 cat > "$work/github-app.toml" <<EOF
@@ -159,32 +174,68 @@ wait_until 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$ssh_port"
 ssh_opts=(-p "$ssh_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
     -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o LogLevel=ERROR)
 as() { local user="$1"; shift; ssh "${ssh_opts[@]}" -i "$work/${user%%+*}" "$user@127.0.0.1" "$@"; }
+# sign_in 鍵 ユーザー名 承認するアカウント コマンド...: Device Flow を通して接続する。
+# 鍵を none にすると、公開鍵を使わない。askpass には問いしか渡らないので、失敗の理由
+# (端末なら keyboard-interactive の説明に出る) は監査ログで確かめる。
+sign_in() {
+    local key="$1" user="$2"
+    echo "$3" > "$work/approver"
+    shift 3
+    local opts=(-p "$ssh_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o IdentitiesOnly=yes -o IdentityAgent=none -o LogLevel=ERROR -o NumberOfPasswordPrompts=1)
+    if [ "$key" = none ]; then
+        opts+=(-o PubkeyAuthentication=no)
+    else
+        opts+=(-i "$work/$key")
+    fi
+    SSH_ASKPASS="$work/askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
+        ssh "${opts[@]}" "$user@127.0.0.1" "$@" </dev/null
+}
 egress_log() { cat "$state/workspaces/$1/logs/requests.jsonl" 2>/dev/null; }
 runner_key() { basename "$(dirname "$(dirname "$(grep -l "$1" "$state"/workspaces/*/config/guest.env)")")"; }
 last_github_request() { egress_log "$1" | grep '"host":"api.github.com"' | tail -1; }
 
 section "who can log in"
-check org-member "alice" as alice 'echo $(id -un) alice'
-check allowed-user "ok" as bob 'echo ok'
-check outsider "Permission denied" as carol true
-check other-org-member "ok" as dave 'echo ok'
+# GitHub に登録した鍵でも、Device Flow を済ませるまでは入れない。
+check key-needs-device-flow "Permission denied" as alice true
+check wrong-account "Permission denied" sign_in alice alice bob chloe whoami
+check wrong-account-reason "signed in to GitHub as bob, not alice" grep -o "signed in to GitHub as bob, not alice" "$logs/gateway.log"
+check org-member "alice" sign_in alice alice alice chloe whoami
+check key-after-device-flow "alice" as alice chloe whoami
+check allowed-user "bob" sign_in bob bob bob chloe whoami
+check outsider "Permission denied" sign_in carol carol carol true
+check other-org-member "dave" sign_in dave dave dave chloe whoami
+check maintainer "erin" sign_in erin erin erin chloe whoami
+
+section "the reserved user name"
+# 予約したユーザー名と GitHub に存在しない名前では、Device Flow で利用者が決まり、鍵を結び付ける。
+check reserved-unknown-key "Permission denied" sh -c 'ssh "$@" chloe@127.0.0.1 true' _ "${ssh_opts[@]}" -i "$work/laptop"
+check reserved-sign-in "alice" sign_in laptop chloe alice chloe whoami
+check reserved-key "alice" sh -c 'ssh "$@" chloe@127.0.0.1 chloe whoami' _ "${ssh_opts[@]}" -i "$work/laptop"
+check unknown-name-key "alice" sh -c 'ssh "$@" nosuchuser@127.0.0.1 chloe whoami' _ "${ssh_opts[@]}" -i "$work/laptop"
+check reserved-key-listed "SHA256:" sh -c 'ssh "$@" chloe@127.0.0.1 chloe key list' _ "${ssh_opts[@]}" -i "$work/laptop"
+check reserved-without-key "dave" sign_in none chloe dave chloe whoami
+check reserved-outsider "Permission denied" sign_in none chloe carol true
+check reserved-outsider-reason "carol cannot use this server" grep -o "carol cannot use this server" "$logs/gateway.log"
+check login-not-for-key "Permission denied" sh -c 'ssh "$@" bob@127.0.0.1 true' _ "${ssh_opts[@]}" -i "$work/laptop"
 
 section "chloe github login"
-# ログインの前から動いているランナーを、接続をつないだまま保つ。
+# ログアウトの前から動いているランナーを、接続をつないだまま保つ。
 ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 'sleep 120' &
 alice_holder=$!
 wait_until 60 as alice true
-check gh-before-login "absent" as alice 'printenv GH_TOKEN || echo absent'
-check status-before "not signed in" as alice chloe github status
+check logout "signed out" as alice chloe github logout
+check key-after-logout "Permission denied" as alice true
+# 接続のときの Device Flow でも、動いているランナーにトークンを渡し直す。
+check relogin "alice" sign_in alice alice alice chloe whoami
 check login "Signed in" as alice chloe github login
 check status-after "signed in" as alice chloe github status
 check token-not-logged "clean" sh -c '! grep -q ghu_stub_alice "$0" && echo clean' "$logs/gateway.log"
 
 section "personal workspace gets the user token"
-# ログインする前から動いているランナーでも、新しいシェルには GH_TOKEN が入る (起動し直さない)。
+# ログインし直す前から動いているランナーでも、新しいシェルには GH_TOKEN が入る (起動し直さない)。
 alice_ph="$(as alice 'printenv GH_TOKEN')"
 check gh-placeholder "ghu_chloe" echo "$alice_ph"
-# ログインの前に起動したランナーには、設定用ドライブにこのプレースホルダーがない。
 # 方針を動いたまま入れ替えたランナー (egress.log に記録がある) が、alice のランナーである。
 alice_key="$(basename "$(dirname "$(dirname "$(grep -l "policy updated" "$state"/workspaces/*/logs/egress.log)")")")"
 check gh-not-restarted "ws-" echo "$alice_key"
