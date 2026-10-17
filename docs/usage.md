@@ -57,6 +57,9 @@ VM の中の環境変数には、本物の値の代わりにプレースホル�
 VM からの通信を中継するプロキシが、決まった宛先の決まったヘッダーにあるプレースホルダーだけを、本物の値に差し替える。
 VM の中のプログラムやエージェントが本物の値を読み出したり、ほかの宛先に送ったりはできない。
 
+次の種類は組み込みで、値を登録するだけで使える。
+ほかのシークレットは、[定義](#組み込み以外のシークレット)を付けて登録する。
+
 | 種類 | 環境変数 | 差し替える宛先 |
 | --- | --- | --- |
 | `anthropic_api_key` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -70,11 +73,85 @@ SSH の接続は VM を通らないので、値は VM に届かない。
 ```sh
 ssh alice@chloe.example.com chloe secret set anthropic_api_key < key.txt
 ssh alice@chloe.example.com chloe secret list
+ssh alice@chloe.example.com chloe secret show anthropic_api_key   # 定義を見る（値は出ない）
 ssh alice@chloe.example.com chloe secret rm anthropic_api_key
 ```
 
 登録した値は、次の要求から使われる。
 動いているワークスペースでは、このあとに開いたシェルに新しいプレースホルダーが入る（すでに開いているシェルの環境は変わらない）。
+
+### 組み込み以外のシークレット
+
+組み込みの種類にないシークレットは、`--spec` を付けて、定義と値を TOML で標準入力から渡す。
+名前は英小文字で始め、英小文字、数字、`_` で書く（`_` は続けず、末尾にも置かない）。
+
+```toml
+# hf.toml
+env = ["HF_TOKEN"]             # プレースホルダーを入れる VM の環境変数
+placeholder = "hf_{id}"        # プレースホルダーの形。{id} をワークスペースごとの乱数に置き換える
+value = "hf_..."               # 本物の値
+
+[[inject]]
+hosts = ["huggingface.co", "*.huggingface.co"]
+header = "authorization"       # このヘッダーの中のプレースホルダーを本物に置き換える
+# format = "basic-password"    # Basic 認証のパスワードとして置き換えるとき
+```
+
+```sh
+ssh alice@chloe.example.com chloe secret set hf_token --spec < hf.toml
+ssh alice@chloe.example.com chloe secret set hf_token < new-value.txt   # 値だけを変える（定義はそのまま）
+```
+
+- **placeholder**：`{id}` を一つだけ含める。ほかに使える文字は英数字と `-_.~+/=:`。省くと `{id}` だけになる。ツールが手元で形式を調べることがあるので、本物の値の接頭辞に合わせるとよい。
+- **inject**：`hosts` への要求で、`header` の中のプレースホルダーを本物に置き換える。`hosts` は `*.example.com` の形でサブドメインを指定できる。
+- 規則の宛先は、そのシークレットを使うワークスペースの許可リストに自動で足す。
+- 規則の宛先以外へプレースホルダーを送ると、プロキシが要求を遮断する（URL や本文に入っていても同じ）。
+
+組み込みの種類と同じ名前には定義を付けられない。
+定義を変えるときは、`--spec` で定義と値をまとめて渡し直す。
+
+### 署名する方式（AWS）
+
+AWS のように、鍵で要求に署名する方式では、プレースホルダーをヘッダーに置き換えるだけでは足りない。
+VM の中のツールはプレースホルダーの鍵で署名し、プロキシが本物の鍵で署名を作り直す。
+値が複数あるので、欄（`fields`）ごとに環境変数、プレースホルダー、値を書く。
+
+```toml
+# aws.toml
+[fields.access_key_id]
+env = ["AWS_ACCESS_KEY_ID"]
+placeholder = "AKIA{id}"
+value = "AKIA..."
+
+[fields.secret_access_key]
+env = ["AWS_SECRET_ACCESS_KEY"]
+value = "..."
+
+# 一時的な認証情報なら、セッショントークンの欄も足す。
+# [fields.session_token]
+# env = ["AWS_SESSION_TOKEN"]
+# value = "..."
+
+[[sign]]
+scheme = "aws-sigv4"
+hosts = ["*.amazonaws.com"]
+```
+
+```sh
+ssh alice@chloe.example.com chloe secret set aws --spec < aws.toml
+```
+
+値だけを変えるときも、欄ごとに `value` だけを書いた TOML を `--spec` で渡す。
+
+`aws-sigv4` は、欄 `access_key_id` と `secret_access_key` を使い、欄 `session_token` があれば `x-amz-security-token` ヘッダーも置き換える。
+次の要求は署名を作り直せないので、プロキシが遮断する（ログの理由は `unsignable`）。
+
+- 署名付き URL（クエリの `X-Amz-Credential` で署名するもの）
+- チャンクごとに署名する要求（`x-amz-content-sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD` など）
+- 本文が 1 MiB を超えるか大きさが分からず、`x-amz-content-sha256` ヘッダーもない要求（本文のハッシュを計算できない）
+
+S3 の SDK は `x-amz-content-sha256` を付けるので、大きなアップロードでも通る。
+チャンクに署名しない `STREAMING-UNSIGNED-PAYLOAD-TRAILER`（新しい SDK がチェックサムを付けてアップロードするときの方式）も通る。
 
 ### 認証情報の置き場所
 
@@ -95,7 +172,8 @@ team のワークスペースは、team に登録がなければ Organization �
 
 `--owner` で持ち主を指定する（`acme` か `acme/dev`）。
 Organization のシークレットは Organization の管理者が、team のシークレットは Organization の管理者と team の maintainer が登録できる。
-メンバーは名前の一覧を見られるが、値は読めない。
+メンバーは名前の一覧と定義を見られるが、値は読めない。
+定義を付けたシークレットの値だけを変えるときは、同じ持ち主に置いた定義を使う（team に値だけを登録しても、Organization の定義は引き継がない）。
 
 ```sh
 ssh alice@chloe.example.com chloe secret set --owner acme/dev anthropic_api_key < key.txt

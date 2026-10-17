@@ -96,7 +96,17 @@ api /v1/secrets/anthropic_api_key -X PUT -d '{"value": "sk-ant-..."}'           
 api '/v1/secrets/openai_api_key?owner=acme/dev' -X PUT -d '{"value": "sk-proj-..."}'
 api /v1/secrets
 # {"names":["anthropic_api_key"],"owner":"alice"}
+api /v1/secrets/anthropic_api_key
+# {"name":"anthropic_api_key","owner":"alice","builtin":true,"spec":{"fields":{"value":{...}},"inject":[...]}}
 api /v1/secrets/anthropic_api_key -X DELETE
+```
+
+組み込み以外のシークレットは、[使い方](usage.md#組み込み以外のシークレット)の TOML と同じ項目を JSON で送る。
+
+```sh
+api /v1/secrets/hf_token -X PUT -d @hf.json
+# hf.json: {"env": ["HF_TOKEN"], "placeholder": "hf_{id}", "value": "hf_...",
+#           "inject": [{"hosts": ["huggingface.co"], "header": "authorization"}]}
 ```
 
 値はシェルの履歴に残らないよう、ファイルや標準入力から渡す（`-d @value.json`）。
