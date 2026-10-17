@@ -58,6 +58,7 @@ GitHub のログイン名をユーザー名にして、GitHub に登録した公
 - **ホスト名**：ワークスペースの名前になり、プロンプトに出る（`acme/dev/tools` は `acme-dev-tools`）。正確な名前は環境変数 `CHLOE_WORKSPACE` にある。
 - **入っているもの**：Claude Code、Codex、Docker、git、Python 3、curl、tmux など。
 - **残るもの**：`/workspace` と、ホームディレクトリ（`/home/user`）は、ワークスペースのディスクにあり、VM を止めても残る。Docker のイメージとコンテナのデータも、別のディスクに残る。
+- **ディスクの大きさ**：既定ではワークスペースのディスクが 20GiB、Docker のディスクが 40GiB（ゲートウェイの設定で変わる）。足りなくなったら `chloe ws disk <名前> --workspace 50G` のように大きくする（「ディスクを大きくする」を参照）。
 - **残らないもの**：ルートファイルシステムへの変更（`apt install` で入れたものなど）は、既定では VM を止めると消える。残したいときは、ワークスペースのルートの扱いを `persistent` にする（`chloe ws root <名前> persistent`）。
 - **git**：GitHub には HTTPS でつなぐ。`git@github.com:` の SSH のリモートも、HTTPS に読み替える。認証は、`GH_TOKEN` があれば自動で行う（「GitHub を使う」を参照）。
 
@@ -70,7 +71,31 @@ Claude Code や Codex が作業中のあいだは止めず、作業が終わっ�
 VM を止めると、VM の中で動かしていたプロセス（開発用のサーバー、tmux のセッション）は終わる。
 ファイルは「VM の中」で書いたとおりに残る。
 
-すぐに止めたいときや、ルートの扱いを変えたあとで起動し直したいときは、`chloe ws stop <名前>` で止める。
+すぐに止めたいときや、ルートの扱いやディスクの大きさを変えたあとで起動し直したいときは、`chloe ws stop <名前>` で止める。
+
+## ディスクを大きくする
+
+`chloe ws disk` で、ワークスペースのディスクと Docker のディスクを大きくする。
+大きさは GiB で書く（`50G`、`50GiB`、`50` のどれでもよい）。
+書かなかったほうのディスクは変えない。
+
+```sh
+ssh chloe@chloe.example.com chloe ws disk api --workspace 50G --docker 80G
+ssh chloe@chloe.example.com chloe ws disk api     # 今の大きさを出す
+```
+
+新しい大きさは、次に VM を起動したときに効く。
+VM が動いているあいだはディスクを広げられないためである（起動する前に、ファイルシステムを検査してから広げる）。
+すぐに広げたいときは、`chloe ws stop <名前>` で止めてからつなぎ直す。
+
+ディスクは大きくするだけで、小さくはできない。
+ext4 を縮めるには時間がかかり、中身が収まらなければ失敗するためである。
+作り直したいときは、`chloe ws rm <名前> --disks` でディスクごと消してから作る。
+大きさの上限は、ゲートウェイの設定（`[disks]`）で決まる。
+作るときに大きさを決めるなら、`chloe ws create <名前> --workspace 50G` のように書く。
+
+永続のルート（`persistent`）で残す変更も、ワークスペースのディスクに入る。
+`apt install` で多くのものを入れるときは、ワークスペースのディスクを大きめにしておく。
 
 ## シークレット
 
@@ -243,6 +268,7 @@ ssh -t chloe@chloe.example.com chloe
 シークレットと設定は、TOML を書かずに欄ごとのフォームで編集する。
 シークレットは、`deploy/secrets/` の例を雛形にして作れる。
 登録したシークレットの定義を変えるとき、値の欄を空のままにすると今の値を使い続ける。
+ワークスペースのタブでは、`g` でディスクの大きさを変える（`chloe ws disk` と同じく、次の起動から効く）。
 
 | キー | 操作 |
 | --- | --- |
@@ -274,8 +300,9 @@ Host chloe-admin
 ```text
 chloe whoami                                    接続した利用者の GitHub のログイン名
 chloe ws list                                   ワークスペースの一覧
-chloe ws create NAME [--root persistent|ephemeral]
+chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]
 chloe ws root NAME persistent|ephemeral          ルートの扱い (次の起動から)
+chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   ディスクを大きくする (次の起動から)
 chloe ws stop NAME
 chloe ws rm NAME [--disks]                      --disks ならディスクも消す
 chloe secret list [--owner OWNER]
@@ -294,6 +321,8 @@ chloe github login|status|logout
 
 NAME は SSH のユーザー名の `+` のあとと同じ書き方、OWNER は Organization（`acme`）か team（`acme/dev`）。
 `--root` を省くと、Organization と team の設定の既定を使う（設定がなければ `ephemeral`）。
+SIZE は GiB で書く（`50G`）。省いたディスクは、ゲートウェイの設定の既定の大きさで作る。
+`chloe ws list` は、名前、ルートの扱い、動いているか、ワークスペースと Docker のディスクの大きさを、タブで区切って出す。
 `chloe ws rm` は、`--disks` を付けなければワークスペースのディスク（`/workspace`、ホームディレクトリ、Docker のデータ）をランナーのホストに残す。
 管理の画面で消すときは、ディスクを残す（`k`）か一緒に消す（`d`）かを選ぶ。
 同じ操作を HTTP(S) で行う方法は [管理 API](api.md) にある。
