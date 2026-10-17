@@ -53,30 +53,78 @@ cargo build --release -p chloe-gateway -p chloe-egress -p chloe-node
 ルートファイルシステムには、ビルドしたときの最新の Claude Code（stable）と、`rootfs/Dockerfile` で版を決めた Codex が入る。
 更新するときはビルドし直す（「更新」を参照）。
 
+## 配置
+
+ビルドしたものは、Debian と Ubuntu の慣習に合わせて次の場所に置く。
+設定の例（`deploy/gateway.toml`、`deploy/node.toml`）と systemd の unit（`deploy/systemd/`）は、この配置で書いてある。
+
+| 置き場所 | 中身 |
+| --- | --- |
+| `/usr/local/bin/` | `chloe-gateway`、`chloe-node` |
+| `/usr/local/lib/chloe/` | `chloe-egress`（ランナーのコンテナに渡すもので、ホストでは実行しない）と、`guest/`（ゲストのカーネルとルートファイルシステム） |
+| `/etc/chloe/` | 設定（`gateway.toml`、`node.toml`、GitHub App の設定と秘密鍵、管理 API の証明書と鍵） |
+| `/var/lib/chloe/` | ゲートウェイの状態（ホスト鍵、データベース、マスター鍵、CA、ワークスペースの状態） |
+| `/var/lib/chloe-node/` | `chloe-node` の状態（証明書と鍵、ワークスペースの状態） |
+| `/var/log/chloe/` | 監査ログ |
+
+ゲストのルートファイルシステムは約 2.5GB ある。
+`/usr` の容量が足りなければ、`/var/lib/chloe/guest` などに置き、設定の `guest_dir` を書き換える。
+
+### 動かす利用者
+
+ゲートウェイと `chloe-node` は、ランナーのコンテナを起動するために `docker` を使う。
+unit の例は、`docker` のグループに入れた専用の利用者 `chloe` で動かす。
+`docker` のグループに入った利用者は root と同じことができるので、利用者を分けてもホストを守る効果はほとんどなく、root で動かしてもよい。
+root で動かすときは、unit の `User=`、`Group=`、`AmbientCapabilities=` を消す。
+
+```sh
+sudo useradd --system --no-create-home --home-dir /var/lib/chloe --shell /usr/sbin/nologin --groups docker chloe
+```
+
+`/dev/kvm` と `/dev/net/tun` を開くのはランナーのコンテナなので、`chloe` を `kvm` のグループに入れる必要はない。
+ランナーのコンテナは root で動くが、`state_root` に作るファイルの持ち主を `state_root` の下のディレクトリの持ち主に合わせるので、ワークスペースの状態は `chloe` の利用者で消せる。
+
+### 置く
+
+リポジトリのルートで実行する。
+
+```sh
+sudo install -m 755 target/release/chloe-gateway target/release/chloe-node /usr/local/bin/
+sudo install -D -m 755 target/release/chloe-egress /usr/local/lib/chloe/chloe-egress
+sudo install -D -m 644 build/guest/kernel/vmlinux /usr/local/lib/chloe/guest/kernel/vmlinux
+sudo install -D -m 644 build/guest/rootfs.ext4 /usr/local/lib/chloe/guest/rootfs.ext4
+sudo install -d -m 755 /etc/chloe
+sudo install -m 644 deploy/systemd/chloe-gateway.service deploy/systemd/chloe-node.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+ゲストのイメージは `cp` ではなく `install` で置く（理由は「更新」にある）。
+
 ## 一台で動かす
 
 ### 設定
 
-設定の例 `images/guest/dev/gateway.example.toml` を写して編集する。
+設定の例 `deploy/gateway.toml` を写して編集する。
 項目の一覧は [設定](configuration.md) にある。
 
 ```sh
-mkdir -p /etc/chloe
-cp images/guest/dev/gateway.example.toml /etc/chloe/gateway.toml
+sudo install -m 644 deploy/gateway.toml /etc/chloe/gateway.toml
 ```
 
 少なくとも次を書き換える。
 
-- `listen`：SSH の待ち受け。利用者に公開するなら `0.0.0.0:22` などにする。
-- `host_key`、`database`、`master_key`、`audit_log`：状態の置き場所（なければ作る）。
+- `listen`：SSH の待ち受け。例は `0.0.0.0:22` で、ホストの sshd と重なる。sshd を別のポートに移すか、ゲートウェイを別のポートで待ち受ける。
 - `allowed_users` と `admins`：ログインを許す GitHub のログイン名と、サーバーの運用者。
-- `[runner]` の `guest_dir`、`egress_bin`、`state_root`：ビルドした `build/guest`、`target/release/chloe-egress`、ワークスペースの状態の置き場所。相対パスは起動したディレクトリから解決する。
 - `[policy]`：すべてのワークスペースに共通の許可リスト。
+
+状態の置き場所（`host_key`、`database`、`master_key`、`audit_log`、`[runner]` の `state_root`）は、unit の `StateDirectory=` と `LogsDirectory=` が作る `/var/lib/chloe` と `/var/log/chloe` の下にしてある。
+別の場所に変えるときは、`chloe` の利用者が書けるディレクトリにする。
 
 ### 起動
 
 ```sh
-target/release/chloe-gateway --config /etc/chloe/gateway.toml
+sudo systemctl enable --now chloe-gateway
+journalctl -u chloe-gateway -f
 ```
 
 ホスト鍵、データベース、マスター鍵は、初めて起動したときに作る。
@@ -89,49 +137,45 @@ ssh <GitHub のログイン名>@<ホスト>
 最初の接続でワークスペースの VM を起動する（数秒かかる）。
 使い方は [使い方](usage.md) にある。
 
+ゲートウェイを再起動しても、動いているワークスペースは止まらない。
+起動したゲートウェイが引き取り、本物の値の問い合わせに答え続ける。
+
+unit の例は、まだ実際のホストで確かめていない。
+
+### 運用のコマンド
+
+`node add` など、`chloe-gateway` のサブコマンドを手で実行するときは、`chloe` の利用者で実行する。
+root で実行すると、SQLite がデータベースの横に作るファイル（`chloe.db-wal` など）が root のものになり、ゲートウェイが開けなくなることがある。
+
+```sh
+sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node list
+```
+
 ### GitHub App
 
 GitHub App を設定すると、Organization のメンバーがログインでき、公開鍵を登録していない利用者は Device Flow でログインでき、VM の中で GitHub を使える。
 登録の手順は [GitHub App の準備](github-app.md) にある。
-アプリの設定ファイルのパスを、ゲートウェイの設定の `github_app` に書く。
-
-### systemd の unit の例
-
-確かめていない例である。
-`docker` を使える利用者で動かす。
-
-```ini
-[Unit]
-Description=chloe gateway
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-User=chloe
-WorkingDirectory=/opt/chloe
-ExecStart=/opt/chloe/bin/chloe-gateway --config /etc/chloe/gateway.toml
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-ゲートウェイを再起動しても、動いているワークスペースは止まらない。
-起動したゲートウェイが引き取り、本物の値の問い合わせに答え続ける。
+アプリの設定と秘密鍵を `/etc/chloe/` に置き、ゲートウェイの設定の `github_app` にそのパスを書く。
 
 ## 状態の置き場所とバックアップ
 
+例の配置での場所を括弧に書く。
+
 | 置き場所 | 中身 | バックアップ |
 | --- | --- | --- |
-| `database` | ワークスペース、シークレット（暗号化したもの）、設定、トークンのハッシュ、ホストの一覧 | 要る。`master_key` と組で |
-| `master_key` | シークレットを暗号化する鍵 | 要る。失うと、保存したシークレットを読めなくなる |
-| `host_key` | SSH のホスト鍵 | 要る。変わると、利用者の `known_hosts` と合わなくなる |
-| `[cluster]` の `pki_dir` | CA の証明書と鍵 | 要る。失うと、すべてのホストに参加し直させる |
-| `audit_log` | 監査ログ（JSON Lines） | 運用の方針による |
-| `[runner]` の `state_root`（複数のホストでは各ホストの `state_root`） | ワークスペースごとのディスク、プロキシの CA、HTTP のログ | ワークスペースの中身を残したいなら要る |
+| `database`（`/var/lib/chloe/chloe.db`） | ワークスペース、シークレット（暗号化したもの）、設定、トークンのハッシュ、ホストの一覧 | 要る。`master_key` と組で |
+| `master_key`（`/var/lib/chloe/master.key`） | シークレットを暗号化する鍵 | 要る。失うと、保存したシークレットを読めなくなる |
+| `host_key`（`/var/lib/chloe/host_key`） | SSH のホスト鍵 | 要る。変わると、利用者の `known_hosts` と合わなくなる |
+| `[cluster]` の `pki_dir`（`/var/lib/chloe/pki`） | CA の証明書と鍵 | 要る。失うと、すべてのホストに参加し直させる |
+| `audit_log`（`/var/log/chloe/audit.jsonl`） | 監査ログ（JSON Lines） | 運用の方針による |
+| `[runner]` の `state_root`（`/var/lib/chloe/workspaces`、複数のホストでは各ホストの `/var/lib/chloe-node/workspaces`） | ワークスペースごとのディスク、プロキシの CA、HTTP のログ | ワークスペースの中身を残したいなら要る |
 
 `database` は SQLite で、WAL のモードで使う。
-動かしたまま写すときは `sqlite3 chloe.db ".backup backup.db"` を使う。
+動かしたまま写すときは、`sqlite3` の `.backup` を `chloe` の利用者で使う。
+
+```sh
+sudo -u chloe sqlite3 /var/lib/chloe/chloe.db ".backup /var/lib/chloe/chloe.db.bak"
+```
 
 `chloe ws rm` でワークスペースを消しても、`state_root` のディスクは残る（消すのは手で行う）。
 
@@ -166,7 +210,7 @@ pki_dir = "/var/lib/chloe/pki"
 URL は、コントロールプレーンがそのホストの API を呼ぶときのもので、ホストの証明書にこのホスト名が入る。
 
 ```sh
-chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url https://n1.example.com:8445
+sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url https://n1.example.com:8445
 ```
 
 表示されたトークンは一度だけ使え、1 時間で失効する（`join_ttl_secs` で変えられる）。
@@ -174,27 +218,26 @@ chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url https://n1.exam
 
 ### ホスト
 
-各ホストに、ビルドしたものを置く。
+各ホストに、ビルドしたものを「配置」のとおりに置き、利用者 `chloe` を作る（`chloe-gateway` と `chloe-gateway.service` は要らない）。
 今は配る仕組みがないので、手で写す。
-
-- `build/guest/`（カーネルとルートファイルシステム）
-- `chloe-egress` と `chloe-node` のバイナリ
-- `chloe-dev-runner` のイメージ（ホストでビルドするか、`docker save` と `docker load` で写す）
+`chloe-dev-runner` のイメージも要る（ホストでビルドするか、`docker save` と `docker load` で写す）。
 
 参加して、証明書を受け取る。
+`/var/lib` には `chloe` の利用者が書けないので、状態のディレクトリを先に作っておく（unit の `StateDirectory=` が作るのは起動のときである）。
 
 ```sh
-chloe-node join --server https://cp.example.com:8444 --token <トークン> --dir /var/lib/chloe-node/tls
+sudo install -d -o chloe -g chloe -m 700 /var/lib/chloe-node
+sudo -u chloe chloe-node join --server https://cp.example.com:8444 --token <トークン> --dir /var/lib/chloe-node/tls
 ```
 
-設定の例 `images/guest/dev/node.example.toml` を写して編集し、起動する。
-`chloe-node` は `docker` を使える利用者で動かす。
+設定の例 `deploy/node.toml` を写し、`control_plane` を書き換えて起動する。
 
 ```sh
-chloe-node run --config /etc/chloe/node.toml
+sudo install -m 644 deploy/node.toml /etc/chloe/node.toml
+sudo systemctl enable --now chloe-node
 ```
 
-`chloe-gateway node list` で、参加したホストを確かめられる。
+コントロールプレーンで `sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node list` を実行すると、参加したホストを確かめられる。
 
 ### 置き場所
 
@@ -208,7 +251,7 @@ chloe-node run --config /etc/chloe/node.toml
 ホストの登録を消すには、そのホストに置いたワークスペースを先に消す。
 
 ```sh
-chloe-gateway --config /etc/chloe/gateway.toml node rm n1
+sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node rm n1
 ```
 
 ## 管理 API を有効にする
@@ -228,12 +271,12 @@ listen = "127.0.0.1:8080"
 
 ## 更新
 
-- **バイナリ**：ゲートウェイを止めて入れ替え、起動する。データベースのマイグレーションは起動のときに適用する。動いているワークスペースは止まらない。
-- **ゲストのイメージ**：`images/guest/rootfs/build.sh` でビルドし直すと、次に起動するワークスペースから新しいイメージを使う。動いているワークスペースは、`chloe ws stop` で止めるまで古いイメージのまま動く。ルートを保持するワークスペース（`persistent`）は、残した変更を新しいイメージの上に重ねて起動し、層を作ったときとイメージの版が違うことを VM の中の `/etc/chloe/root-outdated` に書く（版が違うときに層をどう扱うかは、まだ決めていない）。
+- **バイナリ**：「配置」と同じ `install` で置き直し、`sudo systemctl restart chloe-gateway`（ホストでは `chloe-node`）で起動し直す。データベースのマイグレーションは起動のときに適用する。動いているワークスペースは止まらない。
+- **ゲストのイメージ**：`images/guest/rootfs/build.sh` でビルドし直し、「配置」と同じ `install` で置き直すと、次に起動するワークスペースから新しいイメージを使う。`install` は古いファイルを消してから新しいファイルを作るので、動いている VM は開いている古いファイルを読み続けられる。`cp` は同じファイルの中身を上書きするので、動いている VM のルートファイルシステムを壊す。動いているワークスペースは、`chloe ws stop` で止めるまで古いイメージのまま動く。ルートを保持するワークスペース（`persistent`）は、残した変更を新しいイメージの上に重ねて起動し、層を作ったときとイメージの版が違うことを VM の中の `/etc/chloe/root-outdated` に書く（版が違うときに層をどう扱うかは、まだ決めていない）。
 - **ランナーのコンテナのイメージ**：`chloe-dev-runner` をビルドし直したら、動いているワークスペースを一度止める。古いイメージで動いているランナーは、設定の変更を受けたときに VM の DNS の許可リストを作り直せない。
 
 ## 困ったとき
 
-- **ログ**：ゲートウェイと `chloe-node` は標準エラーにログを出す（`RUST_LOG` で詳しさを変えられる）。ワークスペースごとのプロキシのログ（`egress.log`）、HTTP のログ（`requests.jsonl`）、DNS のログ（`dnsmasq.log`）は `state_root/<ws-番号>/logs/` にある。
+- **ログ**：ゲートウェイと `chloe-node` は標準エラーにログを出す（`journalctl -u chloe-gateway` で読める。`RUST_LOG` で詳しさを変えられる）。ワークスペースごとのプロキシのログ（`egress.log`）、HTTP のログ（`requests.jsonl`）、DNS のログ（`dnsmasq.log`）は `state_root/<ws-番号>/logs/`（例の配置では `/var/lib/chloe/workspaces/<ws-番号>/logs/`）にある。
 - **VM が起動しない**：`/dev/kvm` を使えるか、`docker run --privileged` ができるかを確かめる。ランナーのコンテナの出力（`docker logs chloe-ws-<番号>`）に、Firecracker とゲストのシリアルコンソールの出力が出る。
 - **VM から外につながらない**：許可リストにない宛先は、名前の解決からできない。`requests.jsonl` と `dnsmasq.log` で、遮断した宛先がわかる。
