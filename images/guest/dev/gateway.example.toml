@@ -21,6 +21,9 @@ idle_timeout_secs = 1800
 
 # ログインを許す GitHub のログイン名 (GitHub App の Organization のメンバーに加えて許す)。
 allowed_users = ["your-github-login"]
+# サーバーの運用者。どの Organization と team の設定 (chloe policy) とシークレットも変えられる。
+# GitHub で Organization の管理者である利用者は、ここに書かなくてもその Organization のものを変えられる。
+admins = ["your-github-login"]
 
 # team と Organization のワークスペースに入れる利用者 (GitHub App による確認を入れるまでの仮のもの)。
 [memberships]

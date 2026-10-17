@@ -21,7 +21,7 @@ chloe は一つの GitHub App を、次の三つの用途に使う。
 | Request user authorization (OAuth) during installation | 無効 |
 | Enable Device Flow | 有効 |
 | Webhook の Active | 無効（chloe は Webhook を受けない） |
-| Where can this GitHub App be installed? | Only on this account |
+| Where can this GitHub App be installed? | Only on this account（複数の Organization で使うときは下の「複数の Organization」を参照） |
 
 ## 権限
 
@@ -78,8 +78,10 @@ chmod 600 ~/.config/chloe/github-app.pem
 ```toml
 app_id = 123456
 client_id = "Iv23liXXXXXXXXXXXXXX"
-organization = "ForteFibre"
 private_key = "file:/home/<user>/.config/chloe/github-app.pem"
+# 使う Organization を限るときに書く。書かなければ、アプリをインストールしたすべての
+# Organization を使う。
+# organizations = ["ForteFibre"]
 ```
 
 `private_key` はシークレットの参照として読む。
@@ -95,13 +97,23 @@ github_app = "~/.config/chloe/github-app.toml"
 
 これで次のようになる。
 
-- アプリの Organization のメンバーがログインできる。`allowed_users` は、それに加えて許す利用者になる。
+- アプリをインストールしたいずれかの Organization のメンバーがログインできる。`allowed_users` は、それに加えて許す利用者になる。
 - Organization のワークスペース（`org/name`）にはそのメンバーが、team のワークスペース（`org/team/name`）にはその team のメンバーが入れる。確かめられるのはアプリをインストールした Organization だけである。
 - GitHub に公開鍵を登録していない利用者は、SSH の keyboard-interactive で Device Flow を行ってログインできる。
 - 個人のワークスペースで GitHub を使うには、一度 `ssh <host> chloe github login` を実行してユーザートークンを得る。トークンは chloe のデータベースに暗号化して置き、ランナーを起動するときに、失効まで 1 時間を切っていれば更新して渡す。
-- team と Organization のワークスペースには、アプリのインストールトークンを渡す。
+- team と Organization のワークスペースには、その Organization へのインストールのトークンを渡す。範囲は Organization と team の設定（`chloe policy set`）の `[github]` で絞れる。
+- GitHub で Organization の管理者（`admin` の役割）である利用者は、その Organization と team の設定とシークレットを変えられる。team の maintainer は、その team のシークレットを変えられる。
 
 VM の中の `git` は、GitHub に HTTPS でつなぎ、認証ヘルパーがプレースホルダーを返す（SSH のリモートも HTTPS に読み替える）。
 
 設定は `cargo run -p chloe-github --example check -- ~/.config/chloe/github-app.toml <login>` で確かめられる（トークンの値は表示しない）。
+
+## 複数の Organization
+
+chloe は、アプリをインストールしたすべての Organization を使う（App の設定の `organizations` で限っていなければ）。
+アプリを Only on this account で登録すると、インストールできるのは登録した Organization だけになる。
+ほかの Organization でも使うには、アプリを Any account にして、その Organization にインストールする。
+
+Any account にすると、だれでも自分の Organization にアプリをインストールでき、そのメンバーが chloe にログインして VM を使えるようになる。
+このときは App の設定の `organizations` に、使ってよい Organization を並べて限る。
 

@@ -432,6 +432,24 @@ VM の環境変数（プレースホルダー）は起動時に決まるので�
 
 各段階の確認は、GitHub のふりをするサーバーに Organization を二つ置いて、`github-test.sh` に足す。
 
+### 結果（2026-10-17）
+
+`github-test.sh` の 56 項目を含め、VM を使う確認の 210 項目がすべて通った。
+本物の GitHub でも、インストールの一覧、インストールトークンの発行、Organization での役割（`admin`）を確かめた。
+
+- **8a 複数の Organization**：`/app/installations` から Organization ごとのインストールを調べ（5 分覚えておく）、Organization を指定してインストールトークンを発行し、所属を確かめる。App の設定の `organization` と `organizations` は任意で、書けば使う Organization を限る。アプリを Any account で公開するときは、ここで限る（[GitHub App の準備](github-app.md)）。
+- **8b 役割**：所属は `/orgs/{org}/memberships/{user}` と team の memberships で確かめ、招待を承諾していない利用者はメンバーとみなさない。Organization の `admin` と team の `maintainer` を返す。
+- **8c 設定の層**：データベースの `policies` に Organization と team の設定を置き、全体、Organization、team の順に重ねる。宛先は足し合わせ、パスの規則は上の層を先に並べる（最初に一致した規則で決まるので、下の層は上の層の規則を覆せない）。ルートの扱いの既定とインストールトークンの範囲は、もっとも下の層の値を使う。`chloe policy show|set|rm OWNER`（TOML）で読み書きし、変えたらその持ち主（Organization なら team も）の動いているランナーに送る。設定を変えられるのは、Organization の管理者とゲートウェイの設定の `admins`（サーバーの運用者）である。
+- **8d シークレット**：`chloe secret list|set|rm --owner OWNER`。team のワークスペースは、team になければ Organization のシークレットを使う（同じ種類なら team のものが優先する）。
+- **8e インストールトークンの範囲**：設定の `[github]` の `repositories` と `permissions` で発行し、範囲ごとにキャッシュする。
+
+あわせて、動いているワークスペースへの更新を次のように直した。
+
+- **プレースホルダーの入れ直し**：シークレットの種類が変わったら、controller が guest-agent に環境変数を送り（`SetEnv`）、`/run/chloe/env` を書き換える。ランナーを起動し直さなくても、このあとに開くシェルに新しいプレースホルダーが入る。すでに開いているシェルの環境は変わらない。
+- **VM の DNS の許可リスト**：dnsmasq が上流に問い合わせる名前の一覧はコンテナの起動時に決まっていたので、動いたまま許可リストに足した宛先の名前を VM が引けなかった。一覧を `--servers-file` に書き、方針を入れ替えるときに書き直して読み直させる。
+
+残したもの：設定の変更の履歴（今は最後に変えた人と時刻だけ）、team の maintainer による team の設定の変更、設定の層へのワークスペースの層の追加。
+
 ## 段階 9：複数台の物理サーバー
 
 今はゲートウェイ、controller、ランナーが一台のホストにあり、Unix ソケットと Docker の CLI でつながっている。
