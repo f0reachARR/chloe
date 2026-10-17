@@ -273,7 +273,7 @@ chloe ws list                                   ワークスペースの一覧
 chloe ws create NAME [--root persistent|ephemeral]
 chloe ws root NAME persistent|ephemeral          ルートの扱い (次の起動から)
 chloe ws stop NAME
-chloe ws rm NAME
+chloe ws rm NAME [--disks]                      --disks ならディスクも消す
 chloe secret list [--owner OWNER]
 chloe secret set [--owner OWNER] KIND            値は標準入力から読む
 chloe secret rm [--owner OWNER] KIND
@@ -290,6 +290,8 @@ chloe github login|status|logout
 
 NAME は SSH のユーザー名の `+` のあとと同じ書き方、OWNER は Organization（`acme`）か team（`acme/dev`）。
 `--root` を省くと、Organization と team の設定の既定を使う（設定がなければ `ephemeral`）。
+`chloe ws rm` は、`--disks` を付けなければワークスペースのディスク（`/workspace`、ホームディレクトリ、Docker のデータ）をランナーのホストに残す。
+管理の画面で消すときは、ディスクを残す（`k`）か一緒に消す（`d`）かを選ぶ。
 同じ操作を HTTP(S) で行う方法は [管理 API](api.md) にある。
 
 ## 共有ワークスペースで気をつけること

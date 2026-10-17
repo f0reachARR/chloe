@@ -179,7 +179,8 @@ GitHub App を設定すると、Organization のメンバーがログインで�
 sudo -u chloe sqlite3 /var/lib/chloe/chloe.db ".backup /var/lib/chloe/chloe.db.bak"
 ```
 
-`chloe ws rm` でワークスペースを消しても、`state_root` のディスクは残る（消すのは手で行う）。
+`chloe ws rm` でワークスペースを消しても、`state_root` のディスクは残る。
+一緒に消すには `chloe ws rm NAME --disks` とする。
 
 ## 複数のホストに置く
 

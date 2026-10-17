@@ -50,7 +50,7 @@ API の呼び出しは、利用者、トークンの ID、メソッド、パス�
 | `POST /v1/workspaces` | ワークスペースを作る |
 | `GET /v1/workspaces/{name}` | ワークスペース |
 | `PATCH /v1/workspaces/{name}` | ルートの扱いを変える、止める |
-| `DELETE /v1/workspaces/{name}` | ワークスペースを消す（ディスクは残る） |
+| `DELETE /v1/workspaces/{name}[?disks=true]` | ワークスペースを消す（`disks=true` でなければディスクは残る） |
 | `GET /v1/secrets[?owner=]` | シークレットの名前の一覧 |
 | `PUT /v1/secrets/{kind}[?owner=]` | シークレットを登録する |
 | `DELETE /v1/secrets/{kind}[?owner=]` | シークレットを消す |
