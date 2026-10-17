@@ -179,6 +179,18 @@ impl RunnerBackend for ClusterBackend {
         }
     }
 
+    async fn remove_state(&self, key: &str) -> Result<(), Error> {
+        // 置いていないワークスペースには、状態もない。
+        let Some(node) = self.placed(key).await? else {
+            return Ok(());
+        };
+        let request = self
+            .client
+            .delete(Self::url(&node, &format!("/v1/runners/{key}/state")));
+        self.call(&node, request).await?;
+        Ok(())
+    }
+
     async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
         let node = self.placed_or_error(&spec.key).await?;
         let request = self

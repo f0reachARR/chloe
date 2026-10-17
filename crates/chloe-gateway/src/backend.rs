@@ -36,6 +36,13 @@ impl RunnerBackend for Backend {
         }
     }
 
+    async fn remove_state(&self, key: &str) -> Result<(), Error> {
+        match self {
+            Self::Docker(b) => b.remove_state(key).await,
+            Self::Cluster(b) => b.remove_state(key).await,
+        }
+    }
+
     async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
         match self {
             Self::Docker(b) => b.update(spec).await,

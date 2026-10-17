@@ -162,6 +162,20 @@ impl RunnerBackend for DockerBackend {
         Ok(())
     }
 
+    async fn remove_state(&self, key: &str) -> Result<(), Error> {
+        if self.is_running(key).await? {
+            return Err(Error::Runner(format!("{key} is still running")));
+        }
+        match tokio::fs::remove_dir_all(self.state_dir(key)).await {
+            Ok(()) => {
+                info!(key, "runner state removed");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let line = serde_json::json!({ "policy": spec.policy }).to_string();

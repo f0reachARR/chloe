@@ -629,8 +629,30 @@ impl<B: RunnerBackend> Controller<B> {
         self.stop_runner(workspace.id, &state).await
     }
 
+    /// ワークスペースを消す。ランナーを止め、`disks` ならランナーの状態 (ディスク) も消す。
+    /// 消し終わるまで、同じワークスペースのランナーは起動しない。
+    pub async fn remove(&self, workspace: &Workspace, disks: bool) -> Result<(), Error> {
+        let state = self.state(workspace.id);
+        let mut running = state.lifecycle.lock().await;
+        self.stop_locked(workspace.id, &mut running).await?;
+        if disks {
+            // 置き場所の記録はワークスペースと一緒に消えるので、先に状態を消す。
+            info!(target: "audit", key = workspace.key(), "removing runner state");
+            self.inner.backend.remove_state(&workspace.key()).await?;
+        }
+        self.inner.store.delete(workspace.id).await
+    }
+
     async fn stop_runner(&self, workspace_id: i64, state: &RunnerState) -> Result<(), Error> {
         let mut running = state.lifecycle.lock().await;
+        self.stop_locked(workspace_id, &mut running).await
+    }
+
+    async fn stop_locked(
+        &self,
+        workspace_id: i64,
+        running: &mut Option<Running>,
+    ) -> Result<(), Error> {
         let Some(current) = running.take() else {
             return Ok(());
         };
@@ -757,6 +779,8 @@ mod tests {
         allow: Mutex<HashMap<String, Vec<String>>>,
         /// あれば、`list` はこの (古い) 一覧を返す。一覧を取ったあとに起動した場合をまねる。
         stale_list: Mutex<Option<Vec<String>>>,
+        /// 状態を消したランナーの識別子。
+        removed: Mutex<Vec<String>>,
     }
 
     /// guest-agent の応答をまねる。
@@ -855,6 +879,14 @@ mod tests {
             Ok(self.running.lock().unwrap().contains_key(key))
         }
 
+        async fn remove_state(&self, key: &str) -> Result<(), Error> {
+            if self.running.lock().unwrap().contains_key(key) {
+                return Err(Error::Runner(format!("{key} is still running")));
+            }
+            self.removed.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+
         async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
             self.updates.fetch_add(1, Ordering::SeqCst);
             self.allow
@@ -919,6 +951,7 @@ mod tests {
             env: Arc::new(Mutex::new(None)),
             allow: Mutex::new(HashMap::new()),
             stale_list: Mutex::new(None),
+            removed: Mutex::new(vec![]),
         })
     }
 
@@ -1011,6 +1044,23 @@ mod tests {
         backend.busy.lock().unwrap().clear();
         tokio::time::sleep(ms(600)).await;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn removes_disks_only_when_asked() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let kept = workspace(&controller, "kept", "alice").await;
+        let purged = workspace(&controller, "purged", "alice").await;
+        let _session = controller.open(&purged).await.unwrap();
+
+        controller.remove(&kept, false).await.unwrap();
+        // 動いているランナーは、止めてから状態を消す。
+        controller.remove(&purged, true).await.unwrap();
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(*backend.removed.lock().unwrap(), [purged.key()]);
+        for ws in [&kept, &purged] {
+            assert!(controller.store().get(ws.id).await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]

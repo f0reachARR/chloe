@@ -39,6 +39,8 @@ pub trait RunnerBackend: Send + Sync + 'static {
     /// ランナーを止める。VM の中のファイルシステムは、先に VM を止めて閉じておく。
     fn stop(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
     fn is_running(&self, key: &str) -> impl Future<Output = Result<bool, Error>> + Send;
+    /// 止めたランナーの状態 (ワークスペースと Docker のディスク、CA、ログ) を消す。
+    fn remove_state(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// 動いているランナーのプロキシの方針を入れ替える。VM の環境変数 (プレースホルダー) は
     /// controller が guest-agent に送る。
     fn update(&self, spec: RunnerSpec) -> impl Future<Output = Result<(), Error>> + Send;
