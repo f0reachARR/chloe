@@ -299,8 +299,18 @@ impl<B: RunnerBackend> Controller<B> {
             return Ok(false);
         }
         let spec = self.build(workspace).await?;
+        let env = spec.guest_env.clone();
         self.inner.backend.update(spec).await?;
         info!(workspace = %workspace.display_name(), "runner policy refreshed");
+        // 新しく使えるようになった種類のプレースホルダーを、このあとに起動するシェルに入れる。
+        // すでに動いているシェルの環境は変わらない。
+        let vsock = running.as_ref().map(|r| r.vsock.clone());
+        drop(running);
+        if let Some(vsock) = vsock
+            && let Err(error) = push_env(&vsock, env).await
+        {
+            warn!(workspace = %workspace.display_name(), "failed to update the VM environment: {error}");
+        }
         Ok(true)
     }
 
@@ -517,6 +527,23 @@ impl<B: RunnerBackend> Drop for Session<B> {
     }
 }
 
+async fn push_env(vsock: &std::path::Path, env: Vec<(String, String)>) -> Result<(), Error> {
+    let stream = firecracker::connect(vsock, AGENT_PORT, Duration::from_secs(2)).await?;
+    let mut conn = Connection::new(stream);
+    conn.send(&ClientMessage::SetEnv(env))
+        .await
+        .map_err(|e| Error::Runner(e.to_string()))?;
+    let answer = tokio::time::timeout(Duration::from_secs(5), conn.recv::<AgentMessage>())
+        .await
+        .map_err(|_| Error::Runner("the VM did not answer in time".into()))?;
+    match answer {
+        Ok(Some(AgentMessage::EnvUpdated)) => Ok(()),
+        Ok(Some(AgentMessage::Error(message))) => Err(Error::Runner(message)),
+        Ok(other) => Err(Error::Runner(format!("unexpected answer: {other:?}"))),
+        Err(e) => Err(Error::Runner(e.to_string())),
+    }
+}
+
 async fn query_activity(vsock: &std::path::Path) -> Result<Vec<String>, Error> {
     let stream = firecracker::connect(vsock, AGENT_PORT, Duration::from_secs(2)).await?;
     let mut conn = Connection::new(stream);
@@ -568,6 +595,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
+    /// 偽の guest-agent が最後に受け取った環境変数。
+    type PushedEnv = Arc<Mutex<Option<Vec<(String, String)>>>>;
+
     struct FakeBackend {
         dir: tempfile::TempDir,
         starts: AtomicUsize,
@@ -579,19 +609,27 @@ mod tests {
         busy: Arc<Mutex<Vec<String>>>,
         /// 偽の guest-agent が再起動を最後まで受け付けた回数。
         reboots: Arc<AtomicUsize>,
+        /// 偽の guest-agent が最後に受け取った環境変数。
+        env: PushedEnv,
     }
 
     /// Firecracker の vsock の握手と guest-agent の応答をまねる。
     ///
     /// 本物と同じく、コマンドの要求には先に `Started` を返し、終わる前に接続が閉じられたら
     /// プロセスを止めたことにする (再起動の要求なら、再起動は始まらない)。
-    async fn fake_agent(path: PathBuf, busy: Arc<Mutex<Vec<String>>>, reboots: Arc<AtomicUsize>) {
+    async fn fake_agent(
+        path: PathBuf,
+        busy: Arc<Mutex<Vec<String>>>,
+        reboots: Arc<AtomicUsize>,
+        env: PushedEnv,
+    ) {
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let busy = busy.clone();
                 let reboots = reboots.clone();
+                let env = env.clone();
                 tokio::spawn(async move {
                     while stream.read_u8().await.ok() != Some(b'\n') {}
                     stream.write_all(b"OK 1\n").await.unwrap();
@@ -600,6 +638,10 @@ mod tests {
                         Ok(Some(ClientMessage::Activity)) => {
                             let busy = busy.lock().unwrap().clone();
                             conn.send(&AgentMessage::Activity { busy }).await
+                        }
+                        Ok(Some(ClientMessage::SetEnv(vars))) => {
+                            *env.lock().unwrap() = Some(vars);
+                            conn.send(&AgentMessage::EnvUpdated).await
                         }
                         Ok(Some(ClientMessage::Exec(request))) => {
                             conn.send(&AgentMessage::Started { pid: 1 }).await.unwrap();
@@ -635,6 +677,7 @@ mod tests {
                 self.vsock_path(&spec.key),
                 self.busy.clone(),
                 self.reboots.clone(),
+                self.env.clone(),
             )
             .await;
             self.running
@@ -707,6 +750,7 @@ mod tests {
             running: Mutex::new(HashMap::new()),
             busy: Arc::new(Mutex::new(vec![])),
             reboots: Arc::new(AtomicUsize::new(0)),
+            env: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -991,5 +1035,10 @@ mod tests {
         assert!(controller.refresh(&ws_a).await.unwrap());
         assert_eq!(backend.running.lock().unwrap()[&ws_a.key()], 2);
         assert_eq!(backend.updates.load(Ordering::SeqCst), 1);
+        // VM の環境変数も、使える種類のプレースホルダーだけに入れ替える。
+        let env = backend.env.lock().unwrap().clone().unwrap();
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(names.contains(&"GH_TOKEN"), "{names:?}");
+        assert!(!names.contains(&"ANTHROPIC_API_KEY"), "{names:?}");
     }
 }

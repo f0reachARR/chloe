@@ -153,7 +153,7 @@ async fn exec(
                 Ok(n) => tx.send(&ClientMessage::Stdin(buf[..n].to_vec())).await?,
             },
             message = rx.recv::<AgentMessage>() => match message? {
-                Some(AgentMessage::Started { .. } | AgentMessage::Activity { .. } | AgentMessage::Connected) => {}
+                Some(AgentMessage::Started { .. } | AgentMessage::Activity { .. } | AgentMessage::Connected | AgentMessage::EnvUpdated) => {}
                 Some(AgentMessage::Stdout(data)) => {
                     stdout.write_all(&data).await?;
                     stdout.flush().await?;

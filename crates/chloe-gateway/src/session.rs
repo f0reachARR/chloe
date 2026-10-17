@@ -595,7 +595,7 @@ async fn relay_inner(
                 None => return Ok(None),
             },
             message = rx.recv::<AgentMessage>() => match message? {
-                Some(AgentMessage::Started { .. } | AgentMessage::Activity { .. } | AgentMessage::Connected) => {}
+                Some(AgentMessage::Started { .. } | AgentMessage::Activity { .. } | AgentMessage::Connected | AgentMessage::EnvUpdated) => {}
                 Some(AgentMessage::Stdout(data)) => {
                     if handle.data(channel, data).await.is_err() {
                         return Ok(None);
@@ -747,7 +747,7 @@ async fn github_login_command(
                 .refresh_running(Some(&crate::access::personal(login)))
                 .await;
             say(format!(
-                "Signed in. {refreshed} running workspace(s) can use GitHub now; a workspace started before you signed in needs `chloe ws stop` once to get the GH_TOKEN placeholder.\n"
+                "Signed in. {refreshed} running workspace(s) can use GitHub now; shells opened from now on get GH_TOKEN.\n"
             ))
             .await;
             0

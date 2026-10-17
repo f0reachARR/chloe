@@ -44,6 +44,10 @@ pub enum ClientMessage {
     Activity,
     /// VM の中から TCP で接続する。[`ClientMessage::Exec`] の代わりに接続して最初に送る。
     Connect(ConnectRequest),
+    /// ランナーが渡す環境変数 (プレースホルダーなど) を入れ替える。このあとに起動するプロセスと
+    /// ログインシェルに入る。[`ClientMessage::Exec`] の代わりに接続して最初に送り、
+    /// [`AgentMessage::EnvUpdated`] を受け取ったら接続を閉じる。
+    SetEnv(Vec<(String, String)>),
 }
 
 /// guest-agent からホストへのメッセージ。
@@ -64,6 +68,8 @@ pub enum AgentMessage {
     },
     /// [`ClientMessage::Connect`] の接続ができた。このあとは生のバイト列になる。
     Connected,
+    /// [`ClientMessage::SetEnv`] の環境変数を入れ替えた。
+    EnvUpdated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

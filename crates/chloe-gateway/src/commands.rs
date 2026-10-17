@@ -303,7 +303,7 @@ async fn secret_set(
         .map_err(|e| e.to_string())?;
     shared.refresh_running(Some(&personal(login))).await;
     Ok(format!(
-        "saved {kind} (used from the next request; a workspace started before {kind} was set needs `chloe ws stop` once to get its placeholder)\n"
+        "saved {kind} (used from the next request; in a running workspace, shells opened from now on get its placeholder)\n"
     ))
 }
 

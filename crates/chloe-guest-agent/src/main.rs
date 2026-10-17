@@ -72,7 +72,20 @@ async fn handle(stream: VsockStream) -> Result<()> {
             return Ok(());
         }
         Some(ClientMessage::Connect(request)) => return forward(conn, request).await,
-        _ => bail!("the first message must be Exec, Activity or Connect"),
+        Some(ClientMessage::SetEnv(env)) => {
+            match write_runner_env(std::path::Path::new(RUNNER_ENV), &env) {
+                Ok(()) => {
+                    info!(count = env.len(), "runner environment updated");
+                    conn.send(&AgentMessage::EnvUpdated).await?;
+                }
+                Err(error) => {
+                    conn.send(&AgentMessage::Error(format!("{error:#}")))
+                        .await?
+                }
+            }
+            return Ok(());
+        }
+        _ => bail!("the first message must be Exec, Activity, Connect or SetEnv"),
     };
     let (mut tx, rx) = conn.split();
     if request.version != PROTOCOL_VERSION {
@@ -204,6 +217,34 @@ fn process_env(request: &ExecRequest) -> Vec<(String, String)> {
     env
 }
 
+/// ランナーの環境変数のファイルを書き換える。ログインシェルがこのファイルをシェルとして読むので、
+/// 名前と値はシェルで特別な意味を持たない文字だけに限る。途中で読まれても壊れないよう、
+/// 一時的なファイルに書いてから置き換える。
+fn write_runner_env(path: &std::path::Path, env: &[(String, String)]) -> Result<()> {
+    let name_ok = |k: &str| {
+        !k.is_empty()
+            && !k.starts_with(|c: char| c.is_ascii_digit())
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let value_ok = |v: &str| {
+        v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-:/+=@".contains(c))
+    };
+    let mut content = String::new();
+    for (key, value) in env {
+        if !name_ok(key) || !value_ok(value) {
+            bail!("refused an unsafe environment variable: {key}");
+        }
+        content.push_str(&format!("{key}={value}\n"));
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).context("write the runner environment")?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&tmp, path).context("replace the runner environment")?;
+    Ok(())
+}
+
 /// KEY=VALUE の行を読む。空行と # で始まる行は飛ばす。値の引用符は扱わない。
 fn parse_env_file(content: &str) -> Vec<(String, String)> {
     content
@@ -262,7 +303,7 @@ async fn run_with_tty(
                 }
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::CloseStdin) => {}
-                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_)) => bail!("unexpected message"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_) | ClientMessage::SetEnv(_)) => bail!("unexpected message"),
                 // ホストが切断した。端末を閉じてプロセスに SIGHUP を届ける。
                 None => {
                     drop(input);
@@ -323,7 +364,7 @@ async fn run_with_pipes(
                 Some(ClientMessage::CloseStdin) => stdin = None,
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::Resize(_)) => {}
-                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_)) => bail!("unexpected message"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_) | ClientMessage::SetEnv(_)) => bail!("unexpected message"),
                 None => {
                     client_open = false;
                     let _ = child.start_kill();
@@ -392,6 +433,36 @@ mod tests {
         let (program, args) = command_line(&request(&[], None));
         assert_eq!(program, "/usr/sbin/runuser");
         assert_eq!(args, ["-u", "user", "--", "/bin/bash", "--login"]);
+    }
+
+    #[test]
+    fn writes_only_safe_runner_env() {
+        let dir = std::env::temp_dir().join(format!("chloe-env-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("env");
+        let env = vec![
+            ("GH_TOKEN".to_string(), "ghu_chloeABC123".to_string()),
+            (
+                "ANTHROPIC_API_KEY".to_string(),
+                "sk-ant-api03-chloe_x-y".to_string(),
+            ),
+        ];
+        write_runner_env(&path, &env).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(parse_env_file(&content), env);
+        // シェルとして読まれるので、特別な意味を持つ文字は受け付けず、前の内容を残す。
+        for bad in [
+            ("A", "$(id)"),
+            ("A", "x y"),
+            ("A B", "x"),
+            ("1A", "x"),
+            ("A", "x\nB=y"),
+        ] {
+            let bad = vec![(bad.0.to_string(), bad.1.to_string())];
+            assert!(write_runner_env(&path, &bad).is_err());
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
