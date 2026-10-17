@@ -671,12 +671,21 @@ impl russh::server::Handler for Connection {
                 }
                 session.channel_success(channel)?;
                 info!(target: "audit", via = "ssh", login = %user.login, "management TUI started");
-                let (tx, rx) = mpsc::channel(INPUT_BUFFER);
+                let (tx, mut rx) = mpsc::channel(INPUT_BUFFER);
                 state.input = Some(tx);
                 let (shared, handle) = (self.shared.clone(), session.handle());
                 tokio::spawn(async move {
-                    let code =
-                        tui::run(shared, user.login, handle.clone(), channel, tty.size, rx).await;
+                    let mut size = tty.size;
+                    let quit = tui::run(
+                        shared,
+                        user.login,
+                        handle.clone(),
+                        channel,
+                        &mut size,
+                        &mut rx,
+                    )
+                    .await;
+                    let code = if quit { 0 } else { 1 };
                     let _ = handle.exit_status_request(channel, code).await;
                     let _ = handle.eof(channel).await;
                     let _ = handle.close(channel).await;
@@ -793,7 +802,7 @@ async fn relay(
     let result = async {
         if user.workspace.is_none() {
             match choose_workspace(
-                &shared,
+                shared.clone(),
                 &user.login,
                 &chosen,
                 &handle,
@@ -805,7 +814,8 @@ async fn relay(
             {
                 tui::Picked::Workspace(picked) => name = picked,
                 tui::Picked::Cancelled => bail!("no workspace was chosen"),
-                tui::Picked::Closed => return Ok(None),
+                // 管理の TUI は choose_workspace のなかで開くので、ここには来ない。
+                tui::Picked::Closed | tui::Picked::Manage => return Ok(None),
             }
         }
         let workspace = shared.resolve_workspace(&user.login, Some(&name)).await?;
@@ -840,8 +850,9 @@ async fn relay(
 
 /// ワークスペースを書かずに端末でシェルを開いたとき、default 以外にも入れるワークスペースが
 /// あれば選ばせる。選んだものは接続のあいだ覚えておく。選ばせないときは default に入る。
+/// 選ぶ画面からは管理の TUI を開け、閉じると選ぶ画面に戻る。
 async fn choose_workspace(
-    shared: &Shared,
+    shared: Arc<Shared>,
     login: &str,
     chosen: &ChosenWorkspace,
     handle: &Handle,
@@ -860,24 +871,47 @@ async fn choose_workspace(
     let Some(tty) = request.tty.as_mut() else {
         return default();
     };
-    let workspaces = match ops::list_workspaces(shared, login).await {
-        Ok(workspaces) => workspaces,
-        Err(error) => {
-            warn!("failed to list workspaces: {error}");
+    // 管理の TUI から戻ったあとは、default しかなくても選ぶ画面を出す。
+    let mut managed = false;
+    loop {
+        let workspaces = match ops::list_workspaces(&shared, login).await {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                warn!("failed to list workspaces: {error}");
+                return default();
+            }
+        };
+        if !managed && workspaces.iter().all(|ws| ws.name == DEFAULT_WORKSPACE) {
             return default();
         }
-    };
-    if workspaces.iter().all(|ws| ws.name == DEFAULT_WORKSPACE) {
-        return default();
+        let picker = tui::Picker::new(login, DEFAULT_WORKSPACE, workspaces);
+        // 選んでいるあいだに端末の大きさが変わったら、シェルにはその大きさを渡す。
+        let picked = tui::pick(picker, handle, channel, &mut tty.size, input).await;
+        match picked {
+            tui::Picked::Workspace(ref name) => {
+                info!(target: "audit", %login, workspace = %name, "workspace chosen");
+                *chosen.lock().unwrap() = Some(name.clone());
+                return picked;
+            }
+            tui::Picked::Manage => {
+                info!(target: "audit", via = "picker", %login, "management TUI started");
+                let quit = tui::run(
+                    shared.clone(),
+                    login.to_string(),
+                    handle.clone(),
+                    channel,
+                    &mut tty.size,
+                    input,
+                )
+                .await;
+                if !quit {
+                    return tui::Picked::Closed;
+                }
+                managed = true;
+            }
+            tui::Picked::Cancelled | tui::Picked::Closed => return picked,
+        }
     }
-    let picker = tui::Picker::new(login, DEFAULT_WORKSPACE, workspaces);
-    // 選んでいるあいだに端末の大きさが変わったら、シェルにはその大きさを渡す。
-    let picked = tui::pick(picker, handle, channel, &mut tty.size, input).await;
-    if let tui::Picked::Workspace(name) = &picked {
-        info!(target: "audit", %login, workspace = %name, "workspace chosen");
-        *chosen.lock().unwrap() = Some(name.clone());
-    }
-    picked
 }
 
 async fn relay_inner(

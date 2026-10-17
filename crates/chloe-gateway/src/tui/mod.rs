@@ -32,15 +32,16 @@ use crate::github_token::USER_TOKEN_SECRET;
 use crate::ops;
 use crate::session::Shared;
 
-/// TUI を動かし、利用者が閉じるかチャネルが閉じたら終わる。終了コードを返す。
+/// TUI を動かし、利用者が閉じるかチャネルが閉じたら終わる。利用者が閉じたときは `true`
+/// を返す。画面の大きさが変わったら `size` に書き戻す。
 pub async fn run(
     shared: Arc<Shared>,
     login: String,
     handle: Handle,
     channel: ChannelId,
-    size: WindowSize,
-    mut input: mpsc::Receiver<ClientMessage>,
-) -> u32 {
+    size: &mut WindowSize,
+    input: &mut mpsc::Receiver<ClientMessage>,
+) -> bool {
     let send = |data: Vec<u8>| {
         let handle = handle.clone();
         async move { handle.data(channel, data).await.is_ok() }
@@ -50,11 +51,11 @@ pub async fn run(
         Ok(terminal) => terminal,
         Err(error) => {
             warn!("failed to start the TUI: {error}");
-            return 1;
+            return false;
         }
     };
     if !send(ENTER.to_vec()).await {
-        return 1;
+        return false;
     }
     let (results, mut outcomes) = mpsc::unbounded_channel();
     let mut app = App::new(&login);
@@ -83,8 +84,9 @@ pub async fn run(
                         }
                     }
                 }
-                Some(ClientMessage::Resize(size)) => {
-                    if resize(&mut terminal, size).is_err() {
+                Some(ClientMessage::Resize(new_size)) => {
+                    *size = new_size;
+                    if resize(&mut terminal, new_size).is_err() {
                         break;
                     }
                 }
@@ -99,7 +101,7 @@ pub async fn run(
     }
     let _ = send(output.take()).await;
     let _ = send(LEAVE.to_vec()).await;
-    0
+    app.quit
 }
 
 /// SSH のチャネルに描く、画面全体を使う端末。

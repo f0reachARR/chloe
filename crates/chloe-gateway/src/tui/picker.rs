@@ -20,6 +20,8 @@ use crate::ops::WorkspaceInfo;
 pub enum Picked {
     /// このワークスペースに入る (SSH で書く名前)。
     Workspace(String),
+    /// 管理の TUI を開く。
+    Manage,
     /// 利用者が選ばずに閉じた。
     Cancelled,
     /// チャネルが閉じた。
@@ -66,6 +68,7 @@ impl Picker {
             KeyCode::Enter => {
                 self.picked = Some(Picked::Workspace(self.rows[self.selected].0.clone()));
             }
+            KeyCode::Char('m') if !ctrl => self.picked = Some(Picked::Manage),
             KeyCode::Esc | KeyCode::Char('q') if !ctrl => self.picked = Some(Picked::Cancelled),
             KeyCode::Char('c' | 'd') if ctrl => self.picked = Some(Picked::Cancelled),
             _ => {}
@@ -100,7 +103,7 @@ impl Picker {
         frame.render_stateful_widget(list, inner, &mut state);
         frame.render_widget(
             Paragraph::new(Line::from(
-                "↑↓ select  Enter connect  q quit  (connect as chloe+<name>@ to skip this)"
+                "↑↓ select  Enter connect  m manage  q quit  (connect as chloe+<name>@ to skip this)"
                     .dark_gray(),
             )),
             hints_area,
@@ -240,5 +243,9 @@ mod tests {
         let mut picker = Picker::new("alice", "default", vec![ws("api", false)]);
         picker.handle_key(ctrl('c'));
         assert_eq!(picker.picked, Some(Picked::Cancelled));
+
+        let mut picker = Picker::new("alice", "default", vec![ws("api", false)]);
+        picker.handle_key(key(KeyCode::Char('m')));
+        assert_eq!(picker.picked, Some(Picked::Manage));
     }
 }
