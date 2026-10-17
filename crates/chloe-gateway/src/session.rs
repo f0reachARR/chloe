@@ -27,8 +27,9 @@ use crate::auth::{
 };
 use crate::backend::Backend;
 use crate::commands;
-use crate::device_flow;
 use crate::config::Config;
+use crate::device_flow;
+use crate::tui;
 
 /// ワークスペースを指定しなかったときに入る、個人のワークスペースの名前。
 const DEFAULT_WORKSPACE: &str = "default";
@@ -639,6 +640,27 @@ impl russh::server::Handler for Connection {
             let Some(state) = self.channels.get_mut(&channel) else {
                 return session.channel_failure(channel);
             };
+            // 端末を割り当てた `chloe` だけなら、管理の TUI を開く。
+            if args.is_empty()
+                && let (Some(tty), Some(user)) = (state.tty.clone(), self.user.clone())
+            {
+                if state.input.is_some() {
+                    return session.channel_failure(channel);
+                }
+                session.channel_success(channel)?;
+                info!(target: "audit", via = "ssh", login = %user.login, "management TUI started");
+                let (tx, rx) = mpsc::channel(INPUT_BUFFER);
+                state.input = Some(tx);
+                let (shared, handle) = (self.shared.clone(), session.handle());
+                tokio::spawn(async move {
+                    let code =
+                        tui::run(shared, user.login, handle.clone(), channel, tty.size, rx).await;
+                    let _ = handle.exit_status_request(channel, code).await;
+                    let _ = handle.eof(channel).await;
+                    let _ = handle.close(channel).await;
+                });
+                return Ok(());
+            }
             session.channel_success(channel)?;
             if commands::needs_stdin(&args) {
                 state.pending_command = Some((args, Vec::new()));

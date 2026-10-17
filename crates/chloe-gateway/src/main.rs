@@ -14,6 +14,7 @@ mod github_token;
 mod internal;
 mod ops;
 mod session;
+mod tui;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

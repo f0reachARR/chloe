@@ -1,0 +1,360 @@
+//! `ssh -t <host> chloe` で開く管理の TUI。
+//!
+//! ゲートウェイが SSH のチャネルに画面を描き、チャネルのデータをキーとして読む。操作は
+//! 管理コマンドや管理 API と同じ [`crate::ops`] で行う。
+
+mod app;
+mod form;
+mod policy_form;
+mod secret_form;
+mod term;
+
+use std::sync::Arc;
+
+use chloe_agent_proto::{ClientMessage, WindowSize};
+use chloe_secrets::Owner;
+use ratatui::layout::{Rect, Size};
+use ratatui::{Terminal, TerminalOptions, Viewport};
+use russh::ChannelId;
+use russh::server::Handle;
+use terminput::{Event, KeyEventKind};
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+
+use self::app::{Action, App, Outcome};
+use self::term::{ENTER, InputParser, LEAVE, Output, SshBackend};
+use crate::device_flow;
+use crate::github_token::USER_TOKEN_SECRET;
+use crate::ops;
+use crate::session::Shared;
+
+/// TUI を動かし、利用者が閉じるかチャネルが閉じたら終わる。終了コードを返す。
+pub async fn run(
+    shared: Arc<Shared>,
+    login: String,
+    handle: Handle,
+    channel: ChannelId,
+    size: WindowSize,
+    mut input: mpsc::Receiver<ClientMessage>,
+) -> u32 {
+    let send = |data: Vec<u8>| {
+        let handle = handle.clone();
+        async move { handle.data(channel, data).await.is_ok() }
+    };
+    let output = Output::default();
+    let size = Size::new(size.cols, size.rows);
+    let mut terminal = match Terminal::with_options(
+        SshBackend::new(output.clone(), size),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::from((ratatui::layout::Position::ORIGIN, size))),
+        },
+    ) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            warn!("failed to start the TUI: {error}");
+            return 1;
+        }
+    };
+    if !send(ENTER.to_vec()).await {
+        return 1;
+    }
+    let (results, mut outcomes) = mpsc::unbounded_channel();
+    let mut app = App::new(&login);
+    let start = app.start();
+    spawn_all(&shared, &login, &results, start);
+    let mut parser = InputParser::default();
+    loop {
+        if let Err(error) = terminal.draw(|frame| app.render(frame)) {
+            warn!("failed to draw the TUI: {error}");
+            break;
+        }
+        if !send(output.take()).await || app.quit {
+            break;
+        }
+        tokio::select! {
+            message = input.recv() => match message {
+                Some(ClientMessage::Stdin(data)) => {
+                    for event in parser.feed(&data) {
+                        match event {
+                            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                                let actions = app.handle_key(key);
+                                spawn_all(&shared, &login, &results, actions);
+                            }
+                            Event::Paste(text) => app.paste(&text),
+                            _ => {}
+                        }
+                    }
+                }
+                Some(ClientMessage::Resize(size)) => {
+                    let size = Size::new(size.cols, size.rows);
+                    terminal.backend_mut().set_size(size);
+                    let area = Rect::from((ratatui::layout::Position::ORIGIN, size));
+                    if terminal.resize(area).and_then(|()| terminal.clear()).is_err() {
+                        break;
+                    }
+                }
+                Some(ClientMessage::CloseStdin) | None => break,
+                Some(_) => {}
+            },
+            Some(outcome) = outcomes.recv() => {
+                let actions = app.apply(outcome);
+                spawn_all(&shared, &login, &results, actions);
+            }
+        }
+    }
+    let _ = send(output.take()).await;
+    let _ = send(LEAVE.to_vec()).await;
+    0
+}
+
+fn spawn_all(
+    shared: &Arc<Shared>,
+    login: &str,
+    results: &mpsc::UnboundedSender<Outcome>,
+    actions: Vec<Action>,
+) {
+    for action in actions {
+        let (shared, login, results) = (shared.clone(), login.to_string(), results.clone());
+        tokio::spawn(async move {
+            if let Some(name) = action.audit_name() {
+                info!(target: "audit", via = "tui", login = %login, command = name, "management command");
+            }
+            let outcome = perform(&shared, &login, action, &results).await;
+            let _ = results.send(outcome);
+        });
+    }
+}
+
+/// 操作を行う。途中で知らせることがあれば `progress` に送る。
+async fn perform(
+    shared: &Shared,
+    login: &str,
+    action: Action,
+    progress: &mpsc::UnboundedSender<Outcome>,
+) -> Outcome {
+    let result: Result<Outcome, String> = async {
+        let done = |message: String, reload: Vec<Action>| Outcome::Done { message, reload };
+        let shown = |e: ops::Error| e.to_string();
+        Ok(match action {
+            Action::LoadWorkspaces => {
+                Outcome::Workspaces(ops::list_workspaces(shared, login).await.map_err(shown)?)
+            }
+            Action::CreateWorkspace { name, root } => {
+                let ws = ops::create_workspace(shared, login, &name, root)
+                    .await
+                    .map_err(shown)?;
+                done(format!("created {}", ws.name), vec![Action::LoadWorkspaces])
+            }
+            Action::SetRoot { name, root } => {
+                let ws = ops::set_root(shared, login, &name, root)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!(
+                        "{} will use the {} root from the next start",
+                        ws.display_name(),
+                        root.as_str()
+                    ),
+                    vec![Action::LoadWorkspaces],
+                )
+            }
+            Action::StopWorkspace(name) => {
+                let ws = ops::stop_workspace(shared, login, &name)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!("stopped {}", ws.display_name()),
+                    vec![Action::LoadWorkspaces],
+                )
+            }
+            Action::RemoveWorkspace(name) => {
+                let ws = ops::remove_workspace(shared, login, &name)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!("removed {}", ws.display_name()),
+                    vec![Action::LoadWorkspaces],
+                )
+            }
+            Action::LoadOwners => {
+                let mut owners = shared
+                    .owners_for(login)
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                // 個人のものを先に、Organization のあとにその team を並べる。
+                owners.sort_by_key(|o| (!matches!(o, Owner::User(_)), ops::owner_arg(o)));
+                Outcome::Owners(owners)
+            }
+            Action::LoadSecrets(owner) => {
+                let mut names = ops::list_secrets(shared, login, &owner)
+                    .await
+                    .map_err(shown)?;
+                // GitHub のユーザートークンは chloe github login で扱う。
+                names.retain(|n| n != USER_TOKEN_SECRET);
+                Outcome::Secrets { owner, names }
+            }
+            Action::ShowSecret { owner, name } => {
+                let view = ops::show_secret(shared, login, &owner, &name)
+                    .await
+                    .map_err(shown)?;
+                Outcome::Secret { owner, view }
+            }
+            Action::SaveSecret {
+                owner,
+                name,
+                mut input,
+                keep_values,
+            } => {
+                if keep_values {
+                    ops::keep_secret_values(shared, login, &owner, &name, &mut input)
+                        .await
+                        .map_err(shown)?;
+                }
+                ops::set_secret(shared, login, &owner, &name, input)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!("saved {name} for {}", ops::owner_arg(&owner)),
+                    vec![Action::LoadSecrets(owner)],
+                )
+            }
+            Action::RemoveSecret { owner, name } => {
+                ops::remove_secret(shared, login, &owner, &name)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!("removed {name} from {}", ops::owner_arg(&owner)),
+                    vec![Action::LoadSecrets(owner)],
+                )
+            }
+            Action::ShowPolicy(owner) => {
+                let layer = ops::show_policy(shared, login, &owner)
+                    .await
+                    .map_err(shown)?;
+                let mut inherited = Vec::new();
+                if let Owner::Team { org, .. } = &owner
+                    && let Some(upper) = ops::show_policy(shared, login, &Owner::Org(org.clone()))
+                        .await
+                        .ok()
+                        .flatten()
+                {
+                    inherited.push((org.clone(), upper));
+                }
+                Outcome::Policy {
+                    owner,
+                    layer,
+                    inherited,
+                }
+            }
+            Action::SavePolicy { owner, layer } => {
+                let refreshed = ops::set_policy(shared, login, &owner, &layer)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!(
+                        "saved the settings of {} ({refreshed} running workspace(s) updated)",
+                        ops::owner_arg(&owner)
+                    ),
+                    vec![],
+                )
+            }
+            Action::RemovePolicy(owner) => {
+                let refreshed = ops::remove_policy(shared, login, &owner)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!(
+                        "removed the settings of {} ({refreshed} running workspace(s) updated)",
+                        ops::owner_arg(&owner)
+                    ),
+                    vec![],
+                )
+            }
+            Action::LoadTokens => {
+                Outcome::Tokens(ops::list_tokens(shared, login).await.map_err(shown)?)
+            }
+            Action::CreateToken { name, expires } => {
+                let ttl = expires
+                    .as_deref()
+                    .map(ops::parse_duration)
+                    .transpose()
+                    .map_err(shown)?;
+                let (id, token) = ops::create_token(shared, login, &name, ttl)
+                    .await
+                    .map_err(shown)?;
+                Outcome::TokenCreated { id, name, token }
+            }
+            Action::RevokeToken(id) => {
+                ops::revoke_token(shared, login, id).await.map_err(shown)?;
+                done(format!("revoked token {id}"), vec![Action::LoadTokens])
+            }
+            Action::LoadKeys => {
+                Outcome::Keys(ops::list_ssh_keys(shared, login).await.map_err(shown)?)
+            }
+            Action::RemoveKey(fingerprint) => {
+                ops::remove_ssh_key(shared, login, &fingerprint)
+                    .await
+                    .map_err(shown)?;
+                done(format!("removed {fingerprint}"), vec![Action::LoadKeys])
+            }
+            Action::GitHubStatus => Outcome::GitHub(github_status(shared, login).await?),
+            Action::GitHubLogin => {
+                let github = shared
+                    .github
+                    .as_ref()
+                    .ok_or("the GitHub App is not configured")?;
+                let device = github
+                    .start_device_flow()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let _ = progress.send(Outcome::DeviceCode {
+                    uri: device.verification_uri.clone(),
+                    code: device.user_code.clone(),
+                });
+                match device_flow::renew(shared, github, login, &device)
+                    .await
+                    .map_err(|e| format!("{e:#}"))?
+                {
+                    Some(refreshed) => done(
+                        format!("Signed in. {refreshed} running workspace(s) got the new token."),
+                        vec![Action::GitHubStatus],
+                    ),
+                    None => return Err("the code expired before it was approved".into()),
+                }
+            }
+            Action::GitHubLogout => {
+                shared
+                    .delete_user_token(login)
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                done(
+                    "signed out (the next connection needs the Device Flow)".into(),
+                    vec![Action::GitHubStatus],
+                )
+            }
+        })
+    }
+    .await;
+    result.unwrap_or_else(Outcome::Failed)
+}
+
+async fn github_status(shared: &Shared, login: &str) -> Result<String, String> {
+    if shared.github.is_none() {
+        return Ok("The GitHub App is not configured.".into());
+    }
+    let token = shared
+        .load_user_token(login)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(match token {
+        Some(token) if token.is_usable() => format!(
+            "Signed in to GitHub as {login}. The token is refreshed automatically{}.\n\nPersonal workspaces use it for git and GH_TOKEN.",
+            token
+                .refresh_expires_at
+                .map(|at| format!(" until {}", app::format_time(at as i64)))
+                .unwrap_or_default()
+        ),
+        Some(_) => "The GitHub token expired. Press l to sign in again.".into(),
+        None => "Not signed in. Press l to sign in.".into(),
+    })
+}
