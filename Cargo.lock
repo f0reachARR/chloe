@@ -654,9 +654,11 @@ dependencies = [
  "chloe-secrets",
  "futures",
  "rand 0.10.3",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "thiserror",
@@ -686,9 +688,11 @@ name = "chloe-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chloe-agent-proto",
  "chloe-controller",
  "chloe-github",
+ "chloe-mtls",
  "chloe-secrets",
  "clap",
  "futures",

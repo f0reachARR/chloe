@@ -226,6 +226,126 @@ impl Store {
         Ok(layers)
     }
 
+    /// ワークスペースを置いたホスト。まだ起動していなければ `None`。
+    pub async fn workspace_node(&self, id: i64) -> Result<Option<String>, Error> {
+        let row = sqlx::query("SELECT node FROM workspaces WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(row) => row.try_get("node")?,
+            None => None,
+        })
+    }
+
+    pub async fn set_workspace_node(&self, id: i64, node: &str) -> Result<(), Error> {
+        sqlx::query("UPDATE workspaces SET node = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(node)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// ホストごとの、そこに置いたワークスペースの数 (新しいワークスペースの置き場所を決める)。
+    pub async fn placement_counts(&self) -> Result<BTreeMap<String, usize>, Error> {
+        let rows = sqlx::query(
+            "SELECT node, COUNT(*) AS n FROM workspaces WHERE node IS NOT NULL GROUP BY node",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let n: i64 = row.try_get("n")?;
+                Ok((row.try_get("node")?, n as usize))
+            })
+            .collect()
+    }
+
+    /// `node` で動いていると記録したランナーのワークスペースの ID。
+    pub async fn recorded_runners_on(&self, node: &str) -> Result<Vec<i64>, Error> {
+        let rows =
+            sqlx::query("SELECT workspace_id FROM runners WHERE node = ?1 ORDER BY workspace_id")
+                .bind(node)
+                .fetch_all(&self.pool)
+                .await?;
+        rows.iter()
+            .map(|row| row.try_get("workspace_id").map_err(Into::into))
+            .collect()
+    }
+
+    pub async fn nodes(&self) -> Result<Vec<Node>, Error> {
+        let rows = sqlx::query("SELECT name, url, joined_at FROM nodes ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(Node {
+                    name: row.try_get("name")?,
+                    url: row.try_get("url")?,
+                    joined: row.try_get::<Option<i64>, _>("joined_at")?.is_some(),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn node(&self, name: &str) -> Result<Option<Node>, Error> {
+        Ok(self.nodes().await?.into_iter().find(|n| n.name == name))
+    }
+
+    /// ホストを登録し、一度だけ使える参加用のトークン (の秘密の部分) を返す。登録済みなら
+    /// URL を変え、新しいトークンを作る (証明書を作り直すとき)。
+    pub async fn add_node(&self, name: &str, url: &str, ttl_secs: i64) -> Result<String, Error> {
+        sqlx::query(
+            "INSERT INTO nodes (name, url) VALUES (?1, ?2)
+             ON CONFLICT (name) DO UPDATE SET url = excluded.url",
+        )
+        .bind(name)
+        .bind(url)
+        .execute(&self.pool)
+        .await?;
+        let secret = random_token();
+        sqlx::query("INSERT INTO node_joins (token_hash, name, expires_at) VALUES (?1, ?2, ?3)")
+            .bind(token_hash(&secret))
+            .bind(name)
+            .bind(now() + ttl_secs)
+            .execute(&self.pool)
+            .await?;
+        Ok(secret)
+    }
+
+    /// 参加用のトークンを使う。期限内の未使用のトークンなら消して、ホストの名前を返す。
+    pub async fn consume_join(&self, secret: &str) -> Result<Option<Node>, Error> {
+        let row =
+            sqlx::query("DELETE FROM node_joins WHERE token_hash = ?1 RETURNING name, expires_at")
+                .bind(token_hash(secret))
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let expires_at: i64 = row.try_get("expires_at")?;
+        if expires_at < now() {
+            return Ok(None);
+        }
+        let name: String = row.try_get("name")?;
+        sqlx::query("UPDATE nodes SET joined_at = ?2 WHERE name = ?1")
+            .bind(&name)
+            .bind(now())
+            .execute(&self.pool)
+            .await?;
+        self.node(&name).await
+    }
+
+    /// ホストの登録を消す。消したホストの証明書では、もう問い合わせに答えない。
+    pub async fn remove_node(&self, name: &str) -> Result<bool, Error> {
+        let result = sqlx::query("DELETE FROM nodes WHERE name = ?1")
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// シークレットの名前からプレースホルダーへの対応。
     pub async fn placeholders(&self, id: i64) -> Result<BTreeMap<String, String>, Error> {
         let rows = sqlx::query(
@@ -276,6 +396,31 @@ fn new_placeholder(prefix: &str) -> String {
         "{prefix}chloe{}",
         URL_SAFE_NO_PAD.encode(random).replace(['-', '_'], "x")
     )
+}
+
+/// ランナーのホスト。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Node {
+    pub name: String,
+    pub url: String,
+    /// 参加用のトークンで証明書を受け取ったか。
+    pub joined: bool,
+}
+
+/// 推測できないトークン (32 バイトの乱数の URL 向け Base64)。
+pub fn random_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::fill(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// トークンのハッシュ (SHA-256 の 16 進)。トークンは十分に長い乱数なので、遅いハッシュは要らない。
+pub fn token_hash(token: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn now() -> i64 {
@@ -335,6 +480,46 @@ pub(crate) mod tests {
         store.delete(ws.id).await.unwrap();
         assert_eq!(store.find(&api).await.unwrap(), None);
         assert!(store.placeholders(ws.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nodes_join_once_and_place_workspaces() {
+        let store = Store::new(pool().await);
+        let secret = store.add_node("n1", "https://n1:8445", 600).await.unwrap();
+        assert!(!store.nodes().await.unwrap()[0].joined);
+        assert_eq!(store.consume_join("wrong").await.unwrap(), None);
+        let node = store.consume_join(&secret).await.unwrap().unwrap();
+        assert_eq!(node.name, "n1");
+        assert!(node.joined);
+        assert_eq!(
+            store.consume_join(&secret).await.unwrap(),
+            None,
+            "used once"
+        );
+        // 期限の切れたトークンは使えない。
+        let expired = store.add_node("n2", "https://n2:8445", -1).await.unwrap();
+        assert_eq!(store.consume_join(&expired).await.unwrap(), None);
+
+        let ws = store
+            .create(
+                &WorkspaceRef::parse("a", "alice").unwrap(),
+                RootMode::Ephemeral,
+                "alice",
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.workspace_node(ws.id).await.unwrap(), None);
+        store.set_workspace_node(ws.id, "n1").await.unwrap();
+        assert_eq!(
+            store.workspace_node(ws.id).await.unwrap().as_deref(),
+            Some("n1")
+        );
+        assert_eq!(store.placement_counts().await.unwrap()["n1"], 1);
+        store.record_runner(ws.id, "n1").await.unwrap();
+        assert_eq!(store.recorded_runners_on("n1").await.unwrap(), [ws.id]);
+        assert!(store.recorded_runners_on("n2").await.unwrap().is_empty());
+        assert!(store.remove_node("n2").await.unwrap());
+        assert_eq!(store.nodes().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

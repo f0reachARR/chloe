@@ -54,9 +54,9 @@ pub trait RunnerBackend: Send + Sync + 'static {
     fn local_broker_socket(&self, key: &str) -> Option<PathBuf>;
     /// 実際に動いているランナーの識別子の一覧。reconcile で記録と突き合わせる。
     fn list(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
-    /// ランナーが動くホストの名前。段階 9 で、複数のホストを区別するのに使う。
-    fn node(&self) -> &str {
-        "local"
+    /// ランナーが動くホストの名前。起動したランナーの記録に使う。
+    fn node_of(&self, _key: &str) -> impl Future<Output = Result<String, Error>> + Send {
+        async { Ok("local".to_string()) }
     }
 }
 

@@ -289,7 +289,7 @@ impl<B: RunnerBackend> Controller<B> {
                 *running = Some(Running { broker });
                 self.inner
                     .store
-                    .record_runner(workspace.id, self.inner.backend.node())
+                    .record_runner(workspace.id, &self.inner.backend.node_of(&key).await?)
                     .await?;
                 Ok(())
             }
@@ -510,7 +510,7 @@ impl<B: RunnerBackend> Controller<B> {
             drop(running);
             self.inner
                 .store
-                .record_runner(workspace.id, self.inner.backend.node())
+                .record_runner(workspace.id, &self.inner.backend.node_of(key).await?)
                 .await?;
             info!(target: "audit", workspace = %workspace.display_name(), key, "adopted a running runner");
             report.adopted.push(key.clone());

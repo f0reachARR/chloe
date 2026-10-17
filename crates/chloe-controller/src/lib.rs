@@ -4,6 +4,7 @@
 
 mod broker;
 pub mod catalog;
+pub mod cluster;
 mod controller;
 pub mod docker;
 pub mod runner;
@@ -26,4 +27,7 @@ pub enum Error {
     AlreadyExists(String),
     #[error("runner: {0}")]
     Runner(String),
+    /// ランナーのホストにつながらない。
+    #[error("node unreachable: {0}")]
+    Unreachable(String),
 }
