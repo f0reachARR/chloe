@@ -754,6 +754,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "chloe-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chloe-controller",
+ "chloe-mtls",
+ "clap",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "chloe-policy"
 version = "0.1.0"
 dependencies = [

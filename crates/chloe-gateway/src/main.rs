@@ -137,13 +137,7 @@ async fn build_controller(config: &Config) -> Result<(Controller<DockerBackend>,
     chloe_secrets::MIGRATOR.run(&pool).await?;
     let master = MasterKey::load_or_generate(&config.master_key)
         .with_context(|| format!("load {}", config.master_key.display()))?;
-    let backend = DockerBackend {
-        image: config.runner.image.clone(),
-        guest_dir: std::path::absolute(&config.runner.guest_dir)?,
-        egress_bin: std::path::absolute(&config.runner.egress_bin)?,
-        state_root: std::path::absolute(&config.runner.state_root)?,
-        name_prefix: config.runner.name_prefix.clone(),
-    };
+    let backend = config.runner.backend()?;
     let secrets = SecretDb::new(pool.clone(), master);
     let controller = Controller::new(
         Store::new(pool),

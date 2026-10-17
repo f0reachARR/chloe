@@ -13,6 +13,40 @@ use tracing::info;
 use crate::Error;
 use crate::runner::{AgentStream, RunnerBackend, RunnerSpec};
 
+/// 開発用のランナー (chloe-dev-runner のコンテナ) の設定。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerConfig {
+    #[serde(default = "default_image")]
+    pub image: String,
+    pub guest_dir: PathBuf,
+    pub egress_bin: PathBuf,
+    pub state_root: PathBuf,
+    #[serde(default = "default_name_prefix")]
+    pub name_prefix: String,
+}
+
+fn default_image() -> String {
+    "chloe-dev-runner".into()
+}
+
+fn default_name_prefix() -> String {
+    "chloe-".into()
+}
+
+impl DockerConfig {
+    /// 設定のパスを絶対パスにして、Docker の実装を作る (コンテナに渡すパスは絶対パスが要る)。
+    pub fn backend(&self) -> std::io::Result<DockerBackend> {
+        Ok(DockerBackend {
+            image: self.image.clone(),
+            guest_dir: std::path::absolute(&self.guest_dir)?,
+            egress_bin: std::path::absolute(&self.egress_bin)?,
+            state_root: std::path::absolute(&self.state_root)?,
+            name_prefix: self.name_prefix.clone(),
+        })
+    }
+}
+
 pub struct DockerBackend {
     /// ランナーのコンテナのイメージ。
     pub image: String,

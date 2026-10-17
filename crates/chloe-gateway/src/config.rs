@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use chloe_controller::docker::DockerConfig;
 use chloe_controller::runner::BasePolicy;
 use serde::Deserialize;
 
@@ -54,20 +55,7 @@ pub struct Config {
     /// すべてのワークスペースに共通の許可リスト。
     #[serde(default)]
     pub policy: BasePolicy,
-    pub runner: DockerRunner,
-}
-
-/// 開発用のランナー (chloe-dev-runner のコンテナ) の設定。
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DockerRunner {
-    #[serde(default = "default_runner_image")]
-    pub image: String,
-    pub guest_dir: PathBuf,
-    pub egress_bin: PathBuf,
-    pub state_root: PathBuf,
-    #[serde(default = "default_name_prefix")]
-    pub name_prefix: String,
+    pub runner: DockerConfig,
 }
 
 impl Config {
@@ -96,14 +84,6 @@ fn default_max_busy_wait() -> u64 {
 
 fn default_reconcile_interval() -> u64 {
     60
-}
-
-fn default_runner_image() -> String {
-    "chloe-dev-runner".into()
-}
-
-fn default_name_prefix() -> String {
-    "chloe-".into()
 }
 
 #[cfg(test)]
