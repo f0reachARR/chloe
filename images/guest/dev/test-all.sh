@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VM を使う確認をまとめて実行し、結果と所要時間をまとめて出す。
 #
-#   test-all.sh [名前...]   (名前は smoke net root mvp github lifecycle。省略するとすべて)
+#   test-all.sh [名前...]   (名前は smoke net root mvp github lifecycle node。省略するとすべて)
 #
 # どの確認も VM の名前、状態のディレクトリ、ポートが別なので、すべて並べて実行する。
 # smoke、net、root には、CHLOE_DEV_NAME と CHLOE_DEV_STATE で別の VM と状態を使わせる。
@@ -14,11 +14,11 @@ out="$root/build/dev/test-logs"
 mkdir -p "$out"
 
 names=("$@")
-[ ${#names[@]} -gt 0 ] || names=(smoke net root mvp github lifecycle)
+[ ${#names[@]} -gt 0 ] || names=(smoke net root mvp github lifecycle node)
 selected() { local n; for n in "${names[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
 # 並べて実行するスクリプトが同時にビルドしないよう、先にビルドしておく。
-cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-gateway -p chloe-egress -p chloe-runner
+cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-gateway -p chloe-egress -p chloe-runner -p chloe-node
 docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
 
 run() {
@@ -32,7 +32,7 @@ run() {
 
 start=$(date +%s)
 pids=()
-for name in smoke net root mvp github lifecycle; do
+for name in smoke net root mvp github lifecycle node; do
     if selected "$name"; then
         run "$name" &
         pids+=($!)
