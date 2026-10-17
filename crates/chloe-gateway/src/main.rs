@@ -78,10 +78,14 @@ async fn main() -> Result<()> {
     };
     // ランナーのプロキシが GitHub のトークンを問い合わせたら、ここで発行して答える。
     let controller = match &github {
-        Some(github) => controller.with_dynamic_secrets(Arc::new(github_token::GitHubTokens::new(
-            github.clone(),
-            secrets,
-        ))),
+        Some(github) => {
+            let store = controller.store().clone();
+            controller.with_dynamic_secrets(Arc::new(github_token::GitHubTokens::new(
+                github.clone(),
+                secrets,
+                store,
+            )))
+        }
         None => controller,
     };
     let listen = config.listen;

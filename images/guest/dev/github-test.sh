@@ -39,7 +39,7 @@ cat > "$work/stub.py" <<'EOF'
 import json, sys, threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-keys_dir, port = sys.argv[1], int(sys.argv[2])
+keys_dir, port, token_log = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 polls = {"n": 0}
 lock = threading.Lock()
 # インストールごとのトークンと、そのトークンで答える所属 (パス → 役割)。
@@ -99,6 +99,10 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("content-length", 0))).decode()
         parts = self.path.split("/")
         if self.path.startswith("/app/installations/") and parts[-1] == "access_tokens":
+            # 範囲を指定した発行の本文を残す (確認用)。
+            if body:
+                with lock, open(token_log, "a") as f:
+                    f.write(f"{parts[3]} {body}\n")
             return self.reply(201, {"token": tokens[parts[3]], "expires_at": "2099-01-01T00:00:00Z"})
         if self.path == "/login/device/code":
             return self.reply(200, {"device_code": "dc", "user_code": "ABCD-1234",
@@ -115,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
 
 ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 EOF
-python3 -I "$work/stub.py" "$work/keys" "$stub_port" &
+python3 -I "$work/stub.py" "$work/keys" "$stub_port" "$work/token-requests.log" &
 stub_pid=$!
 
 cat > "$work/github-app.toml" <<EOF
@@ -235,6 +239,16 @@ as alice chloe ws create acme/dev/new >/dev/null
 check team-root-applied "acme/dev/new	persistent" as alice chloe ws list
 check policy-invalid "invalid settings" sh -c 'printf "allow = 1\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
+
+section "installation token scope"
+check scope-set "saved the settings of acme/dev" sh -c 'printf "root = \"persistent\"\n[github]\nrepositories = [\"tools\"]\npermissions = { contents = \"read\" }\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme/dev
+check scope-shown "repositories" as alice chloe policy show acme/dev
+team_ph="$(as alice+acme/dev/tools 'printenv GH_TOKEN')"
+as alice+acme/dev/tools "curl -s -o /dev/null -H 'Authorization: token $team_ph' https://api.github.com/user" >/dev/null
+check scope-requested '1 {"repositories":["tools"],"permissions":{"contents":"read"}}' sh -c 'cat "$0" 2>/dev/null || true' "$work/token-requests.log"
+as alice+acme/proj "curl -s -o /dev/null -H 'Authorization: token $org_ph' https://api.github.com/user" >/dev/null
+check scope-not-for-org "1" sh -c 'wc -l < "$0"' "$work/token-requests.log"
 
 section "organization and team secrets"
 check maintainer-team-secret "saved anthropic_api_key for acme/dev" sh -c 'echo real-team-key | "$@"' _ \
