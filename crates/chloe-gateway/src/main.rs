@@ -101,6 +101,16 @@ async fn main() -> Result<()> {
     });
 
     let (controller, secrets, cluster) = build_controller(&config).await?;
+    let controller = match &config.github_token {
+        Some(definition) => {
+            let spec = definition
+                .clone()
+                .into_spec()
+                .map_err(|e| anyhow::anyhow!("github_token: {e}"))?;
+            controller.with_preset("github_token", spec)?
+        }
+        None => controller,
+    };
     let github = match &config.github_app {
         Some(path) => {
             let app_config = chloe_github::AppConfig::load(&expand_home(path))?;

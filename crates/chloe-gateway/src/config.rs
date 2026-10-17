@@ -52,6 +52,11 @@ pub struct Config {
     /// GitHub 上の所属に加えて許す (開発用)。
     #[serde(default)]
     pub memberships: BTreeMap<String, Vec<String>>,
+    /// GitHub のトークン (`github_token`) を VM に渡す定義。省くと github.com 向けの既定
+    /// (`GH_TOKEN` と `GITHUB_TOKEN`、github.com と api.github.com など)。書き方はシークレットの
+    /// 定義から値を除いたもの。GitHub Enterprise Server に向けるときに変える。
+    #[serde(default)]
+    pub github_token: Option<chloe_controller::catalog::DefinitionInput>,
     /// すべてのワークスペースに共通の許可リスト。
     #[serde(default)]
     pub policy: BasePolicy,
@@ -158,6 +163,30 @@ mod tests {
         assert!(config.is_allowed("alice"));
         assert!(!config.is_allowed("bob"));
         assert_eq!(config.runner.unwrap().image, "chloe-dev-runner");
+    }
+
+    #[test]
+    fn parses_github_token_definition() {
+        let config: Config = toml::from_str(
+            r#"
+            listen = "127.0.0.1:2222"
+            host_key = "host_key"
+            database = "chloe.db"
+            master_key = "master.key"
+
+            [github_token]
+            env = ["GH_TOKEN"]
+            placeholder = "ghu_{id}"
+            [[github_token.inject]]
+            hosts = ["ghe.example.com"]
+            header = "authorization"
+            format = "basic-password"
+            "#,
+        )
+        .unwrap();
+        let spec = config.github_token.unwrap().into_spec().unwrap();
+        assert_eq!(spec.inject[0].hosts, ["ghe.example.com"]);
+        assert!(spec.is_single());
     }
 
     /// リポジトリに置いた設定の例が読めること。

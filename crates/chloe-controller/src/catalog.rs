@@ -214,43 +214,116 @@ impl SecretInput {
     /// 定義 (値だけを変えるなら `None`) と、欄ごとの値に分ける。
     /// プレースホルダーの形を書かなければ `{id}` にする。
     pub fn into_parts(self) -> Result<(Option<SecretSpec>, BTreeMap<String, String>), String> {
-        let fields: Vec<(String, Vec<String>, Option<String>, String)> = if self.fields.is_empty() {
-            let value = self.value.ok_or("give the value")?;
-            vec![(VALUE.into(), self.env, self.placeholder, value)]
+        let mut definition = DefinitionInput {
+            env: self.env,
+            placeholder: self.placeholder,
+            fields: BTreeMap::new(),
+            inject: self.inject,
+            sign: self.sign,
+        };
+        let mut values = BTreeMap::new();
+        if self.fields.is_empty() {
+            values.insert(VALUE.to_string(), self.value.ok_or("give the value")?);
         } else {
-            if !self.env.is_empty() || self.placeholder.is_some() || self.value.is_some() {
+            if self.value.is_some() {
+                return Err(
+                    "with fields, write env, placeholder and value inside each field".into(),
+                );
+            }
+            for (name, field) in self.fields {
+                values.insert(name.clone(), field.value);
+                definition.fields.insert(
+                    name,
+                    FieldDefinition {
+                        env: field.env,
+                        placeholder: field.placeholder,
+                    },
+                );
+            }
+        }
+        let spec = if definition.defines() {
+            Some(definition.into_spec()?)
+        } else {
+            None
+        };
+        Ok((spec, values))
+    }
+}
+
+/// 値を含まない定義。ゲートウェイの設定で GitHub のトークンの定義を変えるときに使う。
+/// 書き方は [`SecretInput`] から値を除いたもの。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefinitionInput {
+    #[serde(default)]
+    pub env: Vec<String>,
+    pub placeholder: Option<String>,
+    #[serde(default)]
+    pub fields: BTreeMap<String, FieldDefinition>,
+    #[serde(default)]
+    pub inject: Vec<InjectSpec>,
+    #[serde(default)]
+    pub sign: Vec<SignSpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldDefinition {
+    #[serde(default)]
+    pub env: Vec<String>,
+    pub placeholder: Option<String>,
+}
+
+impl DefinitionInput {
+    /// 定義の項目 (環境変数、プレースホルダー、規則) を何か書いたか。
+    fn defines(&self) -> bool {
+        !self.inject.is_empty()
+            || !self.sign.is_empty()
+            || !self.env.is_empty()
+            || self.placeholder.is_some()
+            || self
+                .fields
+                .values()
+                .any(|f| !f.env.is_empty() || f.placeholder.is_some())
+    }
+
+    /// 確かめた定義にする。プレースホルダーの形を書かなければ `{id}` にする。
+    pub fn into_spec(self) -> Result<SecretSpec, String> {
+        let fields = if self.fields.is_empty() {
+            BTreeMap::from([(
+                VALUE.to_string(),
+                FieldDefinition {
+                    env: self.env,
+                    placeholder: self.placeholder,
+                },
+            )])
+        } else {
+            if !self.env.is_empty() || self.placeholder.is_some() {
                 return Err(
                     "with fields, write env, placeholder and value inside each field".into(),
                 );
             }
             self.fields
-                .into_iter()
-                .map(|(name, f)| (name, f.env, f.placeholder, f.value))
-                .collect()
         };
-        let defines = !self.inject.is_empty()
-            || !self.sign.is_empty()
-            || fields
-                .iter()
-                .any(|(_, env, placeholder, _)| !env.is_empty() || placeholder.is_some());
-        let mut values = BTreeMap::new();
-        let mut spec_fields = BTreeMap::new();
-        for (name, env, placeholder, value) in fields {
-            values.insert(name.clone(), value);
-            spec_fields.insert(
-                name,
-                FieldSpec {
-                    env,
-                    placeholder: placeholder.unwrap_or_else(|| ID.into()),
-                },
-            );
-        }
-        let spec = defines.then_some(SecretSpec {
-            fields: spec_fields,
+        let spec = SecretSpec {
+            fields: fields
+                .into_iter()
+                .map(|(name, f)| {
+                    let placeholder = f.placeholder.unwrap_or_else(|| ID.into());
+                    (
+                        name,
+                        FieldSpec {
+                            env: f.env,
+                            placeholder,
+                        },
+                    )
+                })
+                .collect(),
             inject: self.inject,
             sign: self.sign,
-        });
-        Ok((spec, values))
+        };
+        spec.validate()?;
+        Ok(spec)
     }
 }
 

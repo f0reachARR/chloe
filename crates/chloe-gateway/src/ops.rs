@@ -265,7 +265,7 @@ pub async fn show_secret(
     else {
         return Err(Error::NotFound(format!("no such secret: {name}")));
     };
-    let spec = stored_spec(name, stored.as_deref())?;
+    let spec = stored_spec(name, stored.as_deref(), shared.controller.preset(name))?;
     Ok(SecretView {
         name: name.to_string(),
         owner: owner_arg(owner),
@@ -289,7 +289,7 @@ pub async fn set_secret(
         .get_with_spec(owner, name)
         .await?
         .map(|(_, stored)| stored);
-    let (value, spec) = prepare_secret(name, input, existing)?;
+    let (value, spec) = prepare_secret(name, input, existing, shared.controller.preset(name))?;
     secrets
         .set_with_spec(owner, name, &value.into(), spec.as_deref())
         .await?;
@@ -300,15 +300,17 @@ pub async fn set_secret(
 /// 登録する値 (保存する形) と定義の文字列を決める。
 ///
 /// `existing` は同じ持ち主にある行の定義 (行がなければ `None`、組み込みの種類なら `Some(None)`)。
+/// `preset` は、その名前が組み込みの種類ならその定義。
 /// 定義を渡さなければ、ある行の定義をそのままの文字列で使い続ける (定義は追加認証データに入るため)。
 fn prepare_secret(
     name: &str,
     input: SecretInput,
     existing: Option<Option<String>>,
+    preset: Option<SecretSpec>,
 ) -> Result<(String, Option<String>)> {
     let (spec, values) = input.into_parts().map_err(Error::Invalid)?;
     let (spec, text) = match spec {
-        Some(_) if catalog::preset(name).is_some() => {
+        Some(_) if preset.is_some() => {
             return Err(Error::Invalid(format!(
                 "{name} is a built-in secret; it takes only a value"
             )));
@@ -319,8 +321,8 @@ fn prepare_secret(
             (spec, Some(text))
         }
         None => match existing {
-            Some(stored) => (stored_spec(name, stored.as_deref())?, stored),
-            None => match catalog::preset(name) {
+            Some(stored) => (stored_spec(name, stored.as_deref(), preset)?, stored),
+            None => match preset {
                 Some(spec) => (spec, None),
                 None => {
                     return Err(Error::Invalid(format!(
@@ -334,13 +336,11 @@ fn prepare_secret(
     Ok((value, text))
 }
 
-fn stored_spec(name: &str, stored: Option<&str>) -> Result<SecretSpec> {
+fn stored_spec(name: &str, stored: Option<&str>, preset: Option<SecretSpec>) -> Result<SecretSpec> {
     match stored {
         Some(text) => serde_json::from_str(text)
             .map_err(|e| Error::Invalid(format!("the definition of {name} is broken: {e}"))),
-        None => {
-            catalog::preset(name).ok_or_else(|| Error::Invalid(format!("{name} has no definition")))
-        }
+        None => preset.ok_or_else(|| Error::Invalid(format!("{name} has no definition"))),
     }
 }
 
@@ -502,16 +502,17 @@ mod tests {
     #[test]
     fn prepares_secrets() {
         // 組み込みの種類は値だけで登録できる。
+        let github = || catalog::preset("github_token");
         let (value, spec) =
-            prepare_secret("github_token", SecretInput::value("ghp"), None).unwrap();
+            prepare_secret("github_token", SecretInput::value("ghp"), None, github()).unwrap();
         assert_eq!((value.as_str(), spec), ("ghp", None));
         // 組み込みの種類には定義を渡せない。
-        assert!(prepare_secret("github_token", input(HF), None).is_err());
+        assert!(prepare_secret("github_token", input(HF), None, github()).is_err());
         // 定義のない名前は、値だけでは登録できない (以前は組み込みだった名前も)。
-        assert!(prepare_secret("hf_token", SecretInput::value("x"), None).is_err());
-        assert!(prepare_secret("anthropic_api_key", SecretInput::value("x"), None).is_err());
+        assert!(prepare_secret("hf_token", SecretInput::value("x"), None, None).is_err());
+        assert!(prepare_secret("anthropic_api_key", SecretInput::value("x"), None, None).is_err());
 
-        let (value, spec) = prepare_secret("hf_token", input(HF), None).unwrap();
+        let (value, spec) = prepare_secret("hf_token", input(HF), None, None).unwrap();
         assert_eq!(value, "hf-real");
         let spec = spec.unwrap();
         // 値だけを変えるときは、ある定義をそのままの文字列で使う。
@@ -519,6 +520,7 @@ mod tests {
             "hf_token",
             SecretInput::value("hf-new"),
             Some(Some(spec.clone())),
+            None,
         )
         .unwrap();
         assert_eq!((value.as_str(), kept), ("hf-new", Some(spec)));
@@ -534,17 +536,18 @@ mod tests {
             scheme = "aws-sigv4"
             hosts = ["*.amazonaws.com"]
         "#;
-        let (_, spec) = prepare_secret("aws", input(aws), None).unwrap();
+        let (_, spec) = prepare_secret("aws", input(aws), None, None).unwrap();
         let values_only = r#"
             [fields.access_key_id]
             value = "AKID2"
             [fields.secret_access_key]
             value = "s2"
         "#;
-        let (value, kept) = prepare_secret("aws", input(values_only), Some(spec.clone())).unwrap();
+        let (value, kept) =
+            prepare_secret("aws", input(values_only), Some(spec.clone()), None).unwrap();
         assert_eq!(kept, spec);
         assert!(value.contains("AKID2"));
-        assert!(prepare_secret("aws", SecretInput::value("x"), Some(spec)).is_err());
+        assert!(prepare_secret("aws", SecretInput::value("x"), Some(spec), None).is_err());
     }
 
     #[test]

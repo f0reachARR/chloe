@@ -62,6 +62,19 @@ methods = ["DELETE"]
 paths = ["/repos/**"]
 action = "deny"
 
+# GitHub のトークン (github_token) を VM に渡す定義。省くと github.com 向けの既定を使う。
+# GitHub Enterprise Server に向けるときなどに書く。書き方はシークレットの定義 (docs/usage.md) から値を除いたもの。
+# [github_token]
+# env = ["GH_TOKEN", "GITHUB_TOKEN"]
+# placeholder = "ghu_{id}"
+# [[github_token.inject]]
+# hosts = ["ghe.example.com"]
+# header = "authorization"
+# format = "basic-password"           # git の HTTPS (Basic 認証のパスワード)
+# [[github_token.inject]]
+# hosts = ["api.ghe.example.com"]
+# header = "authorization"
+
 # 同じホストの Docker でランナーを動かす。
 [runner]
 guest_dir = "/usr/local/lib/chloe/guest"

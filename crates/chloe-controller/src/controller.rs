@@ -4,7 +4,7 @@
 //! 経つとランナーを止める。ランナーが動いているあいだは、そのランナー専用の問い合わせ用ソケットで
 //! 本物の値の問い合わせに答える ([`crate::broker`])。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,6 +44,8 @@ pub trait DynamicSecrets: Send + Sync + 'static {
 pub(crate) struct Resolver {
     secrets: Arc<SecretDb>,
     dynamic: Option<Arc<dyn DynamicSecrets>>,
+    /// 組み込みの種類の定義。既定は [`catalog::preset`] で、設定で変えられる。
+    presets: Arc<BTreeMap<String, SecretSpec>>,
 }
 
 /// ワークスペースのシークレットを探す持ち主 (先にあるほうが優先する)。
@@ -65,7 +67,7 @@ impl Resolver {
         let mut specs = std::collections::BTreeMap::new();
         if let Some(dynamic) = &self.dynamic {
             for kind in dynamic.kinds(workspace).await {
-                if let Some(spec) = catalog::preset(&kind) {
+                if let Some(spec) = self.preset(&kind) {
                     specs.insert(kind, spec);
                 }
             }
@@ -77,7 +79,7 @@ impl Resolver {
                 }
                 match self.secrets.get_with_spec(&owner, &name).await {
                     Ok(Some((_, stored))) => {
-                        if let Some(spec) = spec_of(&name, stored.as_deref()) {
+                        if let Some(spec) = self.spec_of(&name, stored.as_deref()) {
                             specs.insert(name, spec);
                         }
                     }
@@ -98,7 +100,7 @@ impl Resolver {
         name: &str,
     ) -> Result<Option<(SecretString, SecretSpec)>, Error> {
         if let Some(dynamic) = &self.dynamic
-            && let Some(spec) = catalog::preset(name)
+            && let Some(spec) = self.preset(name)
             && dynamic.kinds(workspace).await.iter().any(|k| k == name)
         {
             return Ok(dynamic
@@ -108,24 +110,30 @@ impl Resolver {
         }
         for owner in secret_owners(&workspace.owner) {
             if let Some((value, stored)) = self.secrets.get_with_spec(&owner, name).await? {
-                return Ok(spec_of(name, stored.as_deref()).map(|spec| (value, spec)));
+                return Ok(self
+                    .spec_of(name, stored.as_deref())
+                    .map(|spec| (value, spec)));
             }
         }
         Ok(None)
     }
-}
 
-/// 保存した定義か、なければ組み込みの種類の定義。
-fn spec_of(name: &str, stored: Option<&str>) -> Option<SecretSpec> {
-    match stored {
-        Some(text) => match serde_json::from_str(text) {
-            Ok(spec) => Some(spec),
-            Err(e) => {
-                warn!(secret = %name, "ignored an invalid secret definition: {e}");
-                None
-            }
-        },
-        None => catalog::preset(name),
+    pub(crate) fn preset(&self, name: &str) -> Option<SecretSpec> {
+        self.presets.get(name).cloned()
+    }
+
+    /// 保存した定義か、なければ組み込みの種類の定義。
+    fn spec_of(&self, name: &str, stored: Option<&str>) -> Option<SecretSpec> {
+        match stored {
+            Some(text) => match serde_json::from_str(text) {
+                Ok(spec) => Some(spec),
+                Err(e) => {
+                    warn!(secret = %name, "ignored an invalid secret definition: {e}");
+                    None
+                }
+            },
+            None => self.preset(name),
+        }
     }
 }
 
@@ -223,6 +231,12 @@ impl<B: RunnerBackend> Controller<B> {
                 resolver: Resolver {
                     secrets: Arc::new(secrets),
                     dynamic: None,
+                    presets: Arc::new(
+                        catalog::PRESETS
+                            .iter()
+                            .filter_map(|name| Some((name.to_string(), catalog::preset(name)?)))
+                            .collect(),
+                    ),
                 },
                 backend,
                 base,
@@ -260,6 +274,28 @@ impl<B: RunnerBackend> Controller<B> {
     /// データベースの外で作るシークレットの出どころを足す。
     pub fn with_dynamic_secrets(self, dynamic: Arc<dyn DynamicSecrets>) -> Self {
         self.configure(|inner| inner.resolver.dynamic = Some(dynamic))
+    }
+
+    /// 組み込みの種類の定義を変える (GitHub のトークンの宛先など)。値は chloe が作るので、
+    /// 欄は `value` 一つに限る。
+    pub fn with_preset(self, name: &str, spec: SecretSpec) -> Result<Self, Error> {
+        if !catalog::PRESETS.contains(&name) {
+            return Err(Error::Invalid(format!("{name} is not a built-in secret")));
+        }
+        spec.validate().map_err(Error::Invalid)?;
+        if !spec.is_single() {
+            return Err(Error::Invalid(format!(
+                "the definition of {name} must have the single field \"value\""
+            )));
+        }
+        Ok(self.configure(|inner| {
+            Arc::make_mut(&mut inner.resolver.presets).insert(name.to_string(), spec);
+        }))
+    }
+
+    /// 組み込みの種類の定義。
+    pub fn preset(&self, name: &str) -> Option<SecretSpec> {
+        self.inner.resolver.preset(name)
     }
 
     pub fn store(&self) -> &Store {
@@ -1396,5 +1432,49 @@ mod tests {
                 .await
                 .contains("error")
         );
+    }
+
+    #[tokio::test]
+    async fn built_in_definitions_can_be_changed() {
+        let backend = backend();
+        let pool = crate::store::tests::pool().await;
+        // GitHub Enterprise Server に向ける。
+        let ghes: catalog::DefinitionInput = toml::from_str(
+            r#"
+            env = ["GH_TOKEN"]
+            placeholder = "ghs_{id}"
+            [[inject]]
+            hosts = ["ghe.example.com"]
+            header = "authorization"
+            format = "basic-password"
+            "#,
+        )
+        .unwrap();
+        let controller = controller_on(pool.clone(), backend.clone(), Duration::from_secs(60))
+            .with_preset("github_token", ghes.into_spec().unwrap())
+            .unwrap();
+        let ws = workspace(&controller, "w", "alice").await;
+        let _c = controller.open(&ws).await.unwrap();
+        // alice には FakeGitHub がトークンを作る。
+        assert_eq!(backend.running.lock().unwrap()[&ws.key()], 1);
+        let allow = backend.allow.lock().unwrap()[&ws.key()].clone();
+        assert_eq!(allow, ["ghe.example.com"]);
+        let socket = backend.broker_socket(&ws.key());
+        assert!(
+            ask(&socket, "CHLOE_SECRET_GITHUB_TOKEN")
+                .await
+                .contains("ghu_fresh")
+        );
+
+        // 値を chloe が作るので、欄がいくつもある定義や、組み込みでない名前は変えられない。
+        let aws = catalog::example("aws", "v")
+            .into_parts()
+            .unwrap()
+            .0
+            .unwrap();
+        let other = controller_on(pool.clone(), backend.clone(), Duration::from_secs(60));
+        assert!(other.with_preset("github_token", aws.clone()).is_err());
+        let other = controller_on(pool, backend, Duration::from_secs(60));
+        assert!(other.with_preset("aws", aws).is_err());
     }
 }
