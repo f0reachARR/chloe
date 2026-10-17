@@ -13,7 +13,6 @@ use chloe_agent_proto::{
     AgentMessage, ClientMessage, ConnectRequest, Connection as AgentConnection, ExecRequest,
     PROTOCOL_VERSION, TtyRequest, WindowSize,
 };
-use chloe_controller::docker::DockerBackend;
 use chloe_controller::workspace::{RootMode, Workspace, WorkspaceRef};
 use chloe_controller::{Controller, Error as ControllerError};
 use chloe_github::{DeviceCode, GitHubApp, Poll};
@@ -24,6 +23,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::auth::{GitHubKeys, parse_user};
+use crate::backend::Backend;
 use crate::commands;
 use crate::config::Config;
 
@@ -39,7 +39,7 @@ const MAX_COMMAND_STDIN: usize = 64 * 1024;
 pub struct Shared {
     pub config: Config,
     pub keys: GitHubKeys,
-    pub controller: Controller<DockerBackend>,
+    pub controller: Controller<Backend>,
     pub github: Option<Arc<GitHubApp>>,
 }
 
@@ -97,7 +97,7 @@ pub struct Connection {
     forwarding: ForwardingHold,
 }
 
-type ForwardingHold = Arc<std::sync::Mutex<Option<chloe_controller::Session<DockerBackend>>>>;
+type ForwardingHold = Arc<std::sync::Mutex<Option<chloe_controller::Session<Backend>>>>;
 
 impl Connection {
     pub fn new(shared: Arc<Shared>, peer: Option<std::net::SocketAddr>) -> Self {

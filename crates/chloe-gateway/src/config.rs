@@ -55,7 +55,31 @@ pub struct Config {
     /// すべてのワークスペースに共通の許可リスト。
     #[serde(default)]
     pub policy: BasePolicy,
-    pub runner: DockerConfig,
+    /// 同じホストの Docker にランナーを置くときの設定。`cluster` とどちらか一方を書く。
+    #[serde(default)]
+    pub runner: Option<DockerConfig>,
+    /// 複数のホスト (chloe-node) にランナーを置くときの設定。
+    #[serde(default)]
+    pub cluster: Option<ClusterConfig>,
+}
+
+/// 複数のホストにランナーを置くときの、コントロールプレーンの設定。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterConfig {
+    /// chloe-node から受ける内部 API (相互 TLS) の待ち受け。
+    pub listen: SocketAddr,
+    /// 内部 API の証明書に入れる名前 (chloe-node がつなぐホスト名か IP アドレス)。
+    pub server_names: Vec<String>,
+    /// CA の証明書と鍵を置くディレクトリ。なければ作る。
+    pub pki_dir: PathBuf,
+    /// `node add` で作る参加用のトークンの有効期間 (秒)。
+    #[serde(default = "default_join_ttl")]
+    pub join_ttl_secs: i64,
+}
+
+fn default_join_ttl() -> i64 {
+    60 * 60
 }
 
 impl Config {
@@ -117,6 +141,6 @@ mod tests {
         assert_eq!(config.idle_timeout_secs, 1800);
         assert!(config.is_allowed("alice"));
         assert!(!config.is_allowed("bob"));
-        assert_eq!(config.runner.image, "chloe-dev-runner");
+        assert_eq!(config.runner.unwrap().image, "chloe-dev-runner");
     }
 }

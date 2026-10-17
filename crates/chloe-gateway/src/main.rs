@@ -5,9 +5,11 @@
 
 mod access;
 mod auth;
+mod backend;
 mod commands;
 mod config;
 mod github_token;
+mod internal;
 mod session;
 
 use std::path::{Path, PathBuf};
@@ -16,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chloe_controller::Controller;
-use chloe_controller::docker::DockerBackend;
+use chloe_controller::cluster::ClusterBackend;
 use chloe_controller::store::Store;
 use chloe_secrets::{MasterKey, SecretDb};
 use clap::Parser;
@@ -26,6 +28,7 @@ use russh::server::Server as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::auth::GitHubKeys;
+use crate::backend::Backend;
 use crate::config::Config;
 use crate::session::{Connection, Shared};
 
@@ -35,6 +38,33 @@ struct Cli {
     /// 設定ファイル (TOML)。
     #[arg(long, env = "CHLOE_GATEWAY_CONFIG")]
     config: PathBuf,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// ランナーのホスト (chloe-node) を管理する。
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum NodeCommand {
+    /// ホストを登録し、chloe-node join に渡す参加用のトークンを表示する。
+    Add {
+        name: String,
+        /// コントロールプレーンがこのホストの API を呼ぶ URL (https://host:port)。
+        #[arg(long)]
+        url: String,
+    },
+    List,
+    /// ホストの登録を消す。そのホストの証明書では、もう問い合わせに答えない。
+    Rm {
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -44,6 +74,9 @@ async fn main() -> Result<()> {
         &std::fs::read_to_string(&cli.config)
             .with_context(|| format!("read {}", cli.config.display()))?,
     )?;
+    if let Some(Command::Node { command }) = cli.command {
+        return node_command(&config, command).await;
+    }
     init_logging(config.audit_log.as_deref())?;
 
     let host_key = load_or_generate_host_key(&config.host_key)?;
@@ -65,7 +98,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     });
 
-    let (controller, secrets) = build_controller(&config).await?;
+    let (controller, secrets, cluster) = build_controller(&config).await?;
     let github = match &config.github_app {
         Some(path) => {
             let app_config = chloe_github::AppConfig::load(&expand_home(path))?;
@@ -95,6 +128,21 @@ async fn main() -> Result<()> {
         github,
         config,
     });
+    // 複数のホストで動かすときは、chloe-node からの参加と問い合わせを受ける。
+    if let Some((cluster_config, ca, credentials)) = cluster {
+        let state = Arc::new(internal::Internal {
+            controller: shared.controller.clone(),
+            ca,
+        });
+        let tls = chloe_mtls::server_config(&credentials, chloe_mtls::ClientAuth::Optional)?;
+        let listener = tokio::net::TcpListener::bind(cluster_config.listen).await?;
+        tracing::info!(listen = %cluster_config.listen, "listening for nodes");
+        tokio::spawn(async move {
+            if let Err(error) = chloe_mtls::serve(listener, tls, internal::router(state)).await {
+                tracing::error!("the internal API stopped: {error}");
+            }
+        });
+    }
     // ゲートウェイの再起動の前から動いているランナーを引き取り、そのあとも定期的に突き合わせる。
     let report = shared.controller.reconcile().await?;
     tracing::info!(?report, "reconciled runners");
@@ -120,7 +168,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn build_controller(config: &Config) -> Result<(Controller<DockerBackend>, SecretDb)> {
+/// 複数のホストで動かすときの、内部 API の設定、CA、コントロールプレーンの証明書。
+type ClusterParts = (
+    config::ClusterConfig,
+    Arc<chloe_mtls::Ca>,
+    chloe_mtls::Credentials,
+);
+
+async fn open_database(config: &Config) -> Result<sqlx::SqlitePool> {
     if let Some(dir) = config.database.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -135,9 +190,29 @@ async fn build_controller(config: &Config) -> Result<(Controller<DockerBackend>,
         .await
         .with_context(|| format!("open {}", config.database.display()))?;
     chloe_secrets::MIGRATOR.run(&pool).await?;
+    Ok(pool)
+}
+
+async fn build_controller(
+    config: &Config,
+) -> Result<(Controller<Backend>, SecretDb, Option<ClusterParts>)> {
+    let pool = open_database(config).await?;
     let master = MasterKey::load_or_generate(&config.master_key)
         .with_context(|| format!("load {}", config.master_key.display()))?;
-    let backend = config.runner.backend()?;
+    let (backend, cluster) = match (&config.runner, &config.cluster) {
+        (Some(runner), None) => (Backend::Docker(runner.backend()?), None),
+        (None, Some(cluster)) => {
+            let ca = Arc::new(chloe_mtls::Ca::load_or_create(&cluster.pki_dir)?);
+            // 起動のたびにコントロールプレーンの証明書を発行し直す (鍵はファイルに置かない)。
+            let credentials = ca.issue(&chloe_mtls::Role::ControlPlane, &cluster.server_names)?;
+            let client = chloe_mtls::client(&credentials)?;
+            (
+                Backend::Cluster(ClusterBackend::new(Store::new(pool.clone()), client)),
+                Some((cluster.clone(), ca, credentials)),
+            )
+        }
+        _ => anyhow::bail!("write exactly one of [runner] and [cluster] in the configuration"),
+    };
     let secrets = SecretDb::new(pool.clone(), master);
     let controller = Controller::new(
         Store::new(pool),
@@ -150,7 +225,52 @@ async fn build_controller(config: &Config) -> Result<(Controller<DockerBackend>,
         Duration::from_secs(config.activity_poll_secs.max(1)),
         Duration::from_secs(config.max_busy_wait_secs),
     );
-    Ok((controller, secrets))
+    Ok((controller, secrets, cluster))
+}
+
+/// `chloe-gateway node ...`。
+async fn node_command(config: &Config, command: NodeCommand) -> Result<()> {
+    let cluster = config
+        .cluster
+        .as_ref()
+        .context("write [cluster] in the configuration to use nodes")?;
+    let store = Store::new(open_database(config).await?);
+    match command {
+        NodeCommand::Add { name, url } => {
+            anyhow::ensure!(
+                chloe_mtls::valid_node_name(&name),
+                "a node name is 1-63 letters, digits and hyphens"
+            );
+            let parsed = reqwest::Url::parse(&url).context("invalid URL")?;
+            anyhow::ensure!(
+                parsed.scheme() == "https" && parsed.host_str().is_some(),
+                "the URL must be https://host:port"
+            );
+            let ca = chloe_mtls::Ca::load_or_create(&cluster.pki_dir)?;
+            let secret = store.add_node(&name, &url, cluster.join_ttl_secs).await?;
+            println!("{secret}.{}", ca.fingerprint());
+            eprintln!(
+                "run on the node (the token works once, for {} seconds):\n  chloe-node join --server https://<control plane>:{} --token <the token above> --dir <dir>",
+                cluster.join_ttl_secs,
+                cluster.listen.port()
+            );
+        }
+        NodeCommand::List => {
+            for node in store.nodes().await? {
+                let state = if node.joined {
+                    "joined"
+                } else {
+                    "waiting to join"
+                };
+                println!("{}\t{}\t{state}", node.name, node.url);
+            }
+        }
+        NodeCommand::Rm { name } => {
+            anyhow::ensure!(store.remove_node(&name).await?, "no such node: {name}");
+            println!("removed {name}");
+        }
+    }
+    Ok(())
 }
 
 struct Server {

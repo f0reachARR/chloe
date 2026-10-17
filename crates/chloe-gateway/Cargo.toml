@@ -14,9 +14,11 @@ workspace = true
 chloe-agent-proto.workspace = true
 chloe-controller.workspace = true
 chloe-github.workspace = true
+chloe-mtls.workspace = true
 chloe-secrets.workspace = true
 
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
 futures.workspace = true
 rand.workspace = true
