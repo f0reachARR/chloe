@@ -147,6 +147,12 @@ wait_until 30 curl -sf "http://127.0.0.1:$forward_port/served.txt" || true
 check forward-n2 "served" curl -s "http://127.0.0.1:$forward_port/served.txt"
 kill "$forward_pid" 2>/dev/null || true
 
+section "disks on a node"
+check disk-set "30G workspace disk" as alice chloe ws disk default --workspace 30G
+check disk-stop "stopped default" as alice chloe ws stop default
+check disk-grown-n1 "30G" as alice 'df -BG --output=size /workspace | tail -1'
+check disk-same-node "chloe-n1-ws-1" container_of ws-1
+
 section "mutual TLS"
 check node-api-no-cert "000" sh -c 'curl -s -o /dev/null -w "%{http_code}" --cacert "$0" "$1" || true' \
     "$(tls n1)/ca.pem" "https://127.0.0.1:${node_port[n1]}/v1/runners"
