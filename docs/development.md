@@ -37,6 +37,7 @@ images/guest/dev/test-all.sh mvp node   # 名前を指定して実行する
 | `smoke` | VM の起動、Docker、Claude Code と Codex、起動し直してもワークスペースと Docker のデータが残ること |
 | `net` | 透過プロキシ、許可リスト、DNS、差し替え、中継のみの宛先、Claude Code と Codex が TLS の検証を通ること |
 | `root` | ランナーが渡す環境変数、ルートの使い捨てと保持 |
+| `disk` | 指定した大きさでディスクを作ること、次の起動で中身を残して広げること、縮めないこと |
 | `mvp` | 二人の利用者、シークレット、動いたままの更新、ワークスペース、停止、管理 API |
 | `github` | GitHub App（GitHub のふりをするサーバー）、Device Flow を必須にしたログイン、共通のユーザー名と鍵の結び付け、二つの Organization、設定とシークレットの権限、管理の TUI |
 | `lifecycle` | 作業中のエージェントを待つ停止、ゲートウェイの再起動、ポート転送、監査ログ |

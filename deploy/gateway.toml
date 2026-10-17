@@ -83,6 +83,13 @@ action = "passthrough"
 # hosts = ["api.ghe.example.com"]
 # header = "authorization"
 
+# ワークスペースのディスクの大きさ (GiB) の既定と上限。利用者は chloe ws disk で上限まで大きくできる。
+# [disks]
+# workspace_gib = 20
+# docker_gib = 40
+# max_workspace_gib = 200
+# max_docker_gib = 400
+
 # 同じホストの Docker でランナーを動かす。
 [runner]
 guest_dir = "/usr/local/lib/chloe/guest"
