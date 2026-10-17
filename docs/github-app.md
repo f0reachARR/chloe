@@ -113,8 +113,9 @@ chmod 600 ~/.config/chloe/github-app.pem
 
 - アプリをインストールしたいずれかの Organization のメンバーがログインできる。`allowed_users` は、それに加えて許す利用者になる。
 - Organization のワークスペース（`org/name`）にはそのメンバーが、team のワークスペース（`org/team/name`）にはその team のメンバーが入れる。確かめられるのはアプリをインストールした Organization だけである。
-- GitHub に公開鍵を登録していない利用者は、SSH の keyboard-interactive で Device Flow を行ってログインできる。
-- 個人のワークスペースで GitHub を使うには、一度 `ssh <host> chloe github login` を実行してユーザートークンを得る。トークンは chloe のデータベースに暗号化して置き、ランナーのプロキシが差し替えのたびに問い合わせたとき、失効まで 5 分を切っていれば更新してから答える。VM にはプレースホルダーだけを入れる。
+- SSH でログインするには、一度 keyboard-interactive で Device Flow を済ませる。GitHub に登録した公開鍵でも、ユーザートークンがなければ Device Flow に進める。
+- `ssh_user`（既定は `chloe`）と GitHub に存在しない名前のユーザー名では、Device Flow で承認したアカウントを利用者にし、そのとき使った公開鍵を結び付ける。次からはその鍵で入れる。
+- 個人のワークスペースには、Device Flow で得たユーザートークンを使う。トークンを取り直すときは `ssh <host> chloe github login` を実行する。トークンは chloe のデータベースに暗号化して置き、ランナーのプロキシが差し替えのたびに問い合わせたとき、失効まで 5 分を切っていれば更新してから答える。VM にはプレースホルダーだけを入れる。
 - team と Organization のワークスペースには、その Organization へのインストールのトークンを渡す。範囲は Organization と team の設定（`chloe policy set`）の `[github]` で絞れる。
 - GitHub で Organization の管理者（`admin` の役割）である利用者は、その Organization と team の設定とシークレットを変えられる。team の maintainer は、その team のシークレットを変えられる。
 

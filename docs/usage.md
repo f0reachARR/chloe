@@ -5,27 +5,41 @@ chloe に SSH で入って使う人のための説明である。
 
 ## 接続する
 
-GitHub のログイン名をユーザー名にして、GitHub に登録した公開鍵で入る。
+ユーザー名を `chloe` にして入る（`git@github.com` と同じく、誰でも同じユーザー名を使う）。
+初めて入るときは、SSH が GitHub の Device Flow のコードを表示する。
+`https://github.com/login/device` でコードを入力して承認し、Enter を押す。
+承認した GitHub のアカウントが、chloe での利用者になる。
 
 ```sh
-ssh alice@chloe.example.com
+ssh chloe@chloe.example.com
 ```
+
+承認したときに使っていた公開鍵は、その利用者に結び付く。
+次からは、同じ鍵で Device Flow なしに入れる。
+鍵を持っていなければ、毎回 Device Flow になる。
+
+GitHub のログイン名をユーザー名にしても入れる（`ssh alice@chloe.example.com`）。
+GitHub に登録した公開鍵か、結び付けた鍵で入れるが、一度は Device Flow を済ませる必要がある。
+GitHub のトークンが失効したり、`chloe github logout` で消したりすると、次の接続でまた Device Flow になる。
+GitHub に存在しない名前は、`chloe` と同じに扱う。
 
 ユーザー名の `+` のあとに、入るワークスペースを書ける。
 書かなければ、自分の個人ワークスペース `default` に入る（なければ作る）。
 
 | ユーザー名 | 入るワークスペース |
 | --- | --- |
-| `alice` | alice の個人ワークスペース `default` |
-| `alice+api` | alice の個人ワークスペース `api` |
-| `alice+acme/web` | Organization acme の共有ワークスペース `web` |
-| `alice+acme/dev/tools` | acme の team dev の共有ワークスペース `tools` |
+| `chloe` か `alice` | 自分の個人ワークスペース `default` |
+| `chloe+api` | 自分の個人ワークスペース `api` |
+| `chloe+acme/web` | Organization acme の共有ワークスペース `web` |
+| `chloe+acme/dev/tools` | acme の team dev の共有ワークスペース `tools` |
 
 `default` 以外のワークスペースは、先に `chloe ws create` で作る。
-コマンドを渡すと、そのワークスペースで実行して終わる（`ssh alice@chloe.example.com 'git status'`）。
+コマンドを渡すと、そのワークスペースで実行して終わる（`ssh chloe@chloe.example.com 'git status'`）。
+誰として入ったかは `chloe whoami` で、結び付いた鍵は `chloe key list` で分かる。
+鍵をなくしたときは、`chloe key rm <指紋>` で結び付けを消す。
 
-サーバーに GitHub App を設定していれば、公開鍵を GitHub に登録していなくても入れる。
-SSH がコードを表示するので、`https://github.com/login/device` で入力して承認し、Enter を押す。
+サーバーに GitHub App を設定していなければ、Device Flow は使えない。
+GitHub のログイン名をユーザー名にして、GitHub に登録した公開鍵で入る。
 
 止まっていたワークスペースは、接続したときに起動する（数秒かかる）。
 
@@ -75,11 +89,11 @@ header = "authorization"       # このヘッダーの中のプレースホル�
 ```
 
 ```sh
-ssh alice@chloe.example.com chloe secret set hf_token --spec < hf.toml
-ssh alice@chloe.example.com chloe secret set hf_token < new-value.txt   # 値だけを変える（定義はそのまま）
-ssh alice@chloe.example.com chloe secret list
-ssh alice@chloe.example.com chloe secret show hf_token   # 定義を見る（値は出ない）
-ssh alice@chloe.example.com chloe secret rm hf_token
+ssh chloe@chloe.example.com chloe secret set hf_token --spec < hf.toml
+ssh chloe@chloe.example.com chloe secret set hf_token < new-value.txt   # 値だけを変える（定義はそのまま）
+ssh chloe@chloe.example.com chloe secret list
+ssh chloe@chloe.example.com chloe secret show hf_token   # 定義を見る（値は出ない）
+ssh chloe@chloe.example.com chloe secret rm hf_token
 ```
 
 `deploy/secrets/` に、よく使うものの定義の例がある。
@@ -93,7 +107,7 @@ ssh alice@chloe.example.com chloe secret rm hf_token
 | `aws.toml` | `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` | `*.amazonaws.com`（[署名](#署名する方式aws)） |
 
 ```sh
-ssh alice@chloe.example.com chloe secret set anthropic_api_key --spec < anthropic_api_key.toml
+ssh chloe@chloe.example.com chloe secret set anthropic_api_key --spec < anthropic_api_key.toml
 ```
 
 登録した値は、次の要求から使われる。
@@ -137,7 +151,7 @@ hosts = ["*.amazonaws.com"]
 ```
 
 ```sh
-ssh alice@chloe.example.com chloe secret set aws --spec < aws.toml
+ssh chloe@chloe.example.com chloe secret set aws --spec < aws.toml
 ```
 
 値だけを変えるときも、欄ごとに `value` だけを書いた TOML を `--spec` で渡す。
@@ -175,14 +189,14 @@ Organization のシークレットは Organization の管理者が、team のシ
 定義を付けたシークレットの値だけを変えるときは、同じ持ち主に置いた定義を使う（team に値だけを登録しても、Organization の定義は引き継がない）。
 
 ```sh
-ssh alice@chloe.example.com chloe secret set --owner acme/dev anthropic_api_key --spec < anthropic_api_key.toml
+ssh chloe@chloe.example.com chloe secret set --owner acme/dev anthropic_api_key --spec < anthropic_api_key.toml
 ```
 
 ## GitHub を使う
 
 サーバーに GitHub App を設定していれば、次のように使える。
 
-- **個人のワークスペース**：一度 `ssh alice@chloe.example.com chloe github login` を実行し、表示されたコードを GitHub で承認する。以後、`git` と、`GH_TOKEN` を読むツール（GitHub の API を呼ぶスクリプトや、自分で入れた `gh` など）が、自分の権限で GitHub を使える。トークンはコントロールプレーンが更新する。
+- **個人のワークスペース**：ログインのときに Device Flow で得たトークンを使う。以後、`git` と、`GH_TOKEN` を読むツール（GitHub の API を呼ぶスクリプトや、自分で入れた `gh` など）が、自分の権限で GitHub を使える。トークンはコントロールプレーンが更新する。取り直すときは `ssh chloe@chloe.example.com chloe github login` を実行する。
 - **共有ワークスペース**：GitHub App のインストールトークンを使う（操作はアプリの名前で記録される）。リポジトリと権限は、Organization の管理者が絞れる。
 
 GitHub App がなければ、個人のアクセストークンを `github_token` に登録して使う。
@@ -202,7 +216,7 @@ HTTPS の通信はプロキシで復号するので、VM の中には chloe の 
 VM の中で動かしているサーバーに、手元からつなげる。
 
 ```sh
-ssh -N -L 8080:127.0.0.1:3000 alice@chloe.example.com
+ssh -N -L 8080:127.0.0.1:3000 chloe@chloe.example.com
 # 手元の http://localhost:8080 が、VM の中の 127.0.0.1:3000 につながる。
 ```
 
@@ -215,6 +229,7 @@ ssh -N -L 8080:127.0.0.1:3000 alice@chloe.example.com
 `chloe` で始まるコマンドは、VM ではなくゲートウェイが受け取る。
 
 ```text
+chloe whoami                                    接続した利用者の GitHub のログイン名
 chloe ws list                                   ワークスペースの一覧
 chloe ws create NAME [--root persistent|ephemeral]
 chloe ws root NAME persistent|ephemeral          ルートの扱い (次の起動から)
@@ -229,6 +244,8 @@ chloe policy rm OWNER
 chloe token create NAME [--expires 30d]          管理 API のトークン
 chloe token list
 chloe token revoke ID
+chloe key list                                  Device Flow で結び付けた SSH の公開鍵
+chloe key rm FINGERPRINT
 chloe github login|status|logout
 ```
 

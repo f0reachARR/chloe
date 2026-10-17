@@ -128,10 +128,12 @@ journalctl -u chloe-gateway -f
 ```
 
 ホスト鍵、データベース、マスター鍵は、初めて起動したときに作る。
-利用者は、GitHub に登録した公開鍵で入る。
+GitHub App を設定していれば、利用者は `chloe` のユーザー名で入り、初回は Device Flow で GitHub のアカウントを確かめる。
+GitHub App がなければ、GitHub に登録した公開鍵で入る。
 
 ```sh
-ssh <GitHub のログイン名>@<ホスト>
+ssh chloe@<ホスト>                    # GitHub App があるとき
+ssh <GitHub のログイン名>@<ホスト>     # GitHub App がないとき
 ```
 
 最初の接続でワークスペースの VM を起動する（数秒かかる）。
@@ -153,7 +155,7 @@ sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node list
 
 ### GitHub App
 
-GitHub App を設定すると、Organization のメンバーがログインでき、公開鍵を登録していない利用者は Device Flow でログインでき、VM の中で GitHub を使える。
+GitHub App を設定すると、Organization のメンバーがログインでき、ログインには Device Flow が必須になり、VM の中で GitHub を使える。
 登録の手順は [GitHub App の準備](github-app.md) にある。
 アプリの設定と秘密鍵を `/etc/chloe/` に置き、ゲートウェイの設定の `github_app` にそのパスを書く。
 

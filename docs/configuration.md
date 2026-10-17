@@ -22,6 +22,7 @@ systemd で動かすときは、すべて絶対パスで書く。
 | `master_key` | （必須） | シークレットを暗号化する鍵。なければ作る |
 | `audit_log` | なし | 監査ログ（JSON Lines、権限 600）を追記するファイル |
 | `github_url` | `https://github.com` | 公開鍵を読む先（`{github_url}/{login}.keys`） |
+| `ssh_user` | `chloe` | 誰でも使う SSH のユーザー名。このユーザー名と GitHub に存在しない名前では、利用者を結び付けた公開鍵か Device Flow で決める（`github_app` が要る） |
 | `github_app` | なし | GitHub App の設定のパス |
 | `allowed_users` | `[]` | ログインを許す GitHub のログイン名。GitHub App の Organization のメンバーに加えて許す |
 | `admins` | `[]` | サーバーの運用者。どの Organization と team の設定とシークレットも変えられる |
