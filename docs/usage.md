@@ -57,33 +57,9 @@ VM の中の環境変数には、本物の値の代わりにプレースホル�
 VM からの通信を中継するプロキシが、決まった宛先の決まったヘッダーにあるプレースホルダーだけを、本物の値に差し替える。
 VM の中のプログラムやエージェントが本物の値を読み出したり、ほかの宛先に送ったりはできない。
 
-次の種類は組み込みで、値を登録するだけで使える。
-ほかのシークレットは、[定義](#組み込み以外のシークレット)を付けて登録する。
-
-| 種類 | 環境変数 | 差し替える宛先 |
-| --- | --- | --- |
-| `anthropic_api_key` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
-| `claude_oauth_token` | `CLAUDE_CODE_OAUTH_TOKEN` | `api.anthropic.com` |
-| `openai_api_key` | `OPENAI_API_KEY`、`CODEX_API_KEY` | `api.openai.com` |
-| `github_token` | `GH_TOKEN`、`GITHUB_TOKEN` | `github.com`、`api.github.com`、`uploads.github.com` |
-
-値は標準入力で渡す。
+シークレットは、定義と値を TOML で標準入力から渡して登録する。
+定義には、プレースホルダーを入れる VM の環境変数、プレースホルダーの形、差し替える宛先と場所を書く。
 SSH の接続は VM を通らないので、値は VM に届かない。
-
-```sh
-ssh alice@chloe.example.com chloe secret set anthropic_api_key < key.txt
-ssh alice@chloe.example.com chloe secret list
-ssh alice@chloe.example.com chloe secret show anthropic_api_key   # 定義を見る（値は出ない）
-ssh alice@chloe.example.com chloe secret rm anthropic_api_key
-```
-
-登録した値は、次の要求から使われる。
-動いているワークスペースでは、このあとに開いたシェルに新しいプレースホルダーが入る（すでに開いているシェルの環境は変わらない）。
-
-### 組み込み以外のシークレット
-
-組み込みの種類にないシークレットは、`--spec` を付けて、定義と値を TOML で標準入力から渡す。
-名前は英小文字で始め、英小文字、数字、`_` で書く（`_` は続けず、末尾にも置かない）。
 
 ```toml
 # hf.toml
@@ -100,21 +76,42 @@ header = "authorization"       # このヘッダーの中のプレースホル�
 ```sh
 ssh alice@chloe.example.com chloe secret set hf_token --spec < hf.toml
 ssh alice@chloe.example.com chloe secret set hf_token < new-value.txt   # 値だけを変える（定義はそのまま）
+ssh alice@chloe.example.com chloe secret list
+ssh alice@chloe.example.com chloe secret show hf_token   # 定義を見る（値は出ない）
+ssh alice@chloe.example.com chloe secret rm hf_token
 ```
 
+`deploy/secrets/` に、よく使うものの定義の例がある。
+`value` の行を本物の値に書き換えて登録する。
+
+| 例 | 環境変数 | 差し替える宛先 |
+| --- | --- | --- |
+| `anthropic_api_key.toml` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+| `claude_oauth_token.toml` | `CLAUDE_CODE_OAUTH_TOKEN` | `api.anthropic.com` |
+| `openai_api_key.toml` | `OPENAI_API_KEY`、`CODEX_API_KEY` | `api.openai.com` |
+| `aws.toml` | `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` | `*.amazonaws.com`（[署名](#署名する方式aws)） |
+
+```sh
+ssh alice@chloe.example.com chloe secret set anthropic_api_key --spec < anthropic_api_key.toml
+```
+
+登録した値は、次の要求から使われる。
+動いているワークスペースでは、このあとに開いたシェルに新しいプレースホルダーが入る（すでに開いているシェルの環境は変わらない）。
+
+- **名前**：英小文字で始め、英小文字、数字、`_` で書く（`_` は続けず、末尾にも置かない）。
 - **placeholder**：`{id}` を一つだけ含める。ほかに使える文字は英数字と `-_.~+/=:`。省くと `{id}` だけになる。ツールが手元で形式を調べることがあるので、本物の値の接頭辞に合わせるとよい。
 - **inject**：`hosts` への要求で、`header` の中のプレースホルダーを本物に置き換える。`hosts` は `*.example.com` の形でサブドメインを指定できる。
 - 規則の宛先は、そのシークレットを使うワークスペースの許可リストに自動で足す。
 - 規則の宛先以外へプレースホルダーを送ると、プロキシが要求を遮断する。ヘッダーと URL のほか、本文も 1 MiB までなら調べる。
 
-組み込みの種類と同じ名前には定義を付けられない。
 定義を変えるときは、`--spec` で定義と値をまとめて渡し直す。
+GitHub のトークン（`github_token`）だけは chloe が扱いを決めているので、定義を付けて登録できない（[GitHub を使う](#github-を使う)）。
 
 ### 署名する方式（AWS）
 
 AWS のように、鍵で要求に署名する方式では、プレースホルダーをヘッダーに置き換えるだけでは足りない。
 VM の中のツールはプレースホルダーの鍵で署名し、プロキシが本物の鍵で署名を作り直す。
-値が複数あるので、欄（`fields`）ごとに環境変数、プレースホルダー、値を書く。
+値が複数あるので、欄（`fields`）ごとに環境変数、プレースホルダー、値を書く（例は `deploy/secrets/aws.toml`）。
 
 ```toml
 # aws.toml
@@ -157,11 +154,11 @@ S3 の SDK は `x-amz-content-sha256` を付けるので、大きなアップロ
 
 | 認証情報 | 置き場所 |
 | --- | --- |
-| API キー、`claude_oauth_token` | コントロールプレーン（暗号化して保存）。VM にはプレースホルダーだけ |
+| API キーなど、登録したシークレット | コントロールプレーン（暗号化して保存）。VM にはプレースホルダーだけ |
 | GitHub のトークン | コントロールプレーン。VM にはプレースホルダーだけ |
 | Codex の ChatGPT のログインなど、VM の中でログインしたもの | VM のホームディレクトリ |
 
-Claude Code をサブスクリプションで使うには、手元で `claude setup-token` を実行して得たトークンを `claude_oauth_token` に登録する。
+Claude Code をサブスクリプションで使うには、手元で `claude setup-token` を実行して得たトークンを、`deploy/secrets/claude_oauth_token.toml` の定義で登録する。
 Codex を ChatGPT のアカウントで使うには、VM の中で `codex login` を実行する（認証情報は VM のホームディレクトリに残る）。
 
 ### 共有ワークスペースのシークレット
@@ -176,7 +173,7 @@ Organization のシークレットは Organization の管理者が、team のシ
 定義を付けたシークレットの値だけを変えるときは、同じ持ち主に置いた定義を使う（team に値だけを登録しても、Organization の定義は引き継がない）。
 
 ```sh
-ssh alice@chloe.example.com chloe secret set --owner acme/dev anthropic_api_key < key.txt
+ssh alice@chloe.example.com chloe secret set --owner acme/dev anthropic_api_key --spec < anthropic_api_key.toml
 ```
 
 ## GitHub を使う
