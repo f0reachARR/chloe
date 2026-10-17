@@ -12,7 +12,7 @@ use std::time::Duration;
 use chloe_agent_proto::{
     AGENT_PORT, AgentMessage, ClientMessage, Connection, ExecRequest, PROTOCOL_VERSION, firecracker,
 };
-use chloe_secrets::{SecretDb, SecretString};
+use chloe_secrets::{Owner, SecretDb, SecretString};
 use futures::future::BoxFuture;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -49,17 +49,29 @@ pub(crate) struct Resolver {
     dynamic: Option<Arc<dyn DynamicSecrets>>,
 }
 
+/// ワークスペースのシークレットを探す持ち主 (先にあるほうが優先する)。
+/// team のワークスペースは、team になければ Organization のシークレットを使う。
+pub fn secret_owners(owner: &Owner) -> Vec<Owner> {
+    match owner {
+        Owner::Team { org, .. } => vec![owner.clone(), Owner::Org(org.clone())],
+        _ => vec![owner.clone()],
+    }
+}
+
 impl Resolver {
-    /// ワークスペースで使えるシークレットの種類。持ち主がデータベースに登録した種類と、
-    /// 動的に作る種類を合わせたもの。
+    /// ワークスペースで使えるシークレットの種類。持ち主 (team なら Organization も) が
+    /// データベースに登録した種類と、動的に作る種類を合わせたもの。
     pub async fn kinds(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
-        let mut kinds: Vec<String> = self
-            .secrets
-            .list(&workspace.owner)
-            .await?
-            .into_iter()
-            .filter(|name| catalog::kind(name).is_some())
-            .collect();
+        let mut kinds = Vec::new();
+        for owner in secret_owners(&workspace.owner) {
+            kinds.extend(
+                self.secrets
+                    .list(&owner)
+                    .await?
+                    .into_iter()
+                    .filter(|name| catalog::kind(name).is_some()),
+            );
+        }
         if let Some(dynamic) = &self.dynamic {
             kinds.extend(dynamic.kinds(workspace).await);
         }
@@ -81,7 +93,12 @@ impl Resolver {
         {
             return dynamic.resolve(workspace, kind).await;
         }
-        Ok(self.secrets.get(&workspace.owner, kind).await?)
+        for owner in secret_owners(&workspace.owner) {
+            if let Some(value) = self.secrets.get(&owner, kind).await? {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -952,6 +969,52 @@ mod tests {
 
         let _again = controller.open(&ws).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn team_workspaces_fall_back_to_organization_secrets() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let org = Owner::Org("acme".into());
+        let team = Owner::Team {
+            org: "acme".into(),
+            team: "dev".into(),
+        };
+        let secrets = controller.secrets();
+        secrets
+            .set(&org, "anthropic_api_key", &"org-key".to_string().into())
+            .await
+            .unwrap();
+        secrets
+            .set(&org, "openai_api_key", &"org-openai".to_string().into())
+            .await
+            .unwrap();
+        secrets
+            .set(&team, "openai_api_key", &"team-openai".to_string().into())
+            .await
+            .unwrap();
+        let ws = workspace(&controller, "acme/dev/tools", "alice").await;
+        let other_team = workspace(&controller, "acme/ops/tools", "alice").await;
+        let _a = controller.open(&ws).await.unwrap();
+        let _b = controller.open(&other_team).await.unwrap();
+        let socket = backend.broker_socket(&ws.key());
+        assert!(
+            ask(&socket, "CHLOE_SECRET_ANTHROPIC_API_KEY")
+                .await
+                .contains("org-key")
+        );
+        assert!(
+            ask(&socket, "CHLOE_SECRET_OPENAI_API_KEY")
+                .await
+                .contains("team-openai"),
+            "the team secret wins"
+        );
+        let other = backend.broker_socket(&other_team.key());
+        assert!(
+            ask(&other, "CHLOE_SECRET_OPENAI_API_KEY")
+                .await
+                .contains("org-openai"),
+            "another team does not see this team's secret"
+        );
     }
 
     #[tokio::test]

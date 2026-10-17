@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# 段階 6f と 8a の確認。GitHub のふりをするサーバーに GitHub App の API を答えさせ、
+# 段階 6f と 8 の確認。GitHub のふりをするサーバーに GitHub App の API を答えさせ、
 # 所属の確認、chloe github login (Device Flow)、GitHub のトークンの差し替えを確かめる。
 #
 # アプリは acme と beta の二つの Organization にインストールしてある。
-# 利用者は alice (acme のメンバーで、team dev のメンバー)、bob (どちらのメンバーでもないが
-# allowed_users にいる)、carol (どちらでもない)、dave (beta のメンバー)。
+# 利用者は alice (acme の管理者で、team dev のメンバー)、bob (どちらのメンバーでもないが
+# allowed_users にいる)、carol (どちらでもない)、dave (beta のメンバー)、
+# erin (acme のメンバーで、team dev の maintainer)。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +30,7 @@ source "$here/gateway-lib.sh"
 docker ps -aq --filter "name=^$prefix" | xargs -r docker rm -f >/dev/null
 rm -rf "$state"
 mkdir -p "$logs" "$work/keys"
-for user in alice bob carol dave; do
+for user in alice bob carol dave erin; do
     ssh-keygen -q -t ed25519 -N '' -C "$user" -f "$work/$user"
     cp "$work/$user.pub" "$work/keys/$user.keys"
 done
@@ -45,8 +46,10 @@ lock = threading.Lock()
 tokens = {"1": "ghs_acme", "2": "ghs_beta"}
 memberships = {
     "ghs_acme": {
-        "/orgs/acme/memberships/alice": "member",
+        "/orgs/acme/memberships/alice": "admin",
         "/orgs/acme/teams/dev/memberships/alice": "member",
+        "/orgs/acme/memberships/erin": "member",
+        "/orgs/acme/teams/dev/memberships/erin": "maintainer",
     },
     "ghs_beta": {
         "/orgs/beta/memberships/dave": "member",
@@ -213,5 +216,39 @@ beta_ph="$(as dave+beta/app 'printenv GH_TOKEN')"
 check beta-placeholder "ghu_chloe" echo "$beta_ph"
 check beta-api "401" as dave+beta/app "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: token $beta_ph' https://api.github.com/user"
 check beta-token-served "secret served" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "secret served" | grep "beta/app" | grep -o "secret served.*github_token" | tail -1' "$logs/gateway.log"
+
+section "organization settings"
+check policy-not-admin "only the administrators" sh -c 'printf "allow = [\"example.org\"]\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/dave" dave@127.0.0.1 chloe policy set beta
+check policy-maintainer-not-admin "only the administrators" sh -c 'printf "root = \"persistent\"\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe policy set acme/dev
+check org-blocked-before "000" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
+check policy-set "saved the settings of acme" sh -c 'printf "allow = [\"example.org\"]\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
+check policy-show "example.org" as erin chloe policy show acme
+check org-allowed-after "200" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
+check team-inherits "200" as alice+acme/dev/tools "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
+check other-org-unaffected "000" as dave+beta/app "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
+check team-root-default "saved the settings of acme/dev" sh -c 'printf "root = \"persistent\"\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme/dev
+as alice chloe ws create acme/dev/new >/dev/null
+check team-root-applied "acme/dev/new	persistent" as alice chloe ws list
+check policy-invalid "invalid settings" sh -c 'printf "allow = 1\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
+
+section "organization and team secrets"
+check maintainer-team-secret "saved anthropic_api_key for acme/dev" sh -c 'echo real-team-key | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe secret set --owner acme/dev anthropic_api_key
+check maintainer-not-org-secret "cannot change the secrets of acme" sh -c 'echo x | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe secret set --owner acme anthropic_api_key
+check other-org-secret "cannot change the secrets of beta" sh -c 'echo x | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret rm --owner beta openai_api_key
+check admin-org-secret "saved openai_api_key for acme" sh -c 'echo real-org-key | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set --owner acme openai_api_key
+check team-secret-list "anthropic_api_key" as erin chloe secret list --owner acme/dev
+check team-gets-team-secret "sk-ant-api03-chloe" as alice+acme/dev/tools 'printenv ANTHROPIC_API_KEY'
+check team-gets-org-secret "sk-proj-chloe" as alice+acme/dev/tools 'printenv OPENAI_API_KEY'
+check org-not-team-secret "absent" as alice+acme/proj 'printenv ANTHROPIC_API_KEY || echo absent'
+check secrets-not-logged "clean" sh -c '! grep -q "real-team-key\|real-org-key" "$0" && echo clean' "$logs/gateway.log"
 
 timing_summary

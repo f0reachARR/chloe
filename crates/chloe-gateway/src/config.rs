@@ -43,6 +43,10 @@ pub struct Config {
     /// ログインを許す GitHub のログイン名。GitHub App の Organization のメンバーに加えて許す。
     #[serde(default)]
     pub allowed_users: Vec<String>,
+    /// サーバーの運用者の GitHub のログイン名。どの Organization と team の設定と
+    /// シークレットも変えられる (GitHub の Organization の管理者に加えて)。
+    #[serde(default)]
+    pub admins: Vec<String>,
     /// team と Organization のワークスペースに入れる利用者 (持ち主 → ログイン名)。
     /// GitHub 上の所属に加えて許す (開発用)。
     #[serde(default)]

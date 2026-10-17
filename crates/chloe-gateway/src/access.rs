@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use chloe_controller::workspace::Workspace;
-use chloe_github::UserToken;
+use chloe_github::{OrgRole, TeamRole, UserToken};
 use chloe_secrets::Owner;
 
 pub use crate::github_token::personal;
@@ -71,6 +71,50 @@ impl Shared {
         })
     }
 
+    /// 利用者が、サーバーの運用者か、GitHub で `org` の管理者か。
+    pub async fn is_org_admin(&self, login: &str, org: &str) -> Result<bool> {
+        if self
+            .config
+            .admins
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(login))
+        {
+            return Ok(true);
+        }
+        match &self.github {
+            Some(github) => Ok(github.org_role(org, login).await? == Some(OrgRole::Admin)),
+            None => Ok(false),
+        }
+    }
+
+    /// 持ち主 (Organization か team) の設定を変えられるか。Organization の管理者だけが変えられる。
+    pub async fn can_manage_policy(&self, login: &str, owner: &Owner) -> Result<bool> {
+        match owner {
+            Owner::User(_) => Ok(false),
+            Owner::Org(org) | Owner::Team { org, .. } => self.is_org_admin(login, org).await,
+        }
+    }
+
+    /// 持ち主のシークレットを登録、変更、削除できるか。個人のものは本人が、Organization の
+    /// ものは管理者が、team のものは Organization の管理者と team の maintainer ができる。
+    pub async fn can_manage_secrets(&self, login: &str, owner: &Owner) -> Result<bool> {
+        match owner {
+            Owner::User(_) => Ok(*owner == personal(login)),
+            Owner::Org(org) => self.is_org_admin(login, org).await,
+            Owner::Team { org, team } => {
+                if self.is_org_admin(login, org).await? {
+                    return Ok(true);
+                }
+                match &self.github {
+                    Some(github) => {
+                        Ok(github.team_role(org, team, login).await? == Some(TeamRole::Maintainer))
+                    }
+                    None => Ok(false),
+                }
+            }
+        }
+    }
+
     /// 動いているランナーの方針を作り直して送る (使えるシークレットの種類が変わったとき)。
     pub async fn refresh_workspace(&self, workspace: &Workspace) -> Result<bool> {
         Ok(self.controller.refresh(workspace).await?)
@@ -79,6 +123,21 @@ impl Shared {
     /// 動いているランナーのうち、`owner` のもの (`None` ならすべて) の方針を作り直す。
     /// 失敗したワークスペースはログに残して続ける。
     pub async fn refresh_running(&self, owner: Option<&Owner>) -> usize {
+        self.refresh_running_where(|ws| owner.is_none_or(|owner| *owner == ws.owner))
+            .await
+    }
+
+    /// `owner` の設定やシークレットを重ねるワークスペース (Organization ならその team のものも)
+    /// のランナーの方針を作り直す。
+    pub async fn refresh_running_under(&self, owner: &Owner) -> usize {
+        self.refresh_running_where(|ws| match (owner, &ws.owner) {
+            (Owner::Org(org), Owner::Org(o) | Owner::Team { org: o, .. }) => o == org,
+            _ => *owner == ws.owner,
+        })
+        .await
+    }
+
+    async fn refresh_running_where(&self, matches: impl Fn(&Workspace) -> bool) -> usize {
         let workspaces = match self.controller.running().await {
             Ok(workspaces) => workspaces,
             Err(error) => {
@@ -88,7 +147,7 @@ impl Shared {
         };
         let mut refreshed = 0;
         for workspace in workspaces {
-            if owner.is_some_and(|owner| *owner != workspace.owner) {
+            if !matches(&workspace) {
                 continue;
             }
             match self.refresh_workspace(&workspace).await {
