@@ -285,6 +285,23 @@ pub fn server_config(
     Ok(Arc::new(config))
 }
 
+/// クライアントの証明書を求めない TLS の待ち受けの設定 (利用者向けの管理 API など)。
+pub fn tls_server_config(
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<Arc<rustls::ServerConfig>, Error> {
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| Error::Invalid(format!("certificate PEM: {e}")))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| Error::Invalid(format!("key PEM: {e}")))?;
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
+}
+
 /// 相互 TLS で `router` を提供する。接続ごとに、相手の役割を [`Peer`] としてリクエストに入れる。
 pub async fn serve(
     listener: TcpListener,

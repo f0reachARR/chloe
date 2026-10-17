@@ -4,12 +4,14 @@
 //! ワークスペースの VM の guest-agent へシェルやコマンドを中継する。
 
 mod access;
+mod api;
 mod auth;
 mod backend;
 mod commands;
 mod config;
 mod github_token;
 mod internal;
+mod ops;
 mod session;
 
 use std::path::{Path, PathBuf};
@@ -143,6 +145,9 @@ async fn main() -> Result<()> {
             }
         });
     }
+    if let Some(api_config) = shared.config.api.clone() {
+        start_api(shared.clone(), &api_config).await?;
+    }
     // ゲートウェイの再起動の前から動いているランナーを引き取り、そのあとも定期的に突き合わせる。
     let report = shared.controller.reconcile().await?;
     tracing::info!(?report, "reconciled runners");
@@ -226,6 +231,37 @@ async fn build_controller(
         Duration::from_secs(config.max_busy_wait_secs),
     );
     Ok((controller, secrets, cluster))
+}
+
+/// HTTP(S) の管理 API で待ち受ける。
+async fn start_api(shared: Arc<Shared>, config: &config::ApiConfig) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    let router = api::router(shared);
+    match (&config.tls_cert, &config.tls_key) {
+        (Some(cert), Some(key)) => {
+            let tls = chloe_mtls::tls_server_config(
+                &std::fs::read_to_string(cert)
+                    .with_context(|| format!("read {}", cert.display()))?,
+                &std::fs::read_to_string(key).with_context(|| format!("read {}", key.display()))?,
+            )?;
+            tracing::info!(listen = %config.listen, "listening for the management API (HTTPS)");
+            tokio::spawn(async move {
+                if let Err(error) = chloe_mtls::serve(listener, tls, router).await {
+                    tracing::error!("the management API stopped: {error}");
+                }
+            });
+        }
+        (None, None) => {
+            tracing::info!(listen = %config.listen, "listening for the management API (HTTP)");
+            tokio::spawn(async move {
+                if let Err(error) = axum::serve(listener, router).await {
+                    tracing::error!("the management API stopped: {error}");
+                }
+            });
+        }
+        _ => anyhow::bail!("write both api.tls_cert and api.tls_key, or neither"),
+    }
+    Ok(())
 }
 
 /// `chloe-gateway node ...`。

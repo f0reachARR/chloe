@@ -12,6 +12,9 @@
 //! chloe policy show OWNER
 //! chloe policy set OWNER                  (TOML を標準入力から読む)
 //! chloe policy rm OWNER
+//! chloe token create NAME [--expires 30d]   (管理 API のトークン。値はこのときだけ表示する)
+//! chloe token list
+//! chloe token revoke ID
 //! chloe github login         (Device Flow で GitHub のトークンを得る)
 //! chloe github status
 //! chloe github logout
@@ -22,10 +25,10 @@
 //! 接続した利用者の個人のものを扱う。
 
 use chloe_controller::catalog;
-use chloe_controller::runner::{PolicyLayer, most_specific};
-use chloe_controller::workspace::{RootMode, WorkspaceRef};
-use chloe_secrets::Owner;
+use chloe_controller::runner::PolicyLayer;
+use chloe_controller::workspace::RootMode;
 
+use crate::ops::{self, owner_arg, parse_owner, secret_owner};
 use crate::session::Shared;
 
 pub struct Output {
@@ -94,6 +97,12 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
         ["policy", "show", owner] => policy_show(shared, login, owner).await,
         ["policy", "set", owner] => policy_set(shared, login, owner, stdin).await,
         ["policy", "rm", owner] => policy_rm(shared, login, owner).await,
+        ["token", "create", name] => token_create(shared, login, name, None).await,
+        ["token", "create", name, "--expires", expires] => {
+            token_create(shared, login, name, Some(expires)).await
+        }
+        ["token", "list"] => token_list(shared, login).await,
+        ["token", "revoke", id] => token_revoke(shared, login, id).await,
         ["github", "status"] => github_status(shared, login).await,
         ["github", "logout"] => github_logout(shared, login).await,
         [] | ["help"] => Ok(help()),
@@ -112,41 +121,28 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds: Vec<&str> = catalog::KINDS.iter().map(|k| k.name).collect();
     format!(
-        "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret set [--owner OWNER] KIND   (reads the value from stdin)\n  chloe secret rm [--owner OWNER] KIND\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nsecret kinds: {}\n",
+        "usage:\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret set [--owner OWNER] KIND   (reads the value from stdin)\n  chloe secret rm [--owner OWNER] KIND\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nsecret kinds: {}\n",
         kinds.join(", ")
     )
 }
 
+/// 操作の失敗をコマンドの表示にする。
+fn shown(error: ops::Error) -> String {
+    match &error {
+        ops::Error::Invalid(m) if m.starts_with("unknown secret kind") => {
+            format!("{m}\n{}", help())
+        }
+        _ => error.to_string(),
+    }
+}
+
 async fn ws_list(shared: &Shared, login: &str) -> Result<String, String> {
-    let workspaces = shared
-        .controller
-        .store()
-        .list(
-            &shared
-                .owners_for(login)
-                .await
-                .map_err(|e| format!("{e:#}"))?,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let running = shared
-        .controller
-        .running()
-        .await
-        .map_err(|e| e.to_string())?;
+    let workspaces = ops::list_workspaces(shared, login).await.map_err(shown)?;
     Ok(workspaces
         .iter()
         .map(|ws| {
-            let state = if running.iter().any(|r| r.id == ws.id) {
-                "running"
-            } else {
-                "stopped"
-            };
-            format!(
-                "{}\t{}\t{state}\n",
-                ws.display_name(),
-                ws.root_mode.as_str()
-            )
+            let state = if ws.running { "running" } else { "stopped" };
+            format!("{}\t{}\t{state}\n", ws.name, ws.root.as_str())
         })
         .collect())
 }
@@ -155,113 +151,48 @@ async fn ws_create(
     shared: &Shared,
     login: &str,
     name: &str,
-    mode: Option<RootMode>,
+    root: Option<RootMode>,
 ) -> Result<String, String> {
-    let target = WorkspaceRef::parse(name, login).map_err(|e| e.to_string())?;
-    if !shared
-        .can_access(login, &target.owner)
+    let ws = ops::create_workspace(shared, login, name, root)
         .await
-        .map_err(|e| format!("{e:#}"))?
-    {
-        return Err(format!("you are not a member of {}", target.owner));
-    }
-    // 指定がなければ、Organization と team の設定の既定を使う。
-    let mode = match mode {
-        Some(mode) => mode,
-        None => {
-            let layers = shared
-                .controller
-                .store()
-                .policy_layers(&target.owner)
-                .await
-                .map_err(|e| e.to_string())?;
-            most_specific(&layers, |l| l.root.as_ref()).unwrap_or(RootMode::Ephemeral)
-        }
-    };
-    let ws = shared
-        .controller
-        .store()
-        .create(&target, mode, login)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!("created {}\n", ws.display_name()))
-}
-
-async fn find(
-    shared: &Shared,
-    login: &str,
-    name: &str,
-) -> Result<chloe_controller::workspace::Workspace, String> {
-    let target = WorkspaceRef::parse(name, login).map_err(|e| e.to_string())?;
-    let not_found = || format!("no such workspace: {name}");
-    if !shared
-        .can_access(login, &target.owner)
-        .await
-        .map_err(|e| format!("{e:#}"))?
-    {
-        return Err(not_found());
-    }
-    shared
-        .controller
-        .store()
-        .find(&target)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(not_found)
+        .map_err(shown)?;
+    Ok(format!("created {}\n", ws.name))
 }
 
 async fn ws_root(
     shared: &Shared,
     login: &str,
     name: &str,
-    mode: RootMode,
+    root: RootMode,
 ) -> Result<String, String> {
-    let ws = find(shared, login, name).await?;
-    shared
-        .controller
-        .store()
-        .set_root_mode(ws.id, mode)
+    let ws = ops::set_root(shared, login, name, root)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(shown)?;
     Ok(format!(
         "{} will use the {} root from the next start (run `chloe ws stop {}` to restart now)\n",
         ws.display_name(),
-        mode.as_str(),
+        root.as_str(),
         ws.display_name()
     ))
 }
 
 async fn ws_stop(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
-    let ws = find(shared, login, name).await?;
-    shared
-        .controller
-        .stop(&ws)
+    let ws = ops::stop_workspace(shared, login, name)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(shown)?;
     Ok(format!("stopped {}\n", ws.display_name()))
 }
 
 async fn ws_rm(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
-    let ws = find(shared, login, name).await?;
-    shared
-        .controller
-        .stop(&ws)
+    let ws = ops::remove_workspace(shared, login, name)
         .await
-        .map_err(|e| e.to_string())?;
-    shared
-        .controller
-        .store()
-        .delete(ws.id)
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(shown)?;
     Ok(format!(
         "removed {} (its disks are kept under the runner state directory as {})\n",
         ws.display_name(),
         ws.key()
     ))
 }
-
-use crate::access::personal;
 
 async fn github_status(shared: &Shared, login: &str) -> Result<String, String> {
     if shared.github.is_none() {
@@ -294,73 +225,12 @@ async fn github_logout(shared: &Shared, login: &str) -> Result<String, String> {
     })
 }
 
-fn known_kind(kind: &str) -> Result<(), String> {
-    match catalog::kind(kind) {
-        Some(_) => Ok(()),
-        None => Err(format!("unknown secret kind: {kind}\n{}", help())),
-    }
-}
-
-/// `--owner` で指定した持ち主。省けば接続した利用者の個人のもの。
-fn secret_owner(login: &str, owner: Option<&str>) -> Result<Owner, String> {
-    match owner {
-        None => Ok(personal(login)),
-        Some(owner) => parse_owner(owner),
-    }
-}
-
-/// Organization (`org`) か team (`org/team`)。
-fn parse_owner(arg: &str) -> Result<Owner, String> {
-    let text = match arg.split_once('/') {
-        None => format!("org:{arg}"),
-        Some(_) => format!("team:{arg}"),
-    };
-    text.to_ascii_lowercase()
-        .parse()
-        .map_err(|_| format!("invalid owner: {arg} (use org or org/team)"))
-}
-
-/// 持ち主の名前を、コマンドで指定する書き方で表す。
-fn owner_arg(owner: &Owner) -> String {
-    match owner {
-        Owner::User(login) => login.clone(),
-        Owner::Org(org) => org.clone(),
-        Owner::Team { org, team } => format!("{org}/{team}"),
-    }
-}
-
 async fn secret_list(shared: &Shared, login: &str, owner: Option<&str>) -> Result<String, String> {
-    let owner = secret_owner(login, owner)?;
-    // 名前だけなので、その持ち主のワークスペースに入れる人は見られる。
-    if !shared
-        .can_access(login, &owner)
+    let owner = secret_owner(login, owner).map_err(shown)?;
+    let names = ops::list_secrets(shared, login, &owner)
         .await
-        .map_err(|e| format!("{e:#}"))?
-    {
-        return Err(format!("you are not a member of {}", owner_arg(&owner)));
-    }
-    let names = shared
-        .controller
-        .secrets()
-        .list(&owner)
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(shown)?;
     Ok(names.iter().map(|n| format!("{n}\n")).collect())
-}
-
-async fn check_secret_manager(shared: &Shared, login: &str, owner: &Owner) -> Result<(), String> {
-    if shared
-        .can_manage_secrets(login, owner)
-        .await
-        .map_err(|e| format!("{e:#}"))?
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "you cannot change the secrets of {} (organization admins, and team maintainers for a team, can)",
-            owner_arg(owner)
-        ))
-    }
 }
 
 async fn secret_set(
@@ -370,22 +240,20 @@ async fn secret_set(
     kind: &str,
     stdin: &[u8],
 ) -> Result<String, String> {
-    known_kind(kind)?;
-    let owner = secret_owner(login, owner)?;
-    check_secret_manager(shared, login, &owner).await?;
+    let owner = secret_owner(login, owner).map_err(shown)?;
+    ops::known_kind(kind).map_err(shown)?;
+    ops::check_secret_manager(shared, login, &owner)
+        .await
+        .map_err(shown)?;
     let value =
         String::from_utf8(stdin.to_vec()).map_err(|_| "the value must be UTF-8".to_string())?;
     let value = value.trim_end_matches(['\n', '\r']);
     if value.is_empty() {
         return Err("the value is empty (pass it on stdin)".into());
     }
-    shared
-        .controller
-        .secrets()
-        .set(&owner, kind, &value.to_string().into())
+    ops::set_secret(shared, login, &owner, kind, value)
         .await
-        .map_err(|e| e.to_string())?;
-    shared.refresh_running_under(&owner).await;
+        .map_err(shown)?;
     Ok(format!(
         "saved {kind} for {} (used from the next request; in a running workspace, shells opened from now on get its placeholder)\n",
         owner_arg(&owner)
@@ -398,58 +266,18 @@ async fn secret_rm(
     owner: Option<&str>,
     kind: &str,
 ) -> Result<String, String> {
-    known_kind(kind)?;
-    let owner = secret_owner(login, owner)?;
-    check_secret_manager(shared, login, &owner).await?;
-    let removed = shared
-        .controller
-        .secrets()
-        .delete(&owner, kind)
+    let owner = secret_owner(login, owner).map_err(shown)?;
+    ops::remove_secret(shared, login, &owner, kind)
         .await
-        .map_err(|e| e.to_string())?;
-    if removed {
-        shared.refresh_running_under(&owner).await;
-        Ok(format!("removed {kind} from {}\n", owner_arg(&owner)))
-    } else {
-        Err(format!("no such secret: {kind}"))
-    }
-}
-
-async fn check_policy_admin(shared: &Shared, login: &str, owner: &Owner) -> Result<(), String> {
-    if shared
-        .can_manage_policy(login, owner)
-        .await
-        .map_err(|e| format!("{e:#}"))?
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "only the administrators of the organization can change the settings of {}",
-            owner_arg(owner)
-        ))
-    }
+        .map_err(shown)?;
+    Ok(format!("removed {kind} from {}\n", owner_arg(&owner)))
 }
 
 async fn policy_show(shared: &Shared, login: &str, owner: &str) -> Result<String, String> {
-    let owner = parse_owner(owner)?;
-    // 設定 (宛先と規則) は秘密ではないので、その持ち主のワークスペースに入れる人は見られる。
-    if !shared
-        .can_access(login, &owner)
+    let owner = parse_owner(owner).map_err(shown)?;
+    match ops::show_policy(shared, login, &owner)
         .await
-        .map_err(|e| format!("{e:#}"))?
-        && !shared
-            .can_manage_policy(login, &owner)
-            .await
-            .map_err(|e| format!("{e:#}"))?
-    {
-        return Err(format!("you are not a member of {}", owner_arg(&owner)));
-    }
-    match shared
-        .controller
-        .store()
-        .policy(&owner)
-        .await
-        .map_err(|e| e.to_string())?
+        .map_err(shown)?
     {
         Some(layer) => toml::to_string(&layer).map_err(|e| e.to_string()),
         None => Ok(format!("# no settings for {}\n", owner_arg(&owner))),
@@ -462,17 +290,16 @@ async fn policy_set(
     owner: &str,
     stdin: &[u8],
 ) -> Result<String, String> {
-    let owner = parse_owner(owner)?;
-    check_policy_admin(shared, login, &owner).await?;
+    let owner = parse_owner(owner).map_err(shown)?;
     let text = std::str::from_utf8(stdin).map_err(|_| "the settings must be UTF-8".to_string())?;
-    let layer: PolicyLayer = toml::from_str(text).map_err(|e| format!("invalid settings: {e}"))?;
-    shared
-        .controller
-        .store()
-        .set_policy(&owner, &layer, login)
+    // 権限のない利用者には、設定の書き方の誤りより先に権限がないことを伝える。
+    ops::check_policy_admin(shared, login, &owner)
         .await
-        .map_err(|e| e.to_string())?;
-    let refreshed = shared.refresh_running_under(&owner).await;
+        .map_err(shown)?;
+    let layer: PolicyLayer = toml::from_str(text).map_err(|e| format!("invalid settings: {e}"))?;
+    let refreshed = ops::set_policy(shared, login, &owner, &layer)
+        .await
+        .map_err(shown)?;
     Ok(format!(
         "saved the settings of {} ({refreshed} running workspace(s) updated)\n",
         owner_arg(&owner)
@@ -480,22 +307,56 @@ async fn policy_set(
 }
 
 async fn policy_rm(shared: &Shared, login: &str, owner: &str) -> Result<String, String> {
-    let owner = parse_owner(owner)?;
-    check_policy_admin(shared, login, &owner).await?;
-    let removed = shared
-        .controller
-        .store()
-        .delete_policy(&owner)
+    let owner = parse_owner(owner).map_err(shown)?;
+    let refreshed = ops::remove_policy(shared, login, &owner)
         .await
-        .map_err(|e| e.to_string())?;
-    if !removed {
-        return Err(format!("no settings for {}", owner_arg(&owner)));
-    }
-    let refreshed = shared.refresh_running_under(&owner).await;
+        .map_err(shown)?;
     Ok(format!(
         "removed the settings of {} ({refreshed} running workspace(s) updated)\n",
         owner_arg(&owner)
     ))
+}
+
+async fn token_create(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    expires: Option<&str>,
+) -> Result<String, String> {
+    let ttl = expires
+        .map(ops::parse_duration)
+        .transpose()
+        .map_err(shown)?;
+    let (id, token) = ops::create_token(shared, login, name, ttl)
+        .await
+        .map_err(shown)?;
+    Ok(format!(
+        "{token}\n# token {id} ({name}); it is shown only now. Use it as `Authorization: Bearer <token>`.\n"
+    ))
+}
+
+async fn token_list(shared: &Shared, login: &str) -> Result<String, String> {
+    let tokens = ops::list_tokens(shared, login).await.map_err(shown)?;
+    Ok(tokens
+        .iter()
+        .map(|t| {
+            let expires = t
+                .expires_at
+                .map(|at| format!("expires at {at}"))
+                .unwrap_or_else(|| "no expiry".into());
+            let used = t
+                .last_used_at
+                .map(|at| format!("last used at {at}"))
+                .unwrap_or_else(|| "never used".into());
+            format!("{}\t{}\t{expires}\t{used}\n", t.id, t.name)
+        })
+        .collect())
+}
+
+async fn token_revoke(shared: &Shared, login: &str, id: &str) -> Result<String, String> {
+    let id: i64 = id.parse().map_err(|_| format!("invalid token id: {id}"))?;
+    ops::revoke_token(shared, login, id).await.map_err(shown)?;
+    Ok(format!("revoked token {id}\n"))
 }
 
 #[cfg(test)]
@@ -514,20 +375,5 @@ mod tests {
         assert!(needs_stdin(&["secret".into(), "set".into(), "x".into()]));
         assert!(needs_stdin(&["policy".into(), "set".into(), "acme".into()]));
         assert!(!needs_stdin(&["ws".into(), "list".into()]));
-    }
-
-    #[test]
-    fn parses_owners() {
-        assert_eq!(parse_owner("Acme"), Ok(Owner::Org("acme".into())));
-        assert_eq!(
-            parse_owner("acme/dev"),
-            Ok(Owner::Team {
-                org: "acme".into(),
-                team: "dev".into()
-            })
-        );
-        assert!(parse_owner("../x").is_err());
-        assert!(parse_owner("a/b/c").is_err());
-        assert_eq!(owner_arg(&parse_owner("acme/dev").unwrap()), "acme/dev");
     }
 }

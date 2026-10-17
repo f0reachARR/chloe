@@ -15,6 +15,7 @@ work="$(mktemp -d)"
 prefix=chloe-mvp-
 ssh_port=2223
 keys_port=18901
+api_port=18920
 
 cleanup() {
     kill "${keys_pid:-}" "${gateway_pid:-}" 2>/dev/null || true
@@ -48,6 +49,9 @@ idle_timeout_secs = 5
 allowed_users = ["alice", "bob"]
 # GitHub App がなくても、設定の admins はサーバーの運用者として設定とシークレットを変えられる。
 admins = ["alice"]
+
+[api]
+listen = "127.0.0.1:$api_port"
 
 [memberships]
 "org:acme" = ["alice"]
@@ -174,6 +178,46 @@ done
 check idle-stop "yes" echo "$stopped"
 check workspace-kept "kept" as alice 'cat /workspace/marker'
 check home-kept "kept" as alice 'cat ~/.claude/marker'
+
+section "management API"
+api() {
+    local token="$1" method="$2" path="$3"; shift 3
+    curl -s -w ' %{http_code}' -X "$method" -H "Authorization: Bearer $token" \
+        -H 'content-type: application/json' "http://127.0.0.1:$api_port$path" "$@"
+}
+alice_token="$(as alice chloe token create ci --expires 1d | head -1)"
+bob_token="$(as bob chloe token create bob-ci | head -1)"
+check api-token-shown "chloe_" sh -c 'echo "$0" | grep -o "^chloe_"' "$alice_token"
+check api-no-token "401" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/v1/me"
+check api-wrong-token "401" api chloe_wrong GET /v1/me
+check api-me '"login":"alice"' api "$alice_token" GET /v1/me
+check api-list '"name":"default"' api "$alice_token" GET /v1/workspaces
+check api-create '"name":"acme/from-api","root":"ephemeral","running":false} 201' \
+    api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
+check api-create-visible-by-ssh "acme/from-api" as alice chloe ws list
+check api-create-not-member "not a member of org:acme" api "$bob_token" POST /v1/workspaces -d '{"name":"acme/bob"}'
+check api-create-duplicate "409" api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
+check api-patch-root '"root":"persistent"' api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"root":"persistent"}'
+check api-show-other "404" api "$bob_token" GET /v1/workspaces/acme/from-api
+check api-secret-set "204" api "$alice_token" PUT /v1/secrets/openai_api_key -d '{"value":"real-api-secret"}'
+check api-secret-list '"names":["anthropic_api_key","openai_api_key"]' api "$alice_token" GET /v1/secrets
+check api-secret-ssh "openai_api_key" as alice chloe secret list
+check api-org-secret-denied "403" api "$bob_token" PUT '/v1/secrets/openai_api_key?owner=acme' -d '{"value":"x"}'
+check api-policy-set '"updated_runners":' api "$alice_token" PUT /v1/policies/acme -d '{"allow":["api.example"]}'
+check api-policy-show '{"allow":["api.example"]} 200' api "$alice_token" GET /v1/policies/acme
+check api-policy-ssh "api.example" as alice chloe policy show acme
+check api-policy-denied "only the administrators" api "$bob_token" PUT /v1/policies/acme -d '{"allow":[]}'
+check api-policy-invalid "invalid settings" api "$alice_token" PUT /v1/policies/acme -d '{"passthrough":["x.example"]}'
+check api-delete "204" api "$alice_token" DELETE /v1/workspaces/acme/from-api
+check api-deleted "404" api "$alice_token" GET /v1/workspaces/acme/from-api
+check api-token-list '"name":"ci"' api "$alice_token" GET /v1/tokens
+alice_token_id="$(api "$alice_token" GET /v1/me | sed 's/.*"token":\([0-9]*\).*/\1/')"
+check api-bob-cannot-revoke "404" api "$bob_token" DELETE "/v1/tokens/$alice_token_id"
+check api-revoke "204" api "$alice_token" DELETE "/v1/tokens/$alice_token_id"
+check api-revoked "401" api "$alice_token" GET /v1/me
+check api-audited 'via="api"' sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "management command" | grep -o "via=\"api\"" | tail -1' "$logs/gateway.log"
+check api-secret-not-logged "clean" sh -c '! grep -q "real-api-secret" "$0" && echo clean' "$logs/gateway.log"
+check api-token-not-logged "clean" sh -c '! grep -q "$1" "$0" && echo clean' "$logs/gateway.log" "$alice_token"
 
 section "control plane down"
 # ゲートウェイ (問い合わせ先) を止めると、本物の値が要る要求は 503 で失敗し、要らない要求は通る。

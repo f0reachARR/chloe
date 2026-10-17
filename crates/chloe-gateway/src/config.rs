@@ -61,6 +61,22 @@ pub struct Config {
     /// 複数のホスト (chloe-node) にランナーを置くときの設定。
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
+    /// HTTP(S) の管理 API。なければ待ち受けない。
+    #[serde(default)]
+    pub api: Option<ApiConfig>,
+}
+
+/// HTTP(S) の管理 API の設定。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiConfig {
+    pub listen: SocketAddr,
+    /// TLS の証明書と鍵 (PEM)。どちらもなければ HTTP で待ち受ける (手前に TLS を終端する
+    /// リバースプロキシを置くか、ローカルからだけ使うとき)。
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
 }
 
 /// 複数のホストにランナーを置くときの、コントロールプレーンの設定。

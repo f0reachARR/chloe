@@ -212,7 +212,7 @@ impl Connection {
         };
         let shared = self.shared.clone();
         tokio::spawn(async move {
-            info!(target: "audit", login = %user.login, command = ?args, "management command");
+            info!(target: "audit", via = "ssh", login = %user.login, command = ?args, "management command");
             if args == ["github", "login"] {
                 let code = github_login_command(&shared, &user.login, &handle, channel).await;
                 let _ = handle.exit_status_request(channel, code).await;
