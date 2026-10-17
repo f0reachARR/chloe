@@ -317,9 +317,10 @@ impl<B: RunnerBackend> Controller<B> {
     async fn build(&self, workspace: &Workspace) -> Result<RunnerSpec, Error> {
         let placeholders = self.inner.store.placeholders(workspace.id).await?;
         let kinds = self.inner.resolver.kinds(workspace).await?;
+        let layers = self.inner.store.policy_layers(&workspace.owner).await?;
         Ok(build_spec(
             workspace,
-            &self.inner.base,
+            &self.inner.base.with_layers(&layers),
             &placeholders,
             &kinds,
         ))
@@ -611,6 +612,8 @@ mod tests {
         reboots: Arc<AtomicUsize>,
         /// 偽の guest-agent が最後に受け取った環境変数。
         env: PushedEnv,
+        /// ランナーごとの、最後に渡した方針の許可リスト。
+        allow: Mutex<HashMap<String, Vec<String>>>,
     }
 
     /// Firecracker の vsock の握手と guest-agent の応答をまねる。
@@ -673,6 +676,10 @@ mod tests {
     impl RunnerBackend for Arc<FakeBackend> {
         async fn start(&self, spec: RunnerSpec) -> Result<PathBuf, Error> {
             self.starts.fetch_add(1, Ordering::SeqCst);
+            self.allow
+                .lock()
+                .unwrap()
+                .insert(spec.key.clone(), spec.policy.allow.clone());
             fake_agent(
                 self.vsock_path(&spec.key),
                 self.busy.clone(),
@@ -699,6 +706,10 @@ mod tests {
 
         async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
             self.updates.fetch_add(1, Ordering::SeqCst);
+            self.allow
+                .lock()
+                .unwrap()
+                .insert(spec.key.clone(), spec.policy.allow.clone());
             self.running
                 .lock()
                 .unwrap()
@@ -751,6 +762,7 @@ mod tests {
             busy: Arc::new(Mutex::new(vec![])),
             reboots: Arc::new(AtomicUsize::new(0)),
             env: Arc::new(Mutex::new(None)),
+            allow: Mutex::new(HashMap::new()),
         })
     }
 
@@ -940,6 +952,37 @@ mod tests {
 
         let _again = controller.open(&ws).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn organization_policy_reaches_its_runners() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let org = Owner::Org("acme".into());
+        let layer = |host: &str| crate::runner::PolicyLayer {
+            allow: vec![host.into()],
+            ..Default::default()
+        };
+        let store = controller.store();
+        store
+            .set_policy(&org, &layer("org.example"), "alice")
+            .await
+            .unwrap();
+        let team_ws = workspace(&controller, "acme/dev/tools", "alice").await;
+        let personal = workspace(&controller, "mine", "alice").await;
+        let _a = controller.open(&team_ws).await.unwrap();
+        let _b = controller.open(&personal).await.unwrap();
+        let allow = |ws: &Workspace| backend.allow.lock().unwrap()[&ws.key()].clone();
+        assert!(allow(&team_ws).contains(&"org.example".to_string()));
+        assert!(!allow(&personal).contains(&"org.example".to_string()));
+
+        // 変えた設定は、動いているランナーを作り直すと入る。
+        store
+            .set_policy(&org, &layer("org2.example"), "alice")
+            .await
+            .unwrap();
+        assert!(controller.refresh(&team_ws).await.unwrap());
+        assert!(allow(&team_ws).contains(&"org2.example".to_string()));
+        assert!(!allow(&team_ws).contains(&"org.example".to_string()));
     }
 
     #[tokio::test]

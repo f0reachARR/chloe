@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::host_matches;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathRuleConfig {
     /// ログに残す名前。

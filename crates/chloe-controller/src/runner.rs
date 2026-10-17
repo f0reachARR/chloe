@@ -7,7 +7,7 @@ use std::future::Future;
 use std::path::PathBuf;
 
 use chloe_policy::{InjectRuleConfig, PolicyConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::catalog;
@@ -47,7 +47,7 @@ pub trait RunnerBackend: Send + Sync + 'static {
 }
 
 /// すべてのワークスペースに共通の許可リスト。
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BasePolicy {
     #[serde(default)]
     pub allow: Vec<String>,
@@ -56,6 +56,69 @@ pub struct BasePolicy {
     /// 宛先、メソッド、パスの規則。上から順に評価する。
     #[serde(default)]
     pub rules: Vec<chloe_policy::PathRuleConfig>,
+}
+
+impl BasePolicy {
+    /// 全体の設定に、Organization と team の設定を (上の層から順に) 重ねる。
+    ///
+    /// 許可リストと中継のみの宛先は足し合わせる。パスの規則は上の層のものを先に並べるので、
+    /// 最初に一致した規則で決まる評価では、上の層 (サーバーの運用者、Organization) の規則を
+    /// 下の層が覆せない。
+    pub fn with_layers(&self, layers: &[PolicyLayer]) -> BasePolicy {
+        let mut merged = self.clone();
+        for layer in layers {
+            for host in &layer.allow {
+                if !merged.allow.contains(host) {
+                    merged.allow.push(host.clone());
+                }
+            }
+            for host in &layer.passthrough {
+                if !merged.passthrough.contains(host) {
+                    merged.passthrough.push(host.clone());
+                }
+            }
+            merged.rules.extend(layer.rules.iter().cloned());
+        }
+        merged
+    }
+}
+
+/// Organization か team の設定 (データベースの `policies`)。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyLayer {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passthrough: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<chloe_policy::PathRuleConfig>,
+    /// 新しく作るワークスペースのルートの扱いの既定。下の層が優先する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<RootMode>,
+    /// 共有ワークスペースに渡す GitHub のインストールトークンの範囲。下の層が優先する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GitHubScope>,
+}
+
+/// インストールトークンの範囲。書かなかった項目は、インストールのすべてになる。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubScope {
+    /// リポジトリの名前 (Organization の名前を含まない)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
+    /// 権限の名前と水準 (`contents = "read"` など)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// 層を重ねたときに、もっとも下の層で決めた値。
+pub fn most_specific<T: Clone>(
+    layers: &[PolicyLayer],
+    pick: impl Fn(&PolicyLayer) -> Option<&T>,
+) -> Option<T> {
+    layers.iter().rev().find_map(|layer| pick(layer).cloned())
 }
 
 /// ワークスペースのランナーの起動に必要なものを組み立てる。
@@ -111,6 +174,49 @@ pub fn build_spec(
 mod tests {
     use super::*;
     use chloe_secrets::Owner;
+
+    #[test]
+    fn layers_add_hosts_and_keep_upper_rules_first() {
+        let rule = |name: &str, action| chloe_policy::PathRuleConfig {
+            name: Some(name.into()),
+            hosts: vec!["api.github.com".into()],
+            methods: vec![],
+            paths: vec![],
+            action,
+        };
+        let base = BasePolicy {
+            allow: vec!["a.example".into()],
+            passthrough: vec![],
+            rules: vec![rule("global", chloe_policy::Action::Deny)],
+        };
+        let org = PolicyLayer {
+            allow: vec!["a.example".into(), "b.example".into()],
+            rules: vec![rule("org", chloe_policy::Action::Allow)],
+            root: Some(RootMode::Persistent),
+            ..Default::default()
+        };
+        let team = PolicyLayer {
+            passthrough: vec!["registry.example".into()],
+            rules: vec![rule("team", chloe_policy::Action::Allow)],
+            root: Some(RootMode::Ephemeral),
+            ..Default::default()
+        };
+        let layers = [org, team];
+        let merged = base.with_layers(&layers);
+        assert_eq!(merged.allow, ["a.example", "b.example"]);
+        assert_eq!(merged.passthrough, ["registry.example"]);
+        let names: Vec<_> = merged
+            .rules
+            .iter()
+            .map(|r| r.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["global", "org", "team"]);
+        assert_eq!(
+            most_specific(&layers, |l| l.root.as_ref()),
+            Some(RootMode::Ephemeral)
+        );
+        assert_eq!(most_specific(&layers, |l| l.github.as_ref()), None);
+    }
 
     #[test]
     fn builds_rules_only_for_available_kinds() {

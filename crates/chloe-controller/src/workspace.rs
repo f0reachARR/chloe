@@ -13,7 +13,8 @@ use chloe_secrets::Owner;
 
 use crate::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RootMode {
     /// 共通イメージに tmpfs を重ね、起動のたびに捨てる。
     Ephemeral,

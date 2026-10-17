@@ -10,6 +10,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::Error;
 use crate::catalog;
+use crate::runner::PolicyLayer;
 use crate::workspace::{RootMode, Workspace, WorkspaceRef};
 
 #[derive(Clone)]
@@ -166,6 +167,65 @@ impl Store {
             .collect()
     }
 
+    /// 持ち主 (Organization か team) の設定。
+    pub async fn policy(&self, owner: &Owner) -> Result<Option<PolicyLayer>, Error> {
+        let row = sqlx::query("SELECT config FROM policies WHERE owner = ?1")
+            .bind(owner.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            let config: String = row.try_get("config")?;
+            serde_json::from_str(&config).map_err(|e| Error::Invalid(e.to_string()))
+        })
+        .transpose()
+    }
+
+    pub async fn set_policy(
+        &self,
+        owner: &Owner,
+        layer: &PolicyLayer,
+        updated_by: &str,
+    ) -> Result<(), Error> {
+        let config = serde_json::to_string(layer).map_err(|e| Error::Invalid(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO policies (owner, config, updated_by, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (owner) DO UPDATE SET config = excluded.config,
+                 updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+        )
+        .bind(owner.to_string())
+        .bind(config)
+        .bind(updated_by)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 設定を消す。消したら `true`。
+    pub async fn delete_policy(&self, owner: &Owner) -> Result<bool, Error> {
+        let result = sqlx::query("DELETE FROM policies WHERE owner = ?1")
+            .bind(owner.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// ワークスペースの持ち主に重ねる設定の層 (上の層から順)。個人のワークスペースには重ねない。
+    pub async fn policy_layers(&self, owner: &Owner) -> Result<Vec<PolicyLayer>, Error> {
+        let chain = match owner {
+            Owner::User(_) => vec![],
+            Owner::Org(_) => vec![owner.clone()],
+            Owner::Team { org, .. } => vec![Owner::Org(org.clone()), owner.clone()],
+        };
+        let mut layers = Vec::new();
+        for owner in chain {
+            if let Some(layer) = self.policy(&owner).await? {
+                layers.push(layer);
+            }
+        }
+        Ok(layers)
+    }
+
     /// シークレットの名前からプレースホルダーへの対応。
     pub async fn placeholders(&self, id: i64) -> Result<BTreeMap<String, String>, Error> {
         let rows = sqlx::query(
@@ -275,6 +335,70 @@ pub(crate) mod tests {
         store.delete(ws.id).await.unwrap();
         assert_eq!(store.find(&api).await.unwrap(), None);
         assert!(store.placeholders(ws.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn policy_layers_follow_the_owner_chain() {
+        let store = Store::new(pool().await);
+        let org = Owner::Org("acme".into());
+        let team = Owner::Team {
+            org: "acme".into(),
+            team: "dev".into(),
+        };
+        let layer = |host: &str| PolicyLayer {
+            allow: vec![host.into()],
+            ..Default::default()
+        };
+        store
+            .set_policy(&org, &layer("org.example"), "alice")
+            .await
+            .unwrap();
+        store
+            .set_policy(&team, &layer("team.example"), "alice")
+            .await
+            .unwrap();
+        // 上書きできる。
+        store
+            .set_policy(&team, &layer("team2.example"), "alice")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.policy(&team).await.unwrap(),
+            Some(layer("team2.example"))
+        );
+
+        let hosts = |layers: Vec<PolicyLayer>| -> Vec<String> {
+            layers.into_iter().flat_map(|l| l.allow).collect()
+        };
+        assert_eq!(
+            hosts(store.policy_layers(&team).await.unwrap()),
+            ["org.example", "team2.example"]
+        );
+        assert_eq!(
+            hosts(store.policy_layers(&org).await.unwrap()),
+            ["org.example"]
+        );
+        // 個人のワークスペースには重ねない。
+        assert!(
+            store
+                .policy_layers(&Owner::User("alice".into()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // ほかの Organization の team には、acme の設定は重ならない。
+        let other = Owner::Team {
+            org: "beta".into(),
+            team: "dev".into(),
+        };
+        assert!(store.policy_layers(&other).await.unwrap().is_empty());
+
+        assert!(store.delete_policy(&org).await.unwrap());
+        assert!(!store.delete_policy(&org).await.unwrap());
+        assert_eq!(
+            hosts(store.policy_layers(&team).await.unwrap()),
+            ["team2.example"]
+        );
     }
 
     #[tokio::test]
