@@ -32,7 +32,11 @@ pub enum Action {
         root: RootMode,
     },
     StopWorkspace(String),
-    RemoveWorkspace(String),
+    RemoveWorkspace {
+        name: String,
+        /// ランナーのホストにあるディスクも消す。
+        disks: bool,
+    },
     LoadOwners,
     LoadSecrets(Owner),
     ShowSecret {
@@ -76,7 +80,7 @@ impl Action {
             Self::CreateWorkspace { .. } => "ws create",
             Self::SetRoot { .. } => "ws root",
             Self::StopWorkspace(_) => "ws stop",
-            Self::RemoveWorkspace(_) => "ws rm",
+            Self::RemoveWorkspace { .. } => "ws rm",
             Self::SaveSecret { .. } => "secret set",
             Self::RemoveSecret { .. } => "secret rm",
             Self::SavePolicy { .. } => "policy set",
@@ -210,6 +214,10 @@ enum Modal {
     Confirm {
         message: String,
         action: Action,
+    },
+    /// ワークスペースを消すときに、ディスクも消すかを選ぶ。
+    RemoveWorkspace {
+        name: String,
     },
     Message {
         title: String,
@@ -385,7 +393,14 @@ impl App {
                 purpose: Purpose::NewWorkspace,
                 saving: false,
             }),
-            (Tab::Workspaces, KeyCode::Char(c @ ('r' | 's' | 'd'))) => {
+            (Tab::Workspaces, KeyCode::Char('d')) => {
+                if let Some(ws) = self.workspaces.get(selected) {
+                    self.modals.push(Modal::RemoveWorkspace {
+                        name: ws.name.clone(),
+                    });
+                }
+            }
+            (Tab::Workspaces, KeyCode::Char(c @ ('r' | 's'))) => {
                 let Some(ws) = self.workspaces.get(selected) else {
                     return vec![];
                 };
@@ -401,13 +416,9 @@ impl App {
                             Action::SetRoot { name, root },
                         )
                     }
-                    's' => (
+                    _ => (
                         format!("Stop {name}? Processes in the VM end; files are kept."),
                         Action::StopWorkspace(name),
-                    ),
-                    _ => (
-                        format!("Delete {name}? Its disks are kept on the runner host."),
-                        Action::RemoveWorkspace(name),
                     ),
                 };
                 self.modals.push(Modal::Confirm { message, action });
@@ -635,6 +646,20 @@ impl App {
                     let action = action.clone();
                     self.modals.pop();
                     return vec![action];
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.modals.pop();
+                }
+                _ => {}
+            },
+            Modal::RemoveWorkspace { name } => match key.code {
+                KeyCode::Char(c @ ('k' | 'd')) => {
+                    let name = name.clone();
+                    self.modals.pop();
+                    return vec![Action::RemoveWorkspace {
+                        name,
+                        disks: c == 'd',
+                    }];
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.modals.pop();
@@ -1010,6 +1035,21 @@ fn render_modal(frame: &mut Frame, modal: &Modal) {
                 area,
             );
         }
+        Modal::RemoveWorkspace { name } => {
+            let area = centered(area, 70, 6);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(format!("Delete {name}?")),
+                    Line::from("Its disks hold /workspace, the home directory and Docker data."),
+                    Line::default(),
+                    Line::from("k delete, keep disks  d delete disks too  n cancel".dark_gray()),
+                ])
+                .wrap(Wrap { trim: true })
+                .block(Block::bordered().title(" Delete workspace ")),
+                area,
+            );
+        }
         Modal::Message { title, lines } => {
             let area = centered(area, 90, lines.len() as u16 + 4);
             frame.render_widget(Clear, area);
@@ -1184,8 +1224,21 @@ mod tests {
         let mut app = app();
         assert!(app.handle_key(key(KeyCode::Char('d'))).is_empty());
         assert!(screen(&app).contains("Delete default?"));
-        let actions = app.handle_key(key(KeyCode::Char('y')));
-        assert!(matches!(&actions[..], [Action::RemoveWorkspace(n)] if n == "default"));
+        // y と Enter では消さない (ディスクを残すかを選ばせる)。
+        assert!(app.handle_key(key(KeyCode::Enter)).is_empty());
+        assert!(app.handle_key(key(KeyCode::Char('y'))).is_empty());
+        let actions = app.handle_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            &actions[..],
+            [Action::RemoveWorkspace { name, disks: false }] if name == "default"
+        ));
+
+        app.handle_key(key(KeyCode::Char('d')));
+        let actions = app.handle_key(key(KeyCode::Char('d')));
+        assert!(matches!(
+            &actions[..],
+            [Action::RemoveWorkspace { name, disks: true }] if name == "default"
+        ));
     }
 
     #[test]

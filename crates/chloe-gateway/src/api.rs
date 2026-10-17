@@ -10,7 +10,7 @@
 //! POST   /v1/workspaces                 {"name": "acme/web", "root": "persistent"}
 //! GET    /v1/workspaces/{name}          name は SSH と同じ書き方 (acme/dev/tools など)
 //! PATCH  /v1/workspaces/{name}          {"root": "ephemeral"} か {"running": false}
-//! DELETE /v1/workspaces/{name}
+//! DELETE /v1/workspaces/{name}[?disks=true]   disks=true ならディスクも消す
 //! GET    /v1/secrets[?owner=acme]       シークレットの名前の一覧
 //! GET    /v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
 //! PUT    /v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
@@ -226,12 +226,20 @@ async fn update_workspace(
     Ok(Json(ops::workspace_info(&shared, &caller.login, &name).await?).into_response())
 }
 
+#[derive(Deserialize)]
+struct RemoveQuery {
+    /// ランナーのホストにあるディスクも消す。
+    #[serde(default)]
+    disks: bool,
+}
+
 async fn remove_workspace(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
+    Query(query): Query<RemoveQuery>,
 ) -> Result<Response, ops::Error> {
-    ops::remove_workspace(&shared, &caller.login, &name).await?;
+    ops::remove_workspace(&shared, &caller.login, &name, query.disks).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

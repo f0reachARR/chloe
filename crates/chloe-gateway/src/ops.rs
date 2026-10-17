@@ -166,10 +166,15 @@ pub async fn stop_workspace(shared: &Shared, login: &str, name: &str) -> Result<
     Ok(ws)
 }
 
-pub async fn remove_workspace(shared: &Shared, login: &str, name: &str) -> Result<Workspace> {
+/// ワークスペースを消す。`disks` なら、ランナーのホストにあるディスクも消す。
+pub async fn remove_workspace(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    disks: bool,
+) -> Result<Workspace> {
     let ws = find_workspace(shared, login, name).await?;
-    shared.controller.stop(&ws).await?;
-    shared.controller.store().delete(ws.id).await?;
+    shared.controller.remove(&ws, disks).await?;
     Ok(ws)
 }
 

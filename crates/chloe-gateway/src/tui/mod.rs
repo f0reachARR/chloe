@@ -167,12 +167,13 @@ async fn perform(
                     vec![Action::LoadWorkspaces],
                 )
             }
-            Action::RemoveWorkspace(name) => {
-                let ws = ops::remove_workspace(shared, login, &name)
+            Action::RemoveWorkspace { name, disks } => {
+                let ws = ops::remove_workspace(shared, login, &name, disks)
                     .await
                     .map_err(shown)?;
+                let kept = if disks { "" } else { " (its disks are kept)" };
                 done(
-                    format!("removed {}", ws.display_name()),
+                    format!("removed {}{kept}", ws.display_name()),
                     vec![Action::LoadWorkspaces],
                 )
             }

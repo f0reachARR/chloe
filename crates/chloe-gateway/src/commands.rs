@@ -6,7 +6,7 @@
 //! chloe ws create NAME [--root persistent|ephemeral]
 //! chloe ws root NAME persistent|ephemeral
 //! chloe ws stop NAME
-//! chloe ws rm NAME
+//! chloe ws rm NAME [--disks]   (--disks ならランナーのホストのディスクも消す)
 //! chloe secret list [--owner OWNER]
 //! chloe secret set [--owner OWNER] KIND   (値は標準入力から読む)
 //! chloe secret rm [--owner OWNER] KIND
@@ -87,7 +87,8 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
             Err(e) => Err(e.to_string()),
         },
         ["ws", "stop", name] => ws_stop(shared, login, name).await,
-        ["ws", "rm", name] => ws_rm(shared, login, name).await,
+        ["ws", "rm", name] => ws_rm(shared, login, name, false).await,
+        ["ws", "rm", name, "--disks"] => ws_rm(shared, login, name, true).await,
         ["secret", "list"] => secret_list(shared, login, None).await,
         ["secret", "list", "--owner", owner] => secret_list(shared, login, Some(owner)).await,
         ["secret", "set", name] => secret_set(shared, login, None, name, false, stdin).await,
@@ -137,7 +138,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -199,15 +200,19 @@ async fn ws_stop(shared: &Shared, login: &str, name: &str) -> Result<String, Str
     Ok(format!("stopped {}\n", ws.display_name()))
 }
 
-async fn ws_rm(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
-    let ws = ops::remove_workspace(shared, login, name)
+async fn ws_rm(shared: &Shared, login: &str, name: &str, disks: bool) -> Result<String, String> {
+    let ws = ops::remove_workspace(shared, login, name, disks)
         .await
         .map_err(shown)?;
-    Ok(format!(
-        "removed {} (its disks are kept under the runner state directory as {})\n",
-        ws.display_name(),
-        ws.key()
-    ))
+    Ok(if disks {
+        format!("removed {} and its disks\n", ws.display_name())
+    } else {
+        format!(
+            "removed {} (its disks are kept under the runner state directory as {}; pass --disks to delete them too)\n",
+            ws.display_name(),
+            ws.key()
+        )
+    })
 }
 
 async fn github_status(shared: &Shared, login: &str) -> Result<String, String> {
