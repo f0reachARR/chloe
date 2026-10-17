@@ -399,6 +399,84 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// SSH の公開鍵を利用者に結び付け、鍵が結び付いている利用者を返す。すでにほかの利用者に
+    /// 結び付いていれば、結び付け直さずにその利用者を返す。
+    pub async fn bind_ssh_key(
+        &self,
+        login: &str,
+        fingerprint: &str,
+        public_key: &str,
+    ) -> Result<String, Error> {
+        sqlx::query(
+            "INSERT INTO ssh_keys (fingerprint, login, public_key, created_at)
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT (fingerprint) DO NOTHING",
+        )
+        .bind(fingerprint)
+        .bind(login)
+        .bind(public_key)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        let row = sqlx::query("SELECT login FROM ssh_keys WHERE fingerprint = ?1")
+            .bind(fingerprint)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("login")?)
+    }
+
+    /// 公開鍵が結び付いている利用者。
+    pub async fn ssh_key_login(&self, fingerprint: &str) -> Result<Option<String>, Error> {
+        let row = sqlx::query("SELECT login FROM ssh_keys WHERE fingerprint = ?1")
+            .bind(fingerprint)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| row.try_get("login"))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// 公開鍵で入ったことを記録する。
+    pub async fn touch_ssh_key(&self, fingerprint: &str) -> Result<(), Error> {
+        sqlx::query("UPDATE ssh_keys SET last_used_at = ?2 WHERE fingerprint = ?1")
+            .bind(fingerprint)
+            .bind(now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 利用者に結び付いた公開鍵の一覧。
+    pub async fn ssh_keys(&self, login: &str) -> Result<Vec<SshKey>, Error> {
+        let rows = sqlx::query(
+            "SELECT fingerprint, login, public_key, created_at, last_used_at FROM ssh_keys
+             WHERE login = ?1 ORDER BY created_at, fingerprint",
+        )
+        .bind(login)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(SshKey {
+                    fingerprint: row.try_get("fingerprint")?,
+                    login: row.try_get("login")?,
+                    public_key: row.try_get("public_key")?,
+                    created_at: row.try_get("created_at")?,
+                    last_used_at: row.try_get("last_used_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// 利用者の公開鍵の結び付けを消す。消したら `true`。
+    pub async fn remove_ssh_key(&self, login: &str, fingerprint: &str) -> Result<bool, Error> {
+        let result = sqlx::query("DELETE FROM ssh_keys WHERE fingerprint = ?1 AND login = ?2")
+            .bind(fingerprint)
+            .bind(login)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// 定義に合わせてプレースホルダーを用意し、(シークレット, 欄) からプレースホルダーへの対応を返す。
     /// まだないか、形の変わった欄のプレースホルダーを作る。ほかはワークスペースごとに同じものを使い続ける。
     pub async fn ensure_placeholders(
@@ -504,6 +582,18 @@ pub struct ApiToken {
     pub last_used_at: Option<i64>,
 }
 
+/// 利用者に結び付いた SSH の公開鍵。時刻は UNIX 時刻の秒。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SshKey {
+    /// `SHA256:...` の形の指紋。
+    pub fingerprint: String,
+    pub login: String,
+    /// OpenSSH の形の公開鍵。
+    pub public_key: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
 fn api_token(row: &sqlx::sqlite::SqliteRow) -> Result<ApiToken, Error> {
     Ok(ApiToken {
         id: row.try_get("id")?,
@@ -606,6 +696,35 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn ssh_keys_bind_to_one_user() {
+        let store = Store::new(pool().await);
+        assert_eq!(store.ssh_key_login("SHA256:a").await.unwrap(), None);
+        let bound = store
+            .bind_ssh_key("alice", "SHA256:a", "ssh-ed25519 AAAA")
+            .await
+            .unwrap();
+        assert_eq!(bound, "alice");
+        // ほかの利用者には結び付け直さない。
+        let bound = store
+            .bind_ssh_key("bob", "SHA256:a", "ssh-ed25519 AAAA")
+            .await
+            .unwrap();
+        assert_eq!(bound, "alice");
+        assert_eq!(
+            store.ssh_key_login("SHA256:a").await.unwrap().as_deref(),
+            Some("alice")
+        );
+        store.touch_ssh_key("SHA256:a").await.unwrap();
+        let keys = store.ssh_keys("alice").await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].last_used_at.is_some());
+        assert!(store.ssh_keys("bob").await.unwrap().is_empty());
+        assert!(!store.remove_ssh_key("bob", "SHA256:a").await.unwrap());
+        assert!(store.remove_ssh_key("alice", "SHA256:a").await.unwrap());
+        assert_eq!(store.ssh_key_login("SHA256:a").await.unwrap(), None);
     }
 
     #[tokio::test]
