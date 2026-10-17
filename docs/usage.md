@@ -21,6 +21,7 @@ ssh-agent に鍵がいくつもあるときは、クライアントが最初に�
 
 GitHub のログイン名をユーザー名にしても入れる（`ssh alice@chloe.example.com`）。
 GitHub に登録した公開鍵か、結び付けた鍵で入れるが、一度は Device Flow を済ませる必要がある。
+鍵を結び付けるのは `chloe` で入ったときだけである。GitHub に登録していない鍵で `alice` として入ると、毎回 Device Flow になる。
 GitHub のトークンが失効したり、`chloe github logout` で消したりすると、次の接続でまた Device Flow になる。
 GitHub に存在しない名前は、`chloe` と同じに扱う。
 
