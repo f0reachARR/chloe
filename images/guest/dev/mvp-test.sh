@@ -46,6 +46,8 @@ database = "$mvp/chloe.db"
 master_key = "$mvp/master.key"
 idle_timeout_secs = 5
 allowed_users = ["alice", "bob"]
+# GitHub App がなくても、設定の admins はサーバーの運用者として設定とシークレットを変えられる。
+admins = ["alice"]
 
 [memberships]
 "org:acme" = ["alice"]
@@ -142,6 +144,14 @@ check ws-create-not-member "not a member" as bob chloe ws create acme/proj2
 check ws-org-member "user" as alice+acme/proj 'id -un'
 check ws-org-not-member "Permission denied" as bob+acme/proj true
 check ws-org-list "acme/proj	persistent" as alice chloe ws list
+check admin-policy "saved the settings of acme" sh -c 'printf "allow = [\"example.org\"]\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
+check not-admin-policy "only the administrators" sh -c 'printf "allow = []\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe policy set acme
+check no-passthrough-in-policy "invalid settings" sh -c 'printf "passthrough = [\"x.example\"]\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
+check not-admin-org-secret "cannot change the secrets of acme" sh -c 'echo x | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe secret set --owner acme openai_api_key
 
 section "authentication"
 check wrong-key "Permission denied" ssh "${ssh_opts[@]}" -i "$work/stranger" alice@127.0.0.1 true

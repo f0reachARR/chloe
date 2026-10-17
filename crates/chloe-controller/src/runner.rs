@@ -61,20 +61,15 @@ pub struct BasePolicy {
 impl BasePolicy {
     /// 全体の設定に、Organization と team の設定を (上の層から順に) 重ねる。
     ///
-    /// 許可リストと中継のみの宛先は足し合わせる。パスの規則は上の層のものを先に並べるので、
-    /// 最初に一致した規則で決まる評価では、上の層 (サーバーの運用者、Organization) の規則を
-    /// 下の層が覆せない。
+    /// 許可リストは足し合わせる。パスの規則は上の層のものを先に並べるので、最初に一致した
+    /// 規則で決まる評価では、上の層 (サーバーの運用者、Organization) の規則を下の層が覆せない。
+    /// 中継のみの宛先は復号せず規則が効かないので、全体の設定でしか決められない。
     pub fn with_layers(&self, layers: &[PolicyLayer]) -> BasePolicy {
         let mut merged = self.clone();
         for layer in layers {
             for host in &layer.allow {
                 if !merged.allow.contains(host) {
                     merged.allow.push(host.clone());
-                }
-            }
-            for host in &layer.passthrough {
-                if !merged.passthrough.contains(host) {
-                    merged.passthrough.push(host.clone());
                 }
             }
             merged.rules.extend(layer.rules.iter().cloned());
@@ -84,13 +79,14 @@ impl BasePolicy {
 }
 
 /// Organization か team の設定 (データベースの `policies`)。
+///
+/// 中継のみの宛先 (`passthrough`) は置けない。復号しないのでパスの規則が効かず、置けると
+/// 上の層の規則を素通りする宛先を作れてしまうためである。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyLayer {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub passthrough: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<chloe_policy::PathRuleConfig>,
     /// 新しく作るワークスペースのルートの扱いの既定。下の層が優先する。
@@ -196,15 +192,17 @@ mod tests {
             ..Default::default()
         };
         let team = PolicyLayer {
-            passthrough: vec!["registry.example".into()],
+            allow: vec!["c.example".into()],
             rules: vec![rule("team", chloe_policy::Action::Allow)],
             root: Some(RootMode::Ephemeral),
             ..Default::default()
         };
         let layers = [org, team];
         let merged = base.with_layers(&layers);
-        assert_eq!(merged.allow, ["a.example", "b.example"]);
-        assert_eq!(merged.passthrough, ["registry.example"]);
+        assert_eq!(merged.allow, ["a.example", "b.example", "c.example"]);
+        assert!(merged.passthrough.is_empty());
+        // 中継のみの宛先は層には書けない。
+        assert!(serde_json::from_str::<PolicyLayer>(r#"{"passthrough": ["x.example"]}"#).is_err());
         let names: Vec<_> = merged
             .rules
             .iter()
