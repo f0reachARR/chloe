@@ -116,11 +116,12 @@ api /v1/secrets/hf_token -X DELETE
 設定の項目は [設定](configuration.md#organization-と-team-の設定) と同じで、JSON で書く。
 
 ```sh
-api /v1/policies/acme -X PUT -d '{"allow": ["registry.example.com"], "root": "persistent"}'
+api /v1/policies/acme -X PUT \
+  -d '{"rules": [{"hosts": ["registry.example.com"], "action": "allow"}], "root": "persistent"}'
 # {"updated_runners":2}   (設定を送った、動いているランナーの数)
 
 api /v1/policies/acme
-# {"allow":["registry.example.com"],"root":"persistent"}
+# {"rules":[{"hosts":["registry.example.com"],"action":"allow"}],"root":"persistent"}
 
 api /v1/policies/acme/dev -X PUT \
   -d '{"github": {"repositories": ["web"], "permissions": {"contents": "read"}}}'

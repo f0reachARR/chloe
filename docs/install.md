@@ -115,7 +115,7 @@ sudo install -m 644 deploy/gateway.toml /etc/chloe/gateway.toml
 
 - `listen`：SSH の待ち受け。例は `0.0.0.0:22` で、ホストの sshd と重なる。sshd を別のポートに移すか、ゲートウェイを別のポートで待ち受ける。
 - `allowed_users` と `admins`：ログインを許す GitHub のログイン名と、サーバーの運用者。
-- `[policy]`：すべてのワークスペースに共通の許可リスト。
+- `[[policy.rules]]`：すべてのワークスペースに共通の、外への通信の規則。どの規則にも一致しない通信は遮断する。
 
 状態の置き場所（`host_key`、`database`、`master_key`、`audit_log`、`[runner]` の `state_root`）は、unit の `StateDirectory=` と `LogsDirectory=` が作る `/var/lib/chloe` と `/var/log/chloe` の下にしてある。
 別の場所に変えるときは、`chloe` の利用者が書けるディレクトリにする。

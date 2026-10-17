@@ -73,34 +73,54 @@ GitHub App の設定の `api_url` と `web_url` も、同じホストに合わ�
 ### `[policy]`
 
 すべてのワークスペースに共通の、VM から外への通信の決まりである。
+宛先、メソッド、パスの規則（`[[policy.rules]]`）だけで書く。
 
-| 項目 | 内容 |
-| --- | --- |
-| `allow` | つないでよい宛先。プロキシで復号し、規則と差し替えを適用する |
-| `passthrough` | 復号せずに中継だけする宛先（証明書を固定するクライアント向け）。規則も差し替えも効かない |
-| `rules` | 宛先、メソッド、パスの規則（下を参照） |
+| 項目 | 既定 | 内容 |
+| --- | --- | --- |
+| `name` | なし | ログに残す名前 |
+| `hosts` | （必須） | 宛先 |
+| `methods` | すべてのメソッド | メソッド |
+| `paths` | すべてのパス | パス |
+| `action` | （必須） | `allow`（許す）、`deny`（拒否する）、`passthrough`（復号せずに中継だけする） |
 
-宛先は名前で書く。
-`*.example.com` は example.com のサブドメインに一致し、example.com そのものには一致しない。
-VM の DNS は、`allow` と `passthrough` にある名前だけを引ける（`*.example.com` は、DNS では example.com そのものも引ける）。
-
-シークレットの差し替えと署名の宛先（`api.anthropic.com` や、登録した定義の `hosts`）は、そのシークレットを使うワークスペースでだけ、自動で許可リストに足す。
-
-規則は上から順に評価し、最初に一致した規則で、許すか拒否するかを決める。
-どの規則にも一致しなければ、許可リストだけで決める。
+規則は上から順に評価し、最初に一致した規則で決める。
+どの規則にも一致しなければ遮断する。
+そのため、パスを絞った `allow` の規則は、その宛先のほかのパスを許さない。
 
 ```toml
 [[policy.rules]]
-name = "github-org-only"          # ログに残す名前 (省略可)
+name = "github-no-delete"
 hosts = ["api.github.com"]
-methods = ["GET", "POST"]         # 省略するとすべてのメソッド
-paths = ["/repos/acme/**", "/user"]
-action = "allow"                  # allow か deny
+methods = ["DELETE"]
+paths = ["/repos/**"]
+action = "deny"
 
 [[policy.rules]]
-hosts = ["api.github.com"]
-action = "deny"
+name = "default"
+hosts = ["github.com", "api.github.com", "pypi.org"]
+action = "allow"
+
+[[policy.rules]]
+hosts = ["registry-1.docker.io", "*.docker.com"]
+action = "passthrough"
 ```
+
+宛先は名前で書く。
+`*.example.com` は example.com のサブドメインに一致し、example.com そのものには一致しない。
+VM の DNS は、`allow` と `passthrough` の規則にある名前だけを引ける（`*.example.com` は、DNS では example.com そのものも引ける）。
+`deny` の規則だけに書いた名前は引けない。
+
+`passthrough` は、証明書を固定するクライアント向けである。
+復号しないので、規則も差し替えも効かない。
+`methods` と `paths` は書けない。
+また、ほかの規則と宛先が重なってはいけない（`*.docker.com` と `hub.docker.com` のように、どちらにも一致する名前があれば重なる）。
+接続の時点で中継に決まるので、重なると、もう一方の規則が順番にかかわらず効かなくなるためである。
+重なりがあると、ゲートウェイは起動しない。
+
+シークレットの差し替えと署名の宛先（`api.anthropic.com` や、登録した定義の `hosts`）は、そのシークレットを使うワークスペースでだけ、`allow` の規則として一番後ろに足す。
+ただし、すでにどれかの規則に書いた宛先には足さない。
+足すと、パスを絞って許した宛先のほかのパスまで許してしまうためである。
+規則に書いた宛先は、書いた規則だけで許すかどうかが決まる。
 
 パスはグロブで書く。
 `*` は `/` を含まない文字列に、一つの階層まるごとの `**` は 0 個以上の階層に一致する。
@@ -170,14 +190,16 @@ VM の大きさは固定である（4 vCPU、メモリ 4GiB、ワークスペー
 
 | 項目 | 内容 |
 | --- | --- |
-| `allow` | 足す宛先 |
-| `rules` | 足す規則（書き方はゲートウェイの `[[policy.rules]]` と同じ） |
+| `rules` | 足す規則（書き方はゲートウェイの `[[policy.rules]]` と同じ。`passthrough` は書けない） |
 | `root` | 新しく作るワークスペースのルートの扱いの既定（`ephemeral` か `persistent`） |
 | `[github]` | 共有ワークスペースに渡す GitHub のインストールトークンの範囲 |
 
 ```toml
-allow = ["registry.example.com"]
 root = "persistent"
+
+[[rules]]
+hosts = ["registry.example.com"]
+action = "allow"
 
 [[rules]]
 hosts = ["api.github.com"]
@@ -191,11 +213,12 @@ permissions = { contents = "write", pull_requests = "write" }   # 省くとイ�
 
 ワークスペースの方針は、ゲートウェイの `[policy]`、Organization の設定、team の設定の順に重ねて作る。
 
-- **宛先**：足し合わせる。
 - **規則**：上の層のものを先に並べる。最初に一致した規則で決まるので、下の層は上の層の規則を覆せない（サーバーの運用者の規則を、Organization の設定で覆すことはできない）。
 - **`root` と `[github]`**：もっとも下の層で書いた値を使う。
 
-`passthrough` は、Organization と team の設定には書けない。
+`passthrough` の規則は、Organization と team の設定には書けない。
 復号しない宛先には規則が効かないので、書けると、上の層の規則を素通りする宛先を作れてしまうためである。
+ゲートウェイの `passthrough` の規則と宛先が重なる規則も、書けない（理由は [`[policy]`](#policy) と同じ）。
+ゲートウェイの設定をあとから変えて、保存してある設定と重なったときは、そのワークスペースのランナーを起動しない。
 
 個人のワークスペースには、ゲートウェイの `[policy]` だけを使う（どの Organization の設定を重ねるかが決まらないので）。
