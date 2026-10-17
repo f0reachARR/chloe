@@ -4,8 +4,9 @@
 //! 署名の範囲と署名したヘッダーの名前を読み取り、本物のアクセスキーで同じ要求に署名し直す。
 //! VM の署名は確かめない (プレースホルダーで作った署名に意味はない)。
 //!
-//! 扱わないもの：署名付き URL (クエリの `X-Amz-Credential`)、S3 のチャンクごとの署名
-//! (`x-amz-content-sha256: STREAMING-...`)。
+//! 扱わないもの：署名付き URL (クエリの `X-Amz-Credential`)、チャンクごとの署名
+//! (`x-amz-content-sha256: STREAMING-AWS4-...`)。チャンクに署名しない
+//! `STREAMING-UNSIGNED-PAYLOAD-TRAILER` は、ヘッダーの署名だけを作り直せばよいので扱う。
 
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
@@ -238,6 +239,11 @@ fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
+}
+
+/// チャンクごとに前の署名をつないで署名する方式か (本文を書き換えないと作り直せない)。
+pub(crate) fn signs_chunks(payload_hash: &str) -> bool {
+    payload_hash.starts_with("STREAMING-AWS4-")
 }
 
 pub(crate) fn sha256_hex(data: &[u8]) -> String {

@@ -55,6 +55,16 @@ CASES = [
         "token": True,
     },
     {
+        # 新しい S3 の SDK がアップロードで使う、チャンクに署名しない方式。
+        "name": "s3-unsigned-trailer",
+        "service": "s3",
+        "method": "PUT",
+        "url": "https://bucket.s3.us-east-1.amazonaws.com/big.bin",
+        "headers": [["Content-Encoding", "aws-chunked"], ["X-Amz-Trailer", "x-amz-checksum-crc32"]],
+        "body": "5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n\r\n",
+        "context": {"checksum": {"request_algorithm": {"in": "trailer", "algorithm": "crc32"}}},
+    },
+    {
         "name": "http2-no-host-header",
         "service": "sts",
         "method": "POST",
@@ -73,6 +83,7 @@ def sign(case, credentials):
         method=case["method"], url=case["url"], headers=dict(case["headers"]), data=case["body"]
     )
     request.headers["Host"] = case["url"].split("/")[2]
+    request.context.update(case.get("context", {}))
     auth_class = S3SigV4Auth if case["service"] == "s3" else SigV4Auth
     auth_class(credentials, case["service"], "us-east-1").add_auth(request)
     return request

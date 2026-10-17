@@ -533,7 +533,7 @@ impl Policy {
             return Err(unsignable());
         }
         let payload_hash = match sigv4::header_values(request.headers, "x-amz-content-sha256") {
-            Some(hash) if hash.starts_with("STREAMING-") => return Err(unsignable()),
+            Some(hash) if sigv4::signs_chunks(&hash) => return Err(unsignable()),
             Some(hash) => hash,
             None => match request.body {
                 Some(body) => sigv4::sha256_hex(body),

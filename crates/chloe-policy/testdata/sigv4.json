@@ -127,6 +127,41 @@
       "expected_security_token": "real-session-token"
     },
     {
+      "name": "s3-unsigned-trailer",
+      "method": "PUT",
+      "authority": "bucket.s3.us-east-1.amazonaws.com",
+      "path_and_query": "/big.bin",
+      "headers": [
+        [
+          "content-encoding",
+          "aws-chunked"
+        ],
+        [
+          "x-amz-trailer",
+          "x-amz-checksum-crc32"
+        ],
+        [
+          "host",
+          "bucket.s3.us-east-1.amazonaws.com"
+        ],
+        [
+          "x-amz-date",
+          "20150830T123600Z"
+        ],
+        [
+          "x-amz-content-sha256",
+          "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+        ],
+        [
+          "authorization",
+          "AWS4-HMAC-SHA256 Credential=AKIAchloePLACEHOLDER/20150830/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-trailer, Signature=2db5610d31e2e449e36f341819f0f035ecc9d0d6a00ec52186d82e56b5581734"
+        ]
+      ],
+      "body": "5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n\r\n",
+      "expected_authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-trailer, Signature=f6211ec7be3e47a98f9c93c109ffef595c8809a1c6ed3aa8b76eaea23c3ccb21",
+      "expected_security_token": null
+    },
+    {
       "name": "http2-no-host-header",
       "method": "POST",
       "authority": "sts.amazonaws.com:8443",
