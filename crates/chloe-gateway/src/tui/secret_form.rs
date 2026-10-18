@@ -1,4 +1,4 @@
-//! シークレットのフォーム。定義 (環境変数、プレースホルダー、差し替えと署名の規則) と値を
+//! シークレットのフォーム。定義 (環境変数、プレースホルダー、差し替えと署名の規則、VM に置くファイル) と値を
 //! 欄で入力し、`chloe secret set --spec` に渡す TOML と同じ形 ([`SecretInput`]) にする。
 
 use chloe_controller::catalog::{SecretInput, SecretSpec};
@@ -21,6 +21,7 @@ pub const TEMPLATES: &[(&str, &str)] = &[
         include_str!("../../../../deploy/secrets/openai_api_key.toml"),
     ),
     ("aws", include_str!("../../../../deploy/secrets/aws.toml")),
+    ("apt", include_str!("../../../../deploy/secrets/apt.toml")),
 ];
 
 const SINGLE: &str = "single value";
@@ -98,6 +99,9 @@ fn form(owner: &str, name: Option<&str>) -> Form {
         ),
         Field::rows("sign", "Sign rules", SIGN_ROW, vec![])
             .help("Requests the proxy signs again with the real keys (aws-sigv4)."),
+        Field::rows("files", "Files", FILE_ROW, vec![]).help(
+            "Files put in the VM with placeholders, for tools that read config files instead of env vars.",
+        ),
     ]);
     let title = match name {
         Some(name) => format!("Secret {name}"),
@@ -160,6 +164,50 @@ fn sign_row(scheme: &str, hosts: &[String]) -> Form {
             Field::text("hosts", "Hosts", &hosts.join(", ")),
         ],
     )
+}
+
+const FILE_ROW: RowKind = RowKind {
+    make: || file_row("", "", "root", ""),
+    summary: |row| row.text("path"),
+};
+
+fn file_row(path: &str, content: &str, owner: &str, mode: &str) -> Form {
+    Form::new(
+        "File",
+        vec![
+            Field::text("path", "Path", path).help("Absolute path in the VM."),
+            Field::text("content", "Content", &escape_lines(content)).help(
+                "{value} (or {field name}) becomes the placeholder. Write a line break as \\n.",
+            ),
+            Field::choice("owner", "Owner", &["root", "user"], owner),
+            Field::text("mode", "Mode", mode).help("Octal, e.g. 0600. Empty means 0644."),
+        ],
+    )
+}
+
+/// 一行の欄で編集できるよう、改行を `\n` に、`\` を `\\` にする。
+fn escape_lines(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+/// [`escape_lines`] を戻す。
+fn unescape_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (c, chars.clone().next()) {
+            ('\\', Some('n')) => {
+                out.push('\n');
+                chars.next();
+            }
+            ('\\', Some('\\')) => {
+                out.push('\\');
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// 定義か雛形の JSON で欄を埋める。値は埋めない。
@@ -230,6 +278,24 @@ fn fill(form: &mut Form, json: &Value) {
         .map(|r| sign_row(&text(r, "scheme"), &strings(&r["hosts"])))
         .collect();
     set_rows(form, "sign", sign);
+    let files = json["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            let owner = match text(r, "owner").as_str() {
+                "" => "root".to_string(),
+                o => o.to_string(),
+            };
+            file_row(
+                &text(r, "path"),
+                &text(r, "content"),
+                &owner,
+                &text(r, "mode"),
+            )
+        })
+        .collect();
+    set_rows(form, "files", files);
 }
 
 fn set_rows(form: &mut Form, key: &str, rows: Vec<Form>) {
@@ -306,6 +372,24 @@ pub fn to_input(form: &Form) -> Result<SecretInput, String> {
         .map(|row| json!({"scheme": row.choice("scheme"), "hosts": row.list("hosts")}))
         .collect();
     json.insert("sign".into(), Value::Array(sign));
+    let files: Vec<Value> = form
+        .rows("files")
+        .iter()
+        .map(|row| {
+            let mut file = Map::new();
+            file.insert("path".into(), json!(row.text("path")));
+            file.insert(
+                "content".into(),
+                json!(unescape_lines(&row.text("content"))),
+            );
+            file.insert("owner".into(), json!(row.choice("owner")));
+            if let Some(mode) = optional(row.text("mode")) {
+                file.insert("mode".into(), json!(mode));
+            }
+            Value::Object(file)
+        })
+        .collect();
+    json.insert("files".into(), Value::Array(files));
     serde_json::from_value(Value::Object(json)).map_err(|e| format!("invalid definition: {e}"))
 }
 
@@ -376,6 +460,25 @@ mod tests {
         assert_eq!(edit.choice("kind"), SINGLE);
         assert_eq!(edit.text("env"), "OPENAI_API_KEY, CODEX_API_KEY");
         assert!(to_input(&edit).unwrap().value.is_none());
+
+        // VM に置くファイルも残る。改行と \ は一行の欄で書けるようにして戻す。
+        let mut apt = new_form("alice", Some("apt"));
+        apt.set_text("value", "v");
+        let mut files = apt.rows("files").to_vec();
+        assert_eq!(
+            files[0].text("content"),
+            "machine apt.example.com login deploy password {value}\\n"
+        );
+        files.push(file_row("/home/user/x", "a\\b\nc", "user", "0600"));
+        set_rows(&mut apt, "files", files);
+        let spec = to_input(&apt).unwrap().into_parts().unwrap().0.unwrap();
+        assert_eq!(spec.files[1].content, "a\\b\nc");
+        let mut edit = edit_form("alice", "apt", &spec);
+        edit.set_text("value", "v");
+        assert_eq!(
+            to_input(&edit).unwrap().into_parts().unwrap().0.unwrap(),
+            spec
+        );
     }
 
     #[test]

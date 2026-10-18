@@ -4,6 +4,8 @@
 //! 欄が一つのシークレットは、その欄の名前を `value` にする。
 //! 差し替えの規則 (inject) は欄の一つを宛先の決まったヘッダーで本物に差し替え、署名の規則 (sign) は
 //! 欄のいくつかを鍵にして署名を作り直す。
+//! 環境変数を読まないツール (apt の auth.conf など) には、プレースホルダーを入れたファイル (files) を
+//! VM に置く。
 //!
 //! 組み込みの種類 ([`preset`]、GitHub のトークン) は定義を登録しなくても使える。ほかの名前は、
 //! 登録するときに定義を渡す (よく使うものの例は `deploy/secrets/` にある)。
@@ -28,6 +30,8 @@ pub struct SecretSpec {
     pub inject: Vec<InjectSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sign: Vec<SignSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +61,112 @@ pub struct InjectSpec {
 pub struct SignSpec {
     pub scheme: SignKind,
     pub hosts: Vec<String>,
+}
+
+/// VM に置くファイル。`content` の中の `{欄の名前}` を、その欄のプレースホルダーに置き換える。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSpec {
+    /// VM の中の絶対パス。
+    pub path: String,
+    pub content: String,
+    /// 持ち主。省くと root。
+    #[serde(default, skip_serializing_if = "FileOwner::is_root")]
+    pub owner: FileOwner,
+    /// パーミッションを 8 進数で書く (`"0600"` など)。省くと `0644`
+    /// (プレースホルダーは漏れても害がないので、誰が読めてもよい)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileOwner {
+    #[default]
+    Root,
+    /// VM の利用者 (`user`)。ホームディレクトリのファイルに使う。
+    User,
+}
+
+impl FileOwner {
+    fn is_root(&self) -> bool {
+        *self == Self::Root
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::User => "user",
+        }
+    }
+}
+
+/// ファイルを置かない場所。ランナーが使う場所と、カーネルが見せる場所。
+const RESERVED_DIRS: &[&str] = &["/run/chloe", "/proc", "/sys", "/dev"];
+/// ファイルの中身の上限。
+const MAX_FILE_LEN: usize = 64 * 1024;
+const DEFAULT_MODE: u32 = 0o644;
+
+impl FileSpec {
+    /// パーミッション。
+    pub fn mode(&self) -> Result<u32, String> {
+        match &self.mode {
+            None => Ok(DEFAULT_MODE),
+            Some(text) => u32::from_str_radix(text, 8)
+                .ok()
+                .filter(|mode| *mode <= 0o777)
+                .ok_or_else(|| format!("invalid mode {text:?} (write it in octal, like \"0600\")")),
+        }
+    }
+
+    /// 中身の `{欄の名前}` を `placeholder` が返す値に置き換える。欄の名前の形をしていない
+    /// `{...}` はそのまま残す。
+    pub fn render<'a>(&self, mut placeholder: impl FnMut(&str) -> Option<&'a str>) -> String {
+        let mut out = String::with_capacity(self.content.len());
+        let mut rest = self.content.as_str();
+        while let Some(start) = rest.find('{') {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 1..];
+            match after
+                .find('}')
+                .map(|end| (&after[..end], end))
+                .filter(|(name, _)| check_name(name).is_ok())
+                .and_then(|(name, end)| Some((placeholder(name)?, end)))
+            {
+                Some((value, end)) => {
+                    out.push_str(value);
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push('{');
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn validate(&self, fields: &BTreeMap<String, FieldSpec>) -> Result<(), String> {
+        check_file_path(&self.path)?;
+        if self.content.len() > MAX_FILE_LEN {
+            return Err(format!("file {}: the content is too long", self.path));
+        }
+        self.mode()
+            .map_err(|e| format!("file {}: {e}", self.path))?;
+        // 欄の名前の形をした参照は、定義した欄でなければならない (書き間違いを見つける)。
+        let mut unknown = None;
+        self.render(|name| {
+            if !fields.contains_key(name) {
+                unknown.get_or_insert_with(|| name.to_string());
+            }
+            Some("")
+        });
+        if let Some(name) = unknown {
+            return Err(format!("file {}: no such field: {{{name}}}", self.path));
+        }
+        Ok(())
+    }
 }
 
 /// 署名の方式。方式ごとに使う欄の名前が決まっている ([`SignKind::fields`])。
@@ -143,6 +253,13 @@ impl SecretSpec {
         if self.inject.is_empty() && self.sign.is_empty() {
             return Err("define at least one inject or sign rule".into());
         }
+        let mut paths = BTreeSet::new();
+        for file in &self.files {
+            file.validate(&self.fields)?;
+            if !paths.insert(&file.path) {
+                return Err(format!("file {} is given twice", file.path));
+            }
+        }
         for rule in &self.inject {
             if !self.fields.contains_key(&rule.field) {
                 return Err(format!("inject: no such field: {}", rule.field));
@@ -191,6 +308,8 @@ pub struct SecretInput {
     pub inject: Vec<InjectSpec>,
     #[serde(default)]
     pub sign: Vec<SignSpec>,
+    #[serde(default)]
+    pub files: Vec<FileSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,6 +339,7 @@ impl SecretInput {
             fields: BTreeMap::new(),
             inject: self.inject,
             sign: self.sign,
+            files: self.files,
         };
         let mut values = BTreeMap::new();
         if self.fields.is_empty() {
@@ -264,6 +384,8 @@ pub struct DefinitionInput {
     pub inject: Vec<InjectSpec>,
     #[serde(default)]
     pub sign: Vec<SignSpec>,
+    #[serde(default)]
+    pub files: Vec<FileSpec>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -279,6 +401,7 @@ impl DefinitionInput {
     fn defines(&self) -> bool {
         !self.inject.is_empty()
             || !self.sign.is_empty()
+            || !self.files.is_empty()
             || !self.env.is_empty()
             || self.placeholder.is_some()
             || self
@@ -321,6 +444,7 @@ impl DefinitionInput {
                 .collect(),
             inject: self.inject,
             sign: self.sign,
+            files: self.files,
         };
         spec.validate()?;
         Ok(spec)
@@ -396,6 +520,29 @@ fn check_hosts(hosts: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// 絶対パスで、`.` と `..` と空の階層を含まず、ファイルを置かない場所の外にあるか。
+fn check_file_path(path: &str) -> Result<(), String> {
+    let valid = path.len() <= 4096
+        && path.starts_with('/')
+        && !path.ends_with('/')
+        && path[1..]
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && !path.chars().any(char::is_control);
+    if !valid {
+        return Err(format!(
+            "invalid file path {path:?} (write an absolute path without . or ..)"
+        ));
+    }
+    if RESERVED_DIRS
+        .iter()
+        .any(|dir| path == *dir || path.starts_with(&format!("{dir}/")))
+    {
+        return Err(format!("file path {path} is reserved"));
+    }
+    Ok(())
+}
+
 fn check_header(header: &str) -> Result<(), String> {
     let valid = !header.is_empty()
         && header
@@ -439,6 +586,7 @@ pub fn preset(name: &str) -> Option<SecretSpec> {
             ),
         ],
         sign: vec![],
+        files: vec![],
     })
 }
 
@@ -465,6 +613,7 @@ pub(crate) fn example(name: &str, value: &str) -> SecretInput {
         "claude_oauth_token" => include_str!("../../../deploy/secrets/claude_oauth_token.toml"),
         "openai_api_key" => include_str!("../../../deploy/secrets/openai_api_key.toml"),
         "aws" => include_str!("../../../deploy/secrets/aws.toml"),
+        "apt" => include_str!("../../../deploy/secrets/apt.toml"),
         _ => panic!("no example for {name}"),
     };
     let mut input: SecretInput = toml::from_str(text).unwrap();
@@ -533,6 +682,7 @@ mod tests {
             "claude_oauth_token",
             "openai_api_key",
             "aws",
+            "apt",
         ] {
             check_name(name).unwrap();
             let (spec, values) = example(name, "v").into_parts().unwrap();
@@ -635,6 +785,48 @@ mod tests {
     }
 
     #[test]
+    fn renders_files() {
+        let (spec, _) = aws_with_credentials_file().into_parts().unwrap();
+        let spec = spec.unwrap();
+        spec.validate().unwrap();
+        let file = &spec.files[0];
+        assert_eq!(file.owner, FileOwner::User);
+        assert_eq!(file.mode(), Ok(0o600));
+        let placeholders = BTreeMap::from([
+            ("access_key_id", "AKIAchloeK"),
+            ("secret_access_key", "chloeS"),
+        ]);
+        assert_eq!(
+            file.render(|name| placeholders.get(name).copied()),
+            "{\"x\": 1} {}\n[default]\naws_access_key_id = AKIAchloeK\naws_secret_access_key = chloeS\n{ok-} {"
+        );
+        // 定義を JSON で置いて読み戻しても、省いた項目は省いたまま。
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(serde_json::from_str::<SecretSpec>(&json).unwrap(), spec);
+        let (spec, _) = example("apt", "v").into_parts().unwrap();
+        let apt = &spec.unwrap().files[0];
+        assert_eq!(apt.mode(), Ok(0o644));
+        assert_eq!(apt.owner, FileOwner::Root);
+        assert!(!serde_json::to_string(apt).unwrap().contains("owner"));
+    }
+
+    fn aws_with_credentials_file() -> SecretInput {
+        let mut input = aws();
+        input.files = toml::from_str::<DefinitionInput>(
+            r#"
+            [[files]]
+            path = "/home/user/.aws/credentials"
+            owner = "user"
+            mode = "0600"
+            content = "{\"x\": 1} {}\n[default]\naws_access_key_id = {access_key_id}\naws_secret_access_key = {secret_access_key}\n{ok-} {"
+            "#,
+        )
+        .unwrap()
+        .files;
+        input
+    }
+
+    #[test]
     fn rejects_invalid_specs() {
         let base = || {
             let input: SecretInput = toml::from_str(
@@ -645,6 +837,9 @@ mod tests {
                 [[inject]]
                 hosts = ["huggingface.co"]
                 header = "authorization"
+                [[files]]
+                path = "/home/user/.netrc"
+                content = "machine huggingface.co password {value}"
                 "#,
             )
             .unwrap();
@@ -690,6 +885,39 @@ mod tests {
                 "unknown field",
                 Box::new(|s| s.inject[0].field = "other".into()),
             ),
+            (
+                "relative path",
+                Box::new(|s| s.files[0].path = "etc/x".into()),
+            ),
+            (
+                "dot dot",
+                Box::new(|s| s.files[0].path = "/etc/../root/x".into()),
+            ),
+            (
+                "directory",
+                Box::new(|s| s.files[0].path = "/etc/x/".into()),
+            ),
+            (
+                "reserved path",
+                Box::new(|s| s.files[0].path = "/run/chloe/env".into()),
+            ),
+            (
+                "bad mode",
+                Box::new(|s| s.files[0].mode = Some("4755".into())),
+            ),
+            (
+                "mode not octal",
+                Box::new(|s| s.files[0].mode = Some("0698".into())),
+            ),
+            (
+                "unknown reference",
+                Box::new(|s| s.files[0].content = "{token}".into()),
+            ),
+            (
+                "too long",
+                Box::new(|s| s.files[0].content = "x".repeat(MAX_FILE_LEN + 1)),
+            ),
+            ("same path", Box::new(|s| s.files.push(s.files[0].clone()))),
         ];
         base().validate().unwrap();
         for (name, change) in cases {
