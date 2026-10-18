@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use chloe_audit::Event;
 use chloe_policy::{PolicyConfig, TlsDecision};
 use clap::Parser;
 use rama::error::BoxError;
@@ -50,7 +51,7 @@ use rama::tls::client::TlsClientConfig;
 use rama::tls::server::{SniPrefixedIo, SniRequest, SniRouter, TlsServerConfig};
 use rama::{Layer, Service};
 
-use crate::log::{Event, Logger};
+use crate::log::Logger;
 use crate::service::{EgressService, IngressSni};
 
 #[derive(Parser)]
@@ -214,7 +215,9 @@ where
             sni.clone(),
             self.policy.current().tls_decision(sni_str.as_deref()),
         ) {
-            self.logger.log(Event::Passthrough { host: sni.as_ref() });
+            self.logger.log(Event::Passthrough {
+                host: sni.to_string(),
+            });
             return IoToProxyBridgeIoLayer::new(HostWithPort {
                 host: sni.clone().into(),
                 port: Protocol::HTTPS_DEFAULT_PORT,

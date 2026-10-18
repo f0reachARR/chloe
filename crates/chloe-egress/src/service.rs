@@ -2,7 +2,9 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Instant;
 
+use chloe_audit::Request as LogRequest;
 use chloe_policy::{Decision, Request as PolicyRequest};
 use rama::Service;
 use rama::error::{BoxError, ErrorContext as _};
@@ -14,7 +16,7 @@ use rama::http::{Body, HeaderName, HeaderValue, Request, Response, StatusCode, V
 use rama::net::address::Domain;
 use rama::net::http::TargetHttpVersion;
 
-use crate::log::{Event, Logger, query_keys};
+use crate::log::{LoggedBody, Logger, query_keys};
 
 /// これより大きい本文はプレースホルダーを探さずに送る。
 pub const BODY_SCAN_LIMIT: u64 = 1 << 20;
@@ -54,6 +56,7 @@ where
     C: Service<Request, Output = Response, Error: Into<BoxError>>,
 {
     async fn handle(&self, req: Request) -> Result<Response, BoxError> {
+        let started = Instant::now();
         let sni = req
             .extensions()
             .get_ref::<IngressSni>()
@@ -110,36 +113,35 @@ where
             body: scanned_body.as_deref(),
         });
 
-        let log = |status: Option<u16>,
-                   decision: &str,
-                   injected: &[String],
-                   rule: Option<&str>,
-                   error: Option<String>| {
-            self.logger.log(Event::Request {
-                host: chloe_policy::normalize_host(&host).as_str(),
-                sni: sni.as_deref(),
-                method: &method,
-                path: &path,
-                query_keys: query_keys(query.as_deref()),
-                http_version: &http_version,
-                status,
-                request_bytes: content_length,
-                body_scanned: scanned,
-                error,
-                decision,
-                injected,
-                rule,
-            });
+        // 記録の共通の欄。判定の結果と応答は、記録するときに埋める。
+        let record = |status: Option<u16>, decision: &str, injected: &[String]| LogRequest {
+            host: chloe_policy::normalize_host(&host),
+            sni: sni.clone(),
+            method: method.clone(),
+            path: path.clone(),
+            query_keys: query_keys(query.as_deref()),
+            http_version: http_version.clone(),
+            status,
+            request_bytes: content_length,
+            body_scanned: scanned,
+            decision: decision.to_string(),
+            injected: injected.to_vec(),
+            ..Default::default()
         };
 
         let injected = match decision {
             Decision::Ca => {
-                log(Some(200), "ca", &[], None, None);
+                self.logger
+                    .log_request(record(Some(200), "ca", &[]), started);
                 return Ok(ca_response(&self.ca_pem));
             }
             Decision::Blocked { reason, rule } => {
                 let decision = format!("blocked:{}", reason.as_str());
-                log(Some(403), &decision, &[], rule.as_deref(), None);
+                let record = LogRequest {
+                    rule,
+                    ..record(Some(403), &decision, &[])
+                };
+                self.logger.log_request(record, started);
                 return Ok(blocked_response(reason.as_str()));
             }
             Decision::Allowed { injected } => injected,
@@ -156,13 +158,11 @@ where
             };
             if let Err(error) = applied {
                 tracing::warn!("failed to get a secret: {error:#}");
-                log(
-                    Some(503),
-                    "blocked:secret-unavailable",
-                    &injected,
-                    None,
-                    Some(format!("{error:#}")),
-                );
+                let record = LogRequest {
+                    error: Some(format!("{error:#}")),
+                    ..record(Some(503), "blocked:secret-unavailable", &injected)
+                };
+                self.logger.log_request(record, started);
                 return Ok(error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "the secret for this request is not available",
@@ -191,18 +191,19 @@ where
 
         match self.client.serve(req).await {
             Ok(resp) => {
-                log(
-                    Some(resp.status().as_u16()),
-                    "allowed",
-                    &injected,
-                    None,
-                    None,
-                );
-                Ok(resp)
+                // 本文を流し終えてから、大きさとかかった時間を入れて記録する。
+                let record = record(Some(resp.status().as_u16()), "allowed", &injected);
+                let (parts, body) = resp.into_parts();
+                let body = LoggedBody::wrap(body, self.logger.clone(), record, started);
+                Ok(Response::from_parts(parts, body))
             }
             Err(error) => {
                 let error: BoxError = error.into();
-                log(None, "allowed", &injected, None, Some(error.to_string()));
+                let record = LogRequest {
+                    error: Some(error.to_string()),
+                    ..record(None, "allowed", &injected)
+                };
+                self.logger.log_request(record, started);
                 Ok(error_response(
                     StatusCode::BAD_GATEWAY,
                     "upstream request failed",
