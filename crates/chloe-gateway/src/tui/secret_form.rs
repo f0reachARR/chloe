@@ -130,11 +130,11 @@ fn field_row(name: &str, env: &[String], placeholder: &str, value: &str) -> Form
 }
 
 const INJECT_ROW: RowKind = RowKind {
-    make: || inject_row("", &[], "", "replace"),
+    make: || inject_row("", &[], "", "replace", ""),
     summary: |row| format!("{} → {}", row.text("hosts"), row.text("header")),
 };
 
-fn inject_row(field: &str, hosts: &[String], header: &str, format: &str) -> Form {
+fn inject_row(field: &str, hosts: &[String], header: &str, format: &str, username: &str) -> Form {
     Form::new(
         "Inject rule",
         vec![
@@ -145,6 +145,9 @@ fn inject_row(field: &str, hosts: &[String], header: &str, format: &str) -> Form
                 .help("basic-password replaces the password of Basic authentication."),
             Field::text("field", "Field", field)
                 .help("With several fields, the field to put in. Empty means value."),
+            Field::text("username_field", "Username field", username).help(
+                "With basic-password, the field to put in as the user name. Empty keeps the user name sent.",
+            ),
         ],
     )
 }
@@ -267,6 +270,7 @@ fn fill(form: &mut Form, json: &Value) {
                 &strings(&r["hosts"]),
                 &text(r, "header"),
                 &format,
+                &text(r, "username_field"),
             )
         })
         .collect();
@@ -362,6 +366,9 @@ pub fn to_input(form: &Form) -> Result<SecretInput, String> {
             rule.insert("hosts".into(), json!(row.list("hosts")));
             rule.insert("header".into(), json!(row.text("header")));
             rule.insert("format".into(), json!(row.choice("format")));
+            if let Some(username) = optional(row.text("username_field")) {
+                rule.insert("username_field".into(), json!(username));
+            }
             Value::Object(rule)
         })
         .collect();
@@ -479,6 +486,37 @@ mod tests {
             to_input(&edit).unwrap().into_parts().unwrap().0.unwrap(),
             spec
         );
+
+        // Basic 認証のユーザー名として差し替える欄も残る。
+        let mut basic = new_form("alice", None);
+        basic.set_text("name", "repo");
+        basic.set_choice("kind", FIELDS);
+        set_rows(
+            &mut basic,
+            "fields",
+            vec![
+                field_row("username", &[], "", "u"),
+                field_row("password", &[], "", "p"),
+            ],
+        );
+        set_rows(
+            &mut basic,
+            "inject",
+            vec![inject_row(
+                "password",
+                &["repo.example.com".into()],
+                "authorization",
+                "basic-password",
+                "username",
+            )],
+        );
+        let spec = to_input(&basic).unwrap().into_parts().unwrap().0.unwrap();
+        assert_eq!(spec.inject[0].username_field.as_deref(), Some("username"));
+        let mut filled = to_input(&edit_form("alice", "repo", &spec)).unwrap();
+        for field in filled.fields.values_mut() {
+            field.value = "x".into();
+        }
+        assert_eq!(filled.into_parts().unwrap().0.unwrap(), spec);
     }
 
     #[test]
