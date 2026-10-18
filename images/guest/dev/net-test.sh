@@ -3,7 +3,7 @@
 #
 # 本物の API キーは使わない。プロキシは偽の秘密情報を埋め込み、
 # 差し替えの結果は httpbin.org の応答 (受け取ったヘッダーを返す) で確かめる。
-# Claude Code と Codex は、TLS の検証を通って API に届き、認証エラーで止まることを確かめる。
+# mise は、プロキシを通してツールの版の一覧を引き、GitHub のリリースからツールを入れられることを確かめる。
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -60,9 +60,9 @@ check docker-pull sh -c 'docker pull -q curlimages/curl'
 check_fails container-no-ca docker run --rm curlimages/curl -sS --max-time 20 https://httpbin.org/get
 check container-with-ca docker run --rm --entrypoint sh curlimages/curl -c 'curl -fsS http://ca.chloe.internal/ca.pem -o /tmp/ca.pem && curl -fsS -o /dev/null -w "%{http_code}" --cacert /tmp/ca.pem https://httpbin.org/get'
 
-# Claude Code と Codex: TLS を通って API に届き、偽の秘密情報で認証エラーになる
-check claude sh -c "ANTHROPIC_API_KEY=$PH_ANTHROPIC timeout 90 claude -p hi < /dev/null 2>&1 | tail -3; true"
-check codex sh -c "CODEX_API_KEY=$PH_OPENAI timeout 90 codex exec --skip-git-repo-check hi < /dev/null 2>&1 | tail -5; true"
+# mise: プロキシを通して (chloe の CA を信頼して) 版の一覧を引き、ツールを入れて、ログインシェルで使える
+check mise-install sudo -iu user sh -c 'timeout 120 mise use -g -y jq@1.7.1 2>&1 | tail -1'
+check mise-tool sudo -iu user sh -c 'command -v jq; jq --version'
 
 result done ok
 EOF

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 段階 7 の確認 (作業中のエージェントを待つ停止と、ゲートウェイの再起動からの復旧)。
 #
-# - Claude Code と Codex のフックが chloe-activity を呼ぶ。
+# - Claude Code と Codex のフックの設定が chloe-activity を呼び、作業中の印を作って消す。
 # - 接続がなくなっても、作業中の印があるあいだはランナーを止めず、印が消えたら止める。
 # - ゲートウェイを再起動しても、動いているランナーを引き取り、本物の値の問い合わせに答え続ける。
 # - 持ち主のないランナーは reconcile で止める。
@@ -88,12 +88,24 @@ log_has() { gateway_log | grep -o "$1" | tail -1; }
 
 section hooks
 example_secret anthropic_api_key real-secret-A | as_alice chloe secret set anthropic_api_key --spec >/dev/null
-check claude-hooks "begin claude" as_alice 'rm -f /tmp/act.log; CHLOE_ACTIVITY_LOG=/tmp/act.log timeout 60 claude -p hi < /dev/null >/dev/null 2>&1; cat /tmp/act.log'
-check claude-hooks-end "end claude" as_alice 'cat /tmp/act.log'
-check codex-hooks "begin codex" as_alice 'rm -f /tmp/act.log; (CHLOE_ACTIVITY_LOG=/tmp/act.log setsid timeout 15 codex exec --skip-git-repo-check hi < /dev/null > /dev/null 2>&1 &); for _ in $(seq 75); do grep -q "begin codex" /tmp/act.log 2>/dev/null && break; sleep 0.2; done; pkill -x codex; while pgrep -x codex > /dev/null; do sleep 0.1; done; cat /tmp/act.log'
-# Codex は 401 のあと再試行を続けるので、始まりのフックが呼ばれたら止める。
-# ターンが終わらずにフックが呼ばれないので印が残るが、印のプロセスはもう終わっている。
-check codex-marker-dead "dead" as_alice 'for f in /run/chloe/activity/codex-*; do [ -d "/proc/$(cat "$f")" ] && echo alive || echo dead; done'
+# エージェントはイメージに入っていない (利用者が mise で入れる)。設定に書いたフックのコマンドを、
+# エージェントのふりをする <tool> という名前のプロセスから呼び、印ができて消えることを確かめる。
+# 引数: フックの設定のファイル、イベント、ツールの名前
+run_hook() {
+    vm "cmd=\$(jq -r '.hooks.$2[0].hooks[0].command' '$1')
+mkdir -p /tmp/fake-agent
+printf '#!/bin/sh\n%s < /dev/null\n' \"\$cmd\" > /tmp/fake-agent/$3
+chmod +x /tmp/fake-agent/$3
+/tmp/fake-agent/$3
+if [ -f /run/chloe/activity/$3-unknown ]; then grep -qx '[0-9][0-9]*' /run/chloe/activity/$3-unknown && echo has-pid; else echo removed; fi"
+}
+claude_hooks=/etc/claude-code/managed-settings.d/50-chloe-activity.json
+codex_hooks=/etc/codex/hooks.json
+as_alice true >/dev/null
+check claude-hook-begin "has-pid" run_hook "$claude_hooks" UserPromptSubmit claude
+check claude-hook-end "removed" run_hook "$claude_hooks" Stop claude
+check codex-hook-begin "has-pid" run_hook "$codex_hooks" UserPromptSubmit codex
+check codex-hook-end "removed" run_hook "$codex_hooks" Stop codex
 
 section "waiting for a working agent"
 # 接続を一本つないだまま、エージェントのふりをする "claude" という名前のプロセスと印を作り、
@@ -163,7 +175,7 @@ check audit-forward '"port":3000' audit_has 'port forwarding"'
 check audit-forward-failed '3999' audit_has 'port forwarding failed'
 check audit-orphan '"key":"ws-999"' audit_has 'stopping a runner without a workspace'
 check audit-no-secret "0" grep -c real-secret-A "$logs/audit.jsonl"
-check audit-no-args "0" grep -c 'claude -p' "$logs/audit.jsonl"
+check audit-no-args "0" grep -c 'workspace/marker' "$logs/audit.jsonl"
 check audit-mode "600" stat -c %a "$logs/audit.jsonl"
 
 timing_summary
