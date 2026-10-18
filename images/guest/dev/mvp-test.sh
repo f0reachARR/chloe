@@ -230,6 +230,27 @@ check files-netrc "200" as alice+files \
 check files-stop "stopped files" as alice chloe ws stop files
 check files-after-boot "password chloe" as alice+files 'cat /etc/apt/auth.conf.d/chloe-test.conf'
 check files-not-logged "clean" sh -c '! grep -q real-file-secret "$0" && echo clean' "$logs/gateway.log"
+# ユーザー名も欄にすれば、ユーザー名のプレースホルダーも本物に差し替える。
+cat > "$work/basic-user.toml" <<'EOF'
+[fields.username]
+env = ["REPO_USER"]
+placeholder = "user-{id}"
+value = "real-user"
+[fields.password]
+env = ["REPO_PASSWORD"]
+value = "real-password"
+[[inject]]
+field = "password"
+username_field = "username"
+hosts = ["httpbin.org"]
+header = "authorization"
+format = "basic-password"
+EOF
+check basic-user-set "saved repo" set_from "$work/basic-user.toml" repo --spec
+check basic-user-env "user-chloe" as alice+files 'printenv REPO_USER'
+check basic-user "200" as alice+files \
+    "curl -s -o /dev/null -w '%{http_code}' --user \"\$REPO_USER:\$REPO_PASSWORD\" https://httpbin.org/basic-auth/real-user/real-password"
+as alice chloe secret rm repo >/dev/null
 # 消すと、置いたファイルも消える。
 as alice chloe secret rm file_token >/dev/null
 check files-removed "2 absent" as alice+files 'echo "$(ls /etc/apt/auth.conf.d/chloe-test.conf ~/.netrc 2>&1 | grep -c "No such file") absent"'
