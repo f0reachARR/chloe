@@ -197,6 +197,44 @@ as alice chloe secret rm echo_token >/dev/null
 as alice chloe secret rm aws >/dev/null
 check custom-removed "absent" as alice 'printenv ECHO_TOKEN || echo absent'
 
+section "secrets in files"
+# 環境変数を読まないツール (apt) には、プレースホルダーを入れたファイルを置く。httpbin.org の
+# /basic-auth/<利用者>/<パスワード> は、Basic 認証が合えば 200 を返すので、差し替えを確かめられる。
+cat > "$work/files.toml" <<'EOF'
+value = "real-file-secret"
+[[inject]]
+hosts = ["httpbin.org"]
+header = "authorization"
+format = "basic-password"
+[[files]]
+path = "/etc/apt/auth.conf.d/chloe-test.conf"
+content = "machine httpbin.org login deploy password {value}\n"
+[[files]]
+path = "/home/user/.netrc"
+owner = "user"
+mode = "0600"
+content = "machine httpbin.org login deploy password {value}\n"
+EOF
+check files-ws "created files" as alice chloe ws create files
+as alice+files true
+# 動いているワークスペースには、登録したときに guest-agent が置く。
+check files-set "saved file_token" set_from "$work/files.toml" file_token --spec
+check files-apt-conf "password chloe" as alice+files 'cat /etc/apt/auth.conf.d/chloe-test.conf'
+check files-no-real "absent" as alice+files 'sudo grep -rq real-file-secret /etc/apt/auth.conf.d ~/.netrc && echo present || echo absent'
+check files-netrc-owner "600 user" as alice+files 'stat -c "%a %U" ~/.netrc'
+check files-apt "apt-ok" as alice+files \
+    'sudo /usr/lib/apt/apt-helper download-file https://httpbin.org/basic-auth/deploy/real-file-secret /tmp/apt-out >/dev/null && echo apt-ok'
+check files-netrc "200" as alice+files \
+    "curl -s -o /dev/null -w '%{http_code}' --netrc https://httpbin.org/basic-auth/deploy/real-file-secret"
+# 起動し直すと、設定用のドライブから置く。
+check files-stop "stopped files" as alice chloe ws stop files
+check files-after-boot "password chloe" as alice+files 'cat /etc/apt/auth.conf.d/chloe-test.conf'
+check files-not-logged "clean" sh -c '! grep -q real-file-secret "$0" && echo clean' "$logs/gateway.log"
+# 消すと、置いたファイルも消える。
+as alice chloe secret rm file_token >/dev/null
+check files-removed "absent" as alice+files 'ls /etc/apt/auth.conf.d/chloe-test.conf ~/.netrc 2>/dev/null || echo absent'
+as alice chloe ws rm files --disks >/dev/null
+
 section "workspaces"
 check ws-list "default" as alice chloe ws list
 check ws-create-org "created acme/proj" as alice chloe ws create acme/proj --root persistent
