@@ -27,7 +27,8 @@
 | 8 | 設定のデータベース化と複数の Organization | 許可リスト、規則、トークンの範囲、シークレットを Organization、team、ワークスペースごとにデータベースで持ち、管理者が変えられる | 二つの Organization がそれぞれの設定で使える |
 | 9 | 複数台の物理サーバー | コントロールプレーンとランナーのホストを分け、HTTPS (相互 TLS) で通信する | 二台のホストのランナーを一つのゲートウェイから使える |
 | 10 | 接続と管理の使い勝手 | ワークスペースのホスト名、Device Flow を必須にしたログインと共通のユーザー名、管理の TUI | `ssh chloe@host` で入れて、`ssh -t chloe@host chloe` で設定を変えられる |
-| 11 | Kubernetes | runner の Pod 化、PVC、NetworkPolicy | 段階 6 のテストが Kubernetes 上で通る |
+| 11 | Docker を使わないランナー | ランナーを systemd の unit で動かし、root で動かす部分をネットワークの準備に絞る | 段階 6 のテストが、Docker のない root の使えるホストで通る |
+| 12 | Kubernetes | runner の Pod 化、PVC、NetworkPolicy | 段階 6 のテストが Kubernetes 上で通る |
 
 段階 1 と 2 は互いに依存しないので並行して進められる。
 段階 3 から 5 は、それぞれ前の段階の上に積む。
@@ -545,7 +546,61 @@ VM を使う確認は 7 つ、320 項目がすべて通った（並べて 79 秒
 - `chloe whoami` と `chloe key list|rm` は、SSH と TUI からしか使えない（管理 API にはない）。
 - TUI は、実際の端末での色、罫線、操作中のウィンドウの大きさの変更をまだ確かめていない。大きさの変更は単体テストだけで確かめた。
 
-## 段階 11 以降の進め方
+## 段階 11：Docker を使わないランナー
 
-段階 11 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。
+今のランナーは、ワークスペースごとに特権コンテナ（`chloe-dev-runner`）を起動し、その中で Firecracker とプロキシを動かす。
+Docker を使ったのは開発機の事情による（段階 1 の「開発用の起動はコンテナの中で行う」）。
+ホストに配置するには、次の三つが不便である。
+
+- **権限**：ゲートウェイと `chloe-node` を動かす利用者は `docker` のグループに入るので、root と同じことができる。
+- **配置**：ランナーのコンテナのイメージを、ホストごとにビルドするか写す必要がある。deb のようなパッケージにも入れられない。
+- **ビルド**：`chloe-egress` をコンテナ（Ubuntu 26.04）の中で動かすので、ホストの glibc がコンテナより新しいとビルドしたものが動かない。
+
+そこで、ランナーを systemd の unit として動かす `RunnerBackend` の実装（`SystemdBackend`）を足す。
+計画書のとおり、物理サーバーではランナーをプロセス群として動かす形になる。
+Docker の実装は、開発機での確認（`images/guest/dev/*-test.sh`）のために残す。
+
+### 決めたこと（2026-10-18）
+
+- **権限の分け方**：root で動かすのは、ネットワーク namespace、veth、nftables、tap を作る部分だけにする。egress、dnsmasq、firecracker は `chloe` の利用者で動かす。firecracker は `kvm` のグループで `/dev/kvm` を開き、tap は持ち主を `chloe` にして作っておけば開ける。ディスクの作成と拡大（`truncate`、`mkfs.ext4`、`e2fsck`、`resize2fs`）も `chloe` で行う。root の側が `chloe` の書けるディレクトリのファイルを扱うと、ディスクのイメージをホストのデバイスへのシンボリックリンクにすり替えられ、VM にホストのディスクを渡すおそれがあるからである。
+- **ゲートウェイの利用者**：ゲートウェイと `chloe-node` は `chloe` のまま動かす。SSH を外に開くプロセスを root にしないためである。ランナーの unit の操作は、polkit の規則で `chloe` に許す。許すのは `chloe-runner@ws-<番号>.service` の `start`、`stop`、`reload` に限る（`reset-failed` がどの操作として問い合わせられるかは、実装のときに確かめる）。
+- **unit の形**：パッケージに入れるテンプレートの unit を使う。パスをすべて引数で渡す transient の unit（`systemd-run`）は、polkit で許す範囲を unit の名前で絞りにくいので使わない。
+  - `chloe-runner-net.service`（root、oneshot、起動のとき）：ホスト側の nftables の表を置く。veth の名前のワイルドカード（`cw*`）で書き、ワークスペースごとには変えない。
+  - `chloe-netns@.service`（root、oneshot、`RemainAfterExit`、`StopWhenUnneeded`）：インスタンス名（`ws-3` など）だけを受け取り、ネットワーク namespace、veth、namespace の中の nftables（今の entrypoint.sh の tap0 の規則）、tap0、namespace の中の sysctl（`net.ipv4.ip_unprivileged_port_start=0`。dnsmasq が root でなくても 53 番で待ち受けられる）を作る。止まるときに片づける。
+  - `chloe-runner@.service`（`chloe`、追加のグループ `kvm`）：`chloe-netns@` を `Requires=` と `After=` で引き込み、`NetworkNamespacePath=` でその namespace に入る。ディスクの作成と拡大、設定用のドライブ、egress、dnsmasq、firecracker を受け持つ。`Restart=no` にし、止まったランナーの片づけは今と同じく reconcile に任せる。
+- **設定の置き場所**：パス（`STATE_ROOT`、`GUEST_DIR`、`EGRESS_BIN`）とアドレスのプールは、root だけが書ける `/etc/chloe/runner.env` に書く。unit は `EnvironmentFile=` で、ゲートウェイと `chloe-node` は起動のときに、同じファイルを読む。パスを書く場所を一つにするためで、一つのホストに置けるランナーの設定は一組になる。ワークスペースごとの値（方針、ゲストの環境変数、ディスクの大きさ、ルートの扱い）は、今と同じく状態のディレクトリの `config/` に書く。
+- **外への出口**：veth と NAT で出す。プールの /30 を、起動のときに空いている枠から割り当てる（`chloe-netns-up` が flock をかけて選ぶ）。ワークスペースの番号は使い回さず増え続けるので、番号からは決めない。ホスト側では、veth からホストへの入力と、veth からプライベートアドレス（RFC1918）への転送を落とし、外へ出るときに masquerade する。egress は宛先のアドレスを確かめないので、利用者が個人の規則で内部のアドレスに解決される名前を許すと、VM からホストの内部 API に届きうる。ホスト側の規則でこの経路を塞ぐ。
+- **DNS の上流**：namespace の中から `127.0.0.53`（systemd-resolved）には届かない。`/etc/netns/<名前>/resolv.conf` は `ip netns exec` でしか使われないので、`chloe-runner@` で `BindReadOnlyPaths=/run/systemd/resolve/resolv.conf:/etc/resolv.conf` とし、本当の上流を見せる。上流が LAN の中にあるときは、プライベートアドレスを落とす規則の例外にする。
+- **方針の入れ替え**：egress には今と同じく `egress.sock` で送る。VM の DNS の許可リストは、`systemctl reload` で作り直す（`ExecReload=` が一覧を書き直し、dnsmasq に SIGHUP を送る）。
+- **systemd の操作**：`docker.rs` が `docker` を実行するのと同じく、`systemctl` を子プロセスとして実行する。D-Bus のクレート（zbus など）は使わない。操作は起動と停止のたびに一度ずつで速さは要らず、`systemctl start` はジョブが終わるまで待って結果を終了コードで返すので、ジョブの完了の信号を自分で待つ処理が要らない。polkit の判定は、どちらでも同じく D-Bus の呼び出し元で行われる。手で同じコマンドを打って確かめられる点も、運用で役に立つ。
+- **firecracker の入手**：Ubuntu のアーカイブにないので、公式のリリースのバイナリを使う。
+- **設定**：`[runner]` に `kind = "docker" | "systemd"` を足す。省いたら `docker` とし、今の設定をそのまま読めるようにする。`kind = "systemd"` のパスは `runner.env` から読む。
+
+外への経路を namespace に持たせない形は、隔離がより強いが後回しにする。
+socket の unit に `NetworkNamespacePath=` を付ければ、待ち受けのソケットだけを namespace の中に作り、egress はホストの側で動かせる。
+そうすれば ip_forward も NAT も要らないが、DNS を egress が答えることと、egress が内部のアドレスを拒むことが要る。
+
+### 進め方
+
+1. **11a スクリプトの分割**：`images/guest/dev/entrypoint.sh` を、root の部分（`chloe-netns-up`：namespace、tap0、nftables）と、`chloe` の部分（`chloe-runner-start`：ディスク、設定用のドライブ、egress、dnsmasq、firecracker）に分ける。開発用のコンテナも、コンテナの中で前者に当たる準備をしてから後者を実行する形にし、二つの実装で処理が分かれないようにする。既存の VM を使う確認が通ることを確かめる。
+2. **11b unit と権限**：三つの unit、polkit の規則、`runner.env` の例、ホスト側の nftables の表を `deploy/` に置く。
+3. **11c `SystemdBackend`**：`crates/chloe-controller/src/systemd.rs` に実装し、`[runner]` の `kind`、ゲートウェイの `Backend` の選択肢、`chloe-node` の対応を足す。`chloe-node` は今 `DockerBackend` を直接持ち、問い合わせ用ソケットのパスを具体的な型で引くので、両方の実装を包む型に置き換える。各操作は次のとおり。
+   - `start`：`config/` に書いてから `systemctl start chloe-runner@<key>`。
+   - `stop`：`systemctl stop` のあと `reset-failed`。失敗した unit が一覧に残らないようにする。
+   - `is_running`：`systemctl is-active`。
+   - `list`：`systemctl list-units --state=active 'chloe-runner@*'`。
+   - `update`：`egress.sock` に送り、`systemctl reload`。
+   - `connect_agent` と `local_broker_socket`：変えない。`vsock.sock`、`broker.sock`、`egress.sock` はパスで指す Unix ソケットで、namespace の影響を受けない。
+4. **11d 確認**：入れ子の KVM を許した root の使える VM で、ランナーの起動と停止、ゲートウェイの再起動での引き取り、方針の入れ替え（DNS の許可リストを含む）、reconcile、VM からホストと内部のアドレスに届かないことを確かめる。開発機では今までどおり Docker の実装で確かめる。
+5. **11e 文書**：インストールと設定の文書に、`kind = "systemd"` での配置と、Docker の実装から移るときの手順を書く。状態のディレクトリの形は変わらないので、ディスクと CA はそのまま引き継げる。ただし、切り替える前にすべてのワークスペースを止める。止めずに切り替えると、動いている Docker のコンテナを、新しい実装が自分のランナーとして見つけられないからである。
+
+### 確かめること
+
+- Docker が入っているホストでは、Docker が iptables の FORWARD を DROP にするので、veth からの転送も落とされる。`DOCKER-USER` に通す規則が要るか、ufw と共存できるかを確かめる。
+- veth と NAT のために、ホスト全体の `ip_forward` を 1 にする。
+- dnsmasq を root でない利用者で動かせるか（namespace の中の sysctl で 53 番を開けたうえで）を確かめる。
+
+## 段階 12 以降の進め方
+
+段階 12 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。
 段階 2 の結果によって段階 4 の設計（HTTP/2 の扱い、差し替えの位置など）が変わりうるので、先に細かく決めない。
