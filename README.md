@@ -6,6 +6,7 @@ API キーや GitHub のトークンは VM に入れず、VM からの通信を�
 
 ```console
 $ ssh alice@chloe.example.com
+user@chloe:/workspace$ mise use -g <ツール>   # Claude Code や Codex などは mise で入れる
 user@chloe:/workspace$ claude
 ```
 
@@ -40,7 +41,7 @@ jailer による Firecracker の隔離と Kubernetes への配置はまだない
                         - 本物の値の問い合わせに答える   ┌──────────────────────┐
                                   ▲                     │ Firecracker の VM     │
                                   │ 本物の値の問い合わせ  │  guest-agent          │
-                                  │                     │  Claude Code、Codex   │
+                                  │                     │  mise、エージェント   │
                                   └──────────────────── │  Docker               │
                                                         ├──────────────────────┤
                                                         │ chloe-egress          │──> 許可した宛先

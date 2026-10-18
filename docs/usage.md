@@ -59,11 +59,32 @@ GitHub のログイン名をユーザー名にして、GitHub に登録した公
 
 - **OS と利用者**：Ubuntu 26.04。利用者は `user` で、`sudo` を使える。
 - **ホスト名**：ワークスペースの名前になり、プロンプトに出る（`acme/dev/tools` は `acme-dev-tools`）。正確な名前は環境変数 `CHLOE_WORKSPACE` にある。
-- **入っているもの**：Claude Code、Codex、Docker、git、Python 3、curl、tmux など。
+- **入っているもの**：Docker、[mise](https://mise.jdx.dev/)、git、Python 3、curl、tmux など。Claude Code や Codex などのツールは入っていないので、mise で入れる（「ツールを入れる」を参照）。
 - **残るもの**：`/workspace` と、ホームディレクトリ（`/home/user`）は、ワークスペースのディスクにあり、VM を止めても残る。Docker のイメージとコンテナのデータも、別のディスクに残る。
 - **ディスクの大きさ**：既定ではワークスペースのディスクが 20GiB、Docker のディスクが 40GiB（ゲートウェイの設定で変わる）。足りなくなったら `chloe ws disk <名前> --workspace 50G` のように大きくする（「ディスクを大きくする」を参照）。
 - **残らないもの**：ルートファイルシステムへの変更（`apt install` で入れたものなど）は、既定では VM を止めると消える。残したいときは、ワークスペースのルートの扱いを `persistent` にする（`chloe ws root <名前> persistent`）。
 - **git**：GitHub には HTTPS でつなぐ。`git@github.com:` の SSH のリモートも、HTTPS に読み替える。認証は、`GH_TOKEN` があれば自動で行う（「GitHub を使う」を参照）。
+
+## ツールを入れる
+
+コーディングエージェントや言語の処理系は、VM の中で mise で入れる。
+入れたものはホームディレクトリ（`~/.local/share/mise`）に置かれ、ワークスペースのディスクにあるので、VM を止めても残る。
+
+```sh
+mise use -g jq            # すべてのディレクトリで使う (~/.config/mise/config.toml に書く)
+mise use node@24          # このディレクトリで使う (mise.toml に書く)
+```
+
+端末を開いたときも、`ssh <ホスト> 'コマンド'` で実行したときも、mise で入れたツールを使える。
+ほかの人が書いた `mise.toml`（リポジトリに入っているものなど）は、`mise trust` で信頼するまで読まない。
+
+mise がツールを取りに行く宛先も、外への通信の規則に従う。
+既定の規則が許しているのは、GitHub（`github.com`、`*.githubusercontent.com`）、mise の版の一覧（`mise-versions.jdx.dev`）、npm と PyPI と crates.io である。
+ほかの宛先（Node.js の `nodejs.org` など）から取るツールは、規則に宛先を足してから入れる（「外への通信」を参照）。
+GitHub の API は、`GITHUB_TOKEN` があれば認証して呼ぶので、回数の制限にかかりにくい。
+
+Claude Code と Codex は、作業中であることを VM に知らせるフックをあらかじめ設定してある（`/etc/claude-code/managed-settings.d/`、`/etc/codex/hooks.json`）。
+mise で入れれば、そのまま作業中のあいだは VM を止めない（「VM が止まるとき」を参照）。
 
 ## VM が止まるとき
 

@@ -25,7 +25,7 @@ Docker が要る（ビルドは Ubuntu 24.04 のコンテナの中で行い、�
 リポジトリのルートで実行する。
 
 ```sh
-# ゲストのカーネル (Linux 6.18 系) と、ルートファイルシステム (Ubuntu 26.04、Claude Code、Codex、Docker)。
+# ゲストのカーネル (Linux 6.18 系) と、ルートファイルシステム (Ubuntu 26.04、Docker、mise)。
 images/guest/kernel/build.sh
 images/guest/rootfs/build.sh
 
@@ -38,8 +38,8 @@ packaging/deb/build.sh --guest
 カーネルのコンパイルは数分かかり、ソースとビルドの途中のファイルは `build/cache/` に残る（約 2GB）。
 二回目からは差分だけをビルドする。
 
-ルートファイルシステムには、ビルドしたときの最新の Claude Code（stable）と、`images/guest/rootfs/Dockerfile` で版を決めた Codex が入る。
-そのため `chloe-guest` は、公開する場所には置かない。
+ルートファイルシステムには、`images/guest/rootfs/Dockerfile` で版を決めた mise が入る。
+Claude Code や Codex などのツールは入れない（利用者が VM の中で mise で入れる。[使い方](usage.md#ツールを入れる)）。
 
 deb の版は `0.1.0~git<コミットの日付>.<ハッシュ>` になる（コミットしていない変更があれば `+dirty` が付く）。
 control の Maintainer は、環境変数 `DEB_MAINTAINER` で変えられる。
