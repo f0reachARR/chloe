@@ -161,6 +161,7 @@ ssh chloe@chloe.example.com chloe secret rm hf_token
 | `claude_oauth_token.toml` | `CLAUDE_CODE_OAUTH_TOKEN` | `api.anthropic.com` |
 | `openai_api_key.toml` | `OPENAI_API_KEY`、`CODEX_API_KEY` | `api.openai.com` |
 | `aws.toml` | `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY` | `*.amazonaws.com`（[署名](#署名する方式aws)） |
+| `apt.toml` | なし（[ファイル](#環境変数を読まないツール)の `/etc/apt/auth.conf.d/`） | 認証のある apt のリポジトリ |
 
 ```sh
 ssh chloe@chloe.example.com chloe secret set anthropic_api_key --spec < anthropic_api_key.toml
@@ -221,6 +222,39 @@ ssh chloe@chloe.example.com chloe secret set aws --spec < aws.toml
 
 S3 の SDK は `x-amz-content-sha256` を付けるので、大きなアップロードでも通る。
 チャンクに署名しない `STREAMING-UNSIGNED-PAYLOAD-TRAILER`（新しい SDK がチェックサムを付けてアップロードするときの方式）も通る。
+
+### 環境変数を読まないツール
+
+apt のように、認証情報を設定ファイルから読むツールには、プレースホルダーを入れたファイル（`files`）を VM に置く。
+ツールはファイルのプレースホルダーを送り、プロキシが環境変数のときと同じ規則で本物に差し替える。
+次の例では、apt が `auth.conf.d` のパスワードを Basic 認証で送るので、`basic-password` で差し替える（例は `deploy/secrets/apt.toml`）。
+
+```toml
+# apt.toml
+value = "..."
+
+[[inject]]
+hosts = ["apt.example.com"]
+header = "authorization"
+format = "basic-password"
+
+[[files]]
+path = "/etc/apt/auth.conf.d/chloe-apt.conf"
+content = "machine apt.example.com login deploy password {value}\n"
+```
+
+- **path**：VM の中の絶対パス。`/run/chloe`、`/proc`、`/sys`、`/dev` の下には置けない。
+- **content**：`{value}` を、そのシークレットのプレースホルダーに置き換える。欄がいくつもあるシークレットでは、`{access_key_id}` のように欄の名前で書く。欄の名前の形をしていない `{...}` は、そのまま残る。
+- **owner**：`root`（既定）か `user`。ホームディレクトリのファイル（`/home/user/.netrc` など）は `user` にする。
+- **mode**：8 進数で書く（`"0600"` など）。既定は `0644` である。プレースホルダーは登録した宛先にしか送れないので、誰が読めてもよい。
+
+動いているワークスペースでは、登録するとすぐにファイルを置き直す。
+シークレットを消したり、そのワークスペースで使えなくなったりすると、置いたファイルも消える。
+ただし、ルートを起動のたびに捨てるワークスペース（`ephemeral`）では、VM を止めると置いたファイルの一覧も消える。
+そのため、ワークスペースのディスク（`/home/user`、`/workspace`）に置いたファイルは、止めているあいだにシークレットを消すと残る。
+
+apt のリポジトリは、`sources.list` で `https://` で書く。
+`http://` だと、プロキシから先へ本物のパスワードが平文で流れる（`http://` の宛先で差し替えるときは、どのシークレットでも同じである）。
 
 ### 認証情報の置き場所
 
