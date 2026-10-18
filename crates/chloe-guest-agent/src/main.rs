@@ -51,13 +51,14 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // 起動したときのファイルを置く。置けなくても、シェルは使えるようにする。
+    // 起動したときのファイルを置く。ランナーが渡さなければ、前に置いたファイルを消す。
+    // 置けなくても、シェルは使えるようにする。
     match std::fs::read(RUNNER_FILES) {
         Ok(json) => match serde_json::from_slice::<Vec<GuestFile>>(&json) {
             Ok(files) => update_files(&files),
             Err(error) => warn!("invalid {RUNNER_FILES}: {error}"),
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => update_files(&[]),
         Err(error) => warn!("failed to read {RUNNER_FILES}: {error}"),
     }
 

@@ -16,6 +16,7 @@
 #   WORKSPACE_SIZE、DOCKER_SIZE  ディスクの大きさ (20G、40G)
 #   VCPUS、MEM_MIB   VM の CPU の数とメモリ (4、4096)
 # <状態>/config/runner.env があれば読む (ランナーを起動する側が、ワークスペースごとの値を書く)。
+# <状態>/config/guest-files.json があれば、ゲストに置くファイルとして渡す。
 set -eu
 
 state="$1"
@@ -149,11 +150,14 @@ for pair in "workspace:${WORKSPACE_SIZE:-20G}" "docker:${DOCKER_SIZE:-40G}"; do
     fi
 done
 
-# 設定用のドライブ (/dev/vdd)。ゲストの環境変数 (プレースホルダー) と CA 証明書を渡す。
+# 設定用のドライブ (/dev/vdd)。ゲストの環境変数とファイル (プレースホルダー) と CA 証明書を渡す。
 config_dir="$run/config"
 mkdir -p "$config_dir"
 if [ -n "${CHLOE_GUEST_ENV:-}" ]; then
     cp "$CHLOE_GUEST_ENV" "$config_dir/guest.env"
+fi
+if [ -f "$state/config/guest-files.json" ]; then
+    cp "$state/config/guest-files.json" "$config_dir/guest-files.json"
 fi
 if [ -f "$state/egress/ca.pem" ]; then
     cp "$state/egress/ca.pem" "$config_dir/ca.pem"

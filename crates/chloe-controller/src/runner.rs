@@ -7,6 +7,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chloe_agent_proto::GuestFile;
 use chloe_policy::{
     Action, Credential, InjectRuleConfig, PathRuleConfig, PolicyConfig, SignRuleConfig, SignScheme,
 };
@@ -39,6 +40,9 @@ pub struct RunnerSpec {
     pub policy: PolicyConfig,
     /// VM の環境変数に入れるプレースホルダー。
     pub guest_env: Vec<(String, String)>,
+    /// VM に置く、プレースホルダーを入れたファイル。
+    #[serde(default)]
+    pub guest_files: Vec<GuestFile>,
 }
 
 pub trait RunnerBackend: Send + Sync + 'static {
@@ -218,7 +222,7 @@ pub fn most_specific<T: Clone>(
 
 /// ワークスペースのランナーの起動に必要なものを組み立てる。
 ///
-/// 差し替えと署名の規則とプレースホルダーの環境変数は、`specs` (そのワークスペースで使える
+/// 差し替えと署名の規則とプレースホルダーの環境変数とファイルは、`specs` (そのワークスペースで使える
 /// シークレット) だけに作る。使えない種類のプレースホルダーを VM に入れると、
 /// ツールがそれを使おうとして、サブスクリプションのログインなどほかの手段を試さなくなる。
 /// 差し替えと署名の宛先は、許す規則として一番後ろに足す。ただし、すでにどれかの規則に
@@ -241,6 +245,7 @@ pub fn build_spec(
         ("CHLOE_WORKSPACE".into(), workspace.display_name()),
         ("CHLOE_HOSTNAME".into(), workspace.hostname()),
     ];
+    let mut guest_files: Vec<GuestFile> = vec![];
     fn allow(name: &str, hosts: &[String], policy: &mut PolicyConfig) {
         let hosts: Vec<String> = hosts
             .iter()
@@ -313,6 +318,19 @@ pub fn build_spec(
                 guest_env.push((env.clone(), credential(field).placeholder));
             }
         }
+        for file in &spec.files {
+            // 同じファイルを二つのシークレットが置くなら、名前の順で先のほうを置く。
+            if guest_files.iter().any(|f| f.path == file.path) {
+                tracing::warn!(workspace = %workspace.display_name(), secret = %name, path = %file.path, "file is already placed by another secret");
+                continue;
+            }
+            guest_files.push(GuestFile {
+                path: file.path.clone(),
+                content: file.render(|field| placeholder(field).map(String::as_str)),
+                mode: file.mode().unwrap_or(0o644),
+                owner: file.owner.name().to_string(),
+            });
+        }
     }
     RunnerSpec {
         key: workspace.key(),
@@ -321,6 +339,7 @@ pub fn build_spec(
         docker_disk_gib: Some(disks.docker_gib(workspace.disks)),
         policy,
         guest_env,
+        guest_files,
     }
 }
 
@@ -410,6 +429,7 @@ mod tests {
             r#"{"key": "ws-1", "root_mode": "ephemeral", "policy": {"rules": []}, "guest_env": []}"#,
         )
         .unwrap();
+        assert!(spec.guest_files.is_empty());
         assert_eq!(spec.workspace_disk_gib, None);
         assert_eq!(spec.docker_disk_gib, None);
     }
@@ -459,6 +479,11 @@ mod tests {
             [[sign]]
             scheme = "aws-sigv4"
             hosts = ["*.amazonaws.com"]
+            [[files]]
+            path = "/home/user/.aws/credentials"
+            owner = "user"
+            mode = "0600"
+            content = "[default]\naws_access_key_id = {access_key_id}\naws_secret_access_key = {secret_access_key}\n"
             "#,
         )
         .unwrap();
@@ -546,8 +571,19 @@ mod tests {
                 .contains(&("GH_TOKEN".into(), "ghu_chloeG".into()))
         );
         assert!(!spec.guest_env.iter().any(|(k, _)| k == "OPENAI_API_KEY"));
-        // 方針を書き出しても本物の値は入らない (そもそも持っていない)。
-        let json = serde_json::to_string(&spec.policy).unwrap();
+        assert_eq!(
+            spec.guest_files,
+            [GuestFile {
+                path: "/home/user/.aws/credentials".into(),
+                content:
+                    "[default]\naws_access_key_id = AKIAchloeK\naws_secret_access_key = chloeS\n"
+                        .into(),
+                mode: 0o600,
+                owner: "user".into(),
+            }]
+        );
+        // 方針とファイルを書き出しても本物の値は入らない (そもそも持っていない)。
+        let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("real"));
     }
 }

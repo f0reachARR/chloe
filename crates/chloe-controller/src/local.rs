@@ -144,7 +144,8 @@ pub(crate) async fn connect_agent(state: &Path, wait: Duration) -> Result<AgentS
     Ok(Box::new(stream))
 }
 
-/// ランナーが読む方針 (`config/policy.json`) とゲストの環境変数 (`config/guest.env`) を書く。
+/// ランナーが読む方針 (`config/policy.json`) とゲストの環境変数 (`config/guest.env`) と
+/// ゲストに置くファイル (`config/guest-files.json`) を書く。
 pub(crate) async fn write_config(state: &Path, spec: &RunnerSpec) -> Result<(), Error> {
     let config = state.join("config");
     tokio::fs::create_dir_all(&config).await?;
@@ -155,6 +156,9 @@ pub(crate) async fn write_config(state: &Path, spec: &RunnerSpec) -> Result<(), 
         .map(|(k, v)| format!("{k}={v}\n"))
         .collect();
     tokio::fs::write(config.join("guest.env"), guest_env).await?;
+    let guest_files =
+        serde_json::to_vec(&spec.guest_files).map_err(|e| Error::Runner(e.to_string()))?;
+    tokio::fs::write(config.join("guest-files.json"), guest_files).await?;
     Ok(())
 }
 
@@ -167,8 +171,8 @@ async fn write_policy(state: &Path, spec: &RunnerSpec) -> Result<(), Error> {
     Ok(())
 }
 
-/// 動いているプロキシに新しい方針を送り、受け付けられたら `config/policy.json` も書き直す
-/// (VM の DNS の許可リストは、呼び出し側がこのファイルから作り直させる)。
+/// 動いているプロキシに新しい方針を送り、受け付けられたら `config/` の設定も書き直す
+/// (VM の DNS の許可リストは、呼び出し側が `config/policy.json` から作り直させる)。
 pub(crate) async fn send_policy(state: &Path, spec: &RunnerSpec) -> Result<(), Error> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let line = serde_json::json!({ "policy": spec.policy }).to_string();
@@ -182,7 +186,8 @@ pub(crate) async fn send_policy(state: &Path, spec: &RunnerSpec) -> Result<(), E
             response.trim()
         )));
     }
-    write_policy(state, spec).await
+    // VM が再起動しても新しい環境変数とファイルを渡せるよう、設定をまとめて書き直す。
+    write_config(state, spec).await
 }
 
 /// 止めたランナーの状態のディレクトリを消す。

@@ -524,14 +524,20 @@ impl<B: RunnerBackend> Controller<B> {
             return Ok(false);
         }
         let spec = self.build(workspace).await?;
-        let env = spec.guest_env.clone();
+        let env = ClientMessage::SetEnv(spec.guest_env.clone());
+        let files = ClientMessage::SetFiles(spec.guest_files.clone());
         self.inner.backend.update(spec).await?;
         info!(workspace = %workspace.display_name(), "runner policy refreshed");
         // 新しく使えるようになった種類のプレースホルダーを、このあとに起動するシェルに入れる。
         // すでに動いているシェルの環境は変わらない。
         drop(running);
-        if let Err(error) = self.push_env(&workspace.key(), env).await {
+        let key = workspace.key();
+        if let Err(error) = self.push(&key, env, AgentMessage::EnvUpdated).await {
             warn!(workspace = %workspace.display_name(), "failed to update the VM environment: {error}");
+        }
+        // プレースホルダーを入れたファイルも置き直す。
+        if let Err(error) = self.push(&key, files, AgentMessage::FilesUpdated).await {
+            warn!(workspace = %workspace.display_name(), "failed to update the VM files: {error}");
         }
         Ok(true)
     }
@@ -797,16 +803,22 @@ impl<B: RunnerBackend> Controller<B> {
         ))
     }
 
-    async fn push_env(&self, key: &str, env: Vec<(String, String)>) -> Result<(), Error> {
+    /// guest-agent に設定 (環境変数かファイル) を送り、`done` の答えを待つ。
+    async fn push(
+        &self,
+        key: &str,
+        message: ClientMessage,
+        done: AgentMessage,
+    ) -> Result<(), Error> {
         let mut conn = self.connect(key, Duration::from_secs(2)).await?;
-        conn.send(&ClientMessage::SetEnv(env))
+        conn.send(&message)
             .await
             .map_err(|e| Error::Runner(e.to_string()))?;
         let answer = tokio::time::timeout(Duration::from_secs(5), conn.recv::<AgentMessage>())
             .await
             .map_err(|_| Error::Runner("the VM did not answer in time".into()))?;
         match answer {
-            Ok(Some(AgentMessage::EnvUpdated)) => Ok(()),
+            Ok(Some(answer)) if answer == done => Ok(()),
             Ok(Some(AgentMessage::Error(message))) => Err(Error::Runner(message)),
             Ok(other) => Err(Error::Runner(format!("unexpected answer: {other:?}"))),
             Err(e) => Err(Error::Runner(e.to_string())),
@@ -869,6 +881,8 @@ mod tests {
 
     /// 偽の guest-agent が最後に受け取った環境変数。
     type PushedEnv = Arc<Mutex<Option<Vec<(String, String)>>>>;
+    /// 偽の guest-agent が最後に受け取ったファイル。
+    type PushedFiles = Arc<Mutex<Option<Vec<chloe_agent_proto::GuestFile>>>>;
 
     struct FakeBackend {
         dir: tempfile::TempDir,
@@ -883,6 +897,8 @@ mod tests {
         reboots: Arc<AtomicUsize>,
         /// 偽の guest-agent が最後に受け取った環境変数。
         env: PushedEnv,
+        /// 偽の guest-agent が最後に受け取ったファイル。
+        files: PushedFiles,
         /// ランナーごとの、最後に渡した方針の許可リスト。
         allow: Mutex<HashMap<String, Vec<String>>>,
         /// あれば、`list` はこの (古い) 一覧を返す。一覧を取ったあとに起動した場合をまねる。
@@ -900,6 +916,7 @@ mod tests {
         busy: Arc<Mutex<Vec<String>>>,
         reboots: Arc<AtomicUsize>,
         env: PushedEnv,
+        files: PushedFiles,
     ) {
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -908,6 +925,7 @@ mod tests {
                 let busy = busy.clone();
                 let reboots = reboots.clone();
                 let env = env.clone();
+                let files = files.clone();
                 tokio::spawn(async move {
                     let mut conn = chloe_agent_proto::Connection::new(stream);
                     let _ = match conn.recv::<ClientMessage>().await {
@@ -918,6 +936,10 @@ mod tests {
                         Ok(Some(ClientMessage::SetEnv(vars))) => {
                             *env.lock().unwrap() = Some(vars);
                             conn.send(&AgentMessage::EnvUpdated).await
+                        }
+                        Ok(Some(ClientMessage::SetFiles(list))) => {
+                            *files.lock().unwrap() = Some(list);
+                            conn.send(&AgentMessage::FilesUpdated).await
                         }
                         Ok(Some(ClientMessage::Exec(request))) => {
                             conn.send(&AgentMessage::Started { pid: 1 }).await.unwrap();
@@ -968,6 +990,7 @@ mod tests {
                 self.busy.clone(),
                 self.reboots.clone(),
                 self.env.clone(),
+                self.files.clone(),
             )
             .await;
             self.running.lock().unwrap().insert(
@@ -1057,6 +1080,7 @@ mod tests {
             busy: Arc::new(Mutex::new(vec![])),
             reboots: Arc::new(AtomicUsize::new(0)),
             env: Arc::new(Mutex::new(None)),
+            files: Arc::new(Mutex::new(None)),
             allow: Mutex::new(HashMap::new()),
             stale_list: Mutex::new(None),
             removed: Mutex::new(vec![]),
@@ -1668,6 +1692,10 @@ mod tests {
             [[inject]]
             hosts = ["huggingface.co"]
             header = "authorization"
+            [[files]]
+            path = "/home/user/.netrc"
+            owner = "user"
+            content = "machine huggingface.co password {value}\n"
             "#,
         )
         .await;
@@ -1709,6 +1737,21 @@ mod tests {
                 .contains("error")
         );
 
+        // プレースホルダーを入れたファイルを VM に置く。
+        assert!(controller.refresh(&ws).await.unwrap());
+        let files = backend.files.lock().unwrap().clone().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "/home/user/.netrc");
+        assert_eq!(files[0].owner, "user");
+        assert!(
+            files[0]
+                .content
+                .starts_with("machine huggingface.co password hf_chloe"),
+            "{:?}",
+            files[0].content
+        );
+        assert!(!files[0].content.contains("hf-real"));
+
         // 定義だけを書き換えた行は、方針にも問い合わせにも使わない。
         sqlx::query(
             "UPDATE secrets SET spec = replace(spec, 'huggingface.co', 'evil.example') WHERE name = 'hf_token'",
@@ -1725,6 +1768,7 @@ mod tests {
         assert!(env["AWS_ACCESS_KEY_ID"].starts_with("AKIAchloe"));
         assert!(env["AWS_SECRET_ACCESS_KEY"].starts_with("chloe"));
         assert!(!env.contains_key("HF_TOKEN"));
+        assert_eq!(backend.files.lock().unwrap().clone().unwrap(), []);
         assert!(
             ask(&socket, "CHLOE_SECRET_HF_TOKEN")
                 .await
