@@ -238,6 +238,12 @@ async fn perform(
                     vec![Action::LoadWorkspaces],
                 )
             }
+            Action::LoadRequests(name) => {
+                let records = ops::tail_requests(shared, login, &name, None)
+                    .await
+                    .map_err(shown)?;
+                Outcome::Requests { name, records }
+            }
             Action::RemoveWorkspace { name, disks } => {
                 let ws = ops::remove_workspace(shared, login, &name, disks)
                     .await
