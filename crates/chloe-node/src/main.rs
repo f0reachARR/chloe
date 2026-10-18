@@ -150,6 +150,6 @@ mod tests {
     #[test]
     fn parses_shipped_example() {
         let config: Config = toml::from_str(include_str!("../../../deploy/node.toml")).unwrap();
-        assert!(matches!(config.runner, RunnerConfig::Docker(_)));
+        assert!(matches!(config.runner, RunnerConfig::Systemd(_)));
     }
 }

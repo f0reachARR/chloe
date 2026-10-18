@@ -11,10 +11,8 @@ credentials = "/var/lib/chloe-node/tls"
 # 本物の値の問い合わせを中継する先 (コントロールプレーンの内部 API)。
 control_plane = "https://cp.example.com:8444"
 
-# ランナーを systemd の unit で動かすときは、ここを kind = "systemd" だけにし、パスは
-# /etc/chloe/runner.env (deploy/runner.env、CHLOE_STATE_ROOT は /var/lib/chloe-node/workspaces) に書く。
-# 書き方は docs/install.md の「ランナーを systemd で動かす」にある。
+# ランナーを systemd の unit で動かす。パスは /etc/chloe/runner.env に書く。
+# Docker のコンテナで動かすときは、kind を消して guest_dir、egress_bin、state_root を書く
+# (docs/configuration.md の [runner])。
 [runner]
-guest_dir = "/usr/local/lib/chloe/guest"
-egress_bin = "/usr/local/lib/chloe/chloe-egress"
-state_root = "/var/lib/chloe-node/workspaces"
+kind = "systemd"

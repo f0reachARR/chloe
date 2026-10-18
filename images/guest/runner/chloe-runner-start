@@ -195,4 +195,9 @@ cat > "$run/vm.json" <<EOF
 EOF
 
 rm -f "$state/vsock.sock"
-exec firecracker --no-api --config-file "$run/vm.json"
+# パッケージでは、このスクリプトと同じディレクトリに Firecracker を置く。
+firecracker=firecracker
+if [ -x "$here/firecracker" ]; then
+    firecracker="$here/firecracker"
+fi
+exec "$firecracker" --no-api --config-file "$run/vm.json"
