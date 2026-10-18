@@ -287,6 +287,7 @@ pub fn build_spec(
                 header: rule.header.clone(),
                 format: rule.format,
                 secret_env: catalog::secret_ref(name, &rule.field),
+                username: rule.username_field.as_deref().map(credential),
             });
         }
         for (index, rule) in spec.sign.iter().enumerate() {

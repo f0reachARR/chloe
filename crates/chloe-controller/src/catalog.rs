@@ -54,6 +54,9 @@ pub struct InjectSpec {
     pub header: String,
     #[serde(default)]
     pub format: InjectFormat,
+    /// `basic-password` で、Basic 認証のユーザー名として差し替える欄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username_field: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +269,19 @@ impl SecretSpec {
             }
             check_hosts(&rule.hosts)?;
             check_header(&rule.header)?;
+            if let Some(username) = &rule.username_field {
+                if rule.format != InjectFormat::BasicPassword {
+                    return Err("inject: username_field needs format = \"basic-password\"".into());
+                }
+                if !self.fields.contains_key(username) {
+                    return Err(format!("inject: no such field: {username}"));
+                }
+                if *username == rule.field {
+                    return Err(format!(
+                        "inject: username_field {username} is the same as field"
+                    ));
+                }
+            }
         }
         for rule in &self.sign {
             check_hosts(&rule.hosts)?;
@@ -568,6 +584,7 @@ pub fn preset(name: &str) -> Option<SecretSpec> {
         hosts: hosts.iter().map(|h| h.to_string()).collect(),
         header: "authorization".into(),
         format,
+        username_field: None,
     };
     Some(SecretSpec {
         fields: BTreeMap::from([(
@@ -886,6 +903,10 @@ mod tests {
                 Box::new(|s| s.inject[0].field = "other".into()),
             ),
             (
+                "username without basic-password",
+                Box::new(|s| s.inject[0].username_field = Some(VALUE.into())),
+            ),
+            (
                 "relative path",
                 Box::new(|s| s.files[0].path = "etc/x".into()),
             ),
@@ -925,6 +946,32 @@ mod tests {
             change(&mut spec);
             assert!(spec.validate().is_err(), "{name}");
         }
+        // ユーザー名の欄は、定義した欄で、パスワードの欄とは別のもの。
+        let basic = |username: &str| {
+            let input: SecretInput = toml::from_str(&format!(
+                r#"
+                [fields.username]
+                value = "u"
+                [fields.password]
+                value = "p"
+                [[inject]]
+                field = "password"
+                username_field = "{username}"
+                hosts = ["apt.example.com"]
+                header = "authorization"
+                format = "basic-password"
+                "#
+            ))
+            .unwrap();
+            input.into_parts().map(|(spec, _)| spec.unwrap())
+        };
+        let spec = basic("username").unwrap();
+        assert_eq!(spec.inject[0].username_field.as_deref(), Some("username"));
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(serde_json::from_str::<SecretSpec>(&json).unwrap(), spec);
+        assert!(basic("login").is_err());
+        assert!(basic("password").is_err());
+
         // 欄と直接の値を混ぜられない。
         let mut mixed = aws();
         mixed.value = Some("x".into());
