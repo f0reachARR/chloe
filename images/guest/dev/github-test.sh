@@ -155,6 +155,9 @@ idle_timeout_secs = 5
 github_app = "$work/github-app.toml"
 allowed_users = ["bob"]
 
+[policy]
+allow_personal_rules = true
+
 [[policy.rules]]
 hosts = ["httpbin.org"]
 action = "allow"
@@ -293,6 +296,17 @@ as alice chloe ws create acme/dev/new >/dev/null
 check team-root-applied "acme/dev/new	persistent" as alice chloe ws list
 check policy-invalid "invalid settings" sh -c 'printf "rules = 1\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
+
+section "personal settings"
+check personal-blocked-before "000" as alice "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
+check personal-policy-set "saved the settings of alice" sh -c 'printf "[[rules]]\nhosts = [\"example.com\"]\naction = \"allow\"\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set
+check personal-policy-show "example.com" as alice chloe policy show
+check personal-allowed-after "200" as alice "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
+check personal-not-in-org-policy "000" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
+check personal-no-github "cannot have github" sh -c 'printf "[github]\nrepositories = [\"x\"]\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set
+check personal-policy-rm "removed the settings of alice" as alice chloe policy rm
 
 section "installation token scope"
 check scope-set "saved the settings of acme/dev" sh -c 'printf "root = \"persistent\"\n[github]\nrepositories = [\"tools\"]\npermissions = { contents = \"read\" }\n" | "$@"' _ \

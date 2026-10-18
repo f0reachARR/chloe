@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::Error;
 use crate::catalog::{self, SecretSpec};
-use crate::runner::{AgentStream, BasePolicy, RunnerBackend, RunnerSpec, build_spec};
+use crate::runner::{AgentStream, BasePolicy, PolicyLayer, RunnerBackend, RunnerSpec, build_spec};
 use crate::store::Store;
 use crate::workspace::{DiskConfig, Workspace};
 
@@ -310,6 +310,15 @@ impl<B: RunnerBackend> Controller<B> {
         &self.inner.base
     }
 
+    /// 持ち主に重ねる設定の層 (上の層から順)。個人の層は、ゲートウェイの `[policy]` で
+    /// 許したときだけ重ねる。
+    pub async fn owner_layers(&self, owner: &Owner) -> Result<Vec<PolicyLayer>, Error> {
+        if matches!(owner, Owner::User(_)) && !self.inner.base.allow_personal_rules {
+            return Ok(vec![]);
+        }
+        self.inner.store.policy_layers(owner).await
+    }
+
     /// ディスクの大きさの既定と上限 (ゲートウェイの `[disks]`)。
     pub fn disks(&self) -> &DiskConfig {
         &self.inner.disks
@@ -465,7 +474,7 @@ impl<B: RunnerBackend> Controller<B> {
             .store
             .ensure_placeholders(workspace.id, &specs)
             .await?;
-        let layers = self.inner.store.policy_layers(&workspace.owner).await?;
+        let layers = self.owner_layers(&workspace.owner).await?;
         let spec = build_spec(
             workspace,
             &self.inner.base.with_layers(&layers),
@@ -982,17 +991,20 @@ mod tests {
         backend: Arc<FakeBackend>,
         idle: Duration,
     ) -> Controller<Arc<FakeBackend>> {
+        controller_with(pool, backend, idle, BasePolicy::default())
+    }
+
+    fn controller_with(
+        pool: sqlx::SqlitePool,
+        backend: Arc<FakeBackend>,
+        idle: Duration,
+        base: BasePolicy,
+    ) -> Controller<Arc<FakeBackend>> {
         let secrets = SecretDb::new(pool.clone(), MasterKey::from_bytes("t", &[3; 32]).unwrap());
-        Controller::new(
-            Store::new(pool),
-            secrets,
-            backend,
-            BasePolicy::default(),
-            idle,
-        )
-        .with_stop_timeout(Duration::from_millis(50))
-        .with_activity_wait(Duration::from_millis(100), Duration::from_secs(60))
-        .with_dynamic_secrets(Arc::new(FakeGitHub))
+        Controller::new(Store::new(pool), secrets, backend, base, idle)
+            .with_stop_timeout(Duration::from_millis(50))
+            .with_activity_wait(Duration::from_millis(100), Duration::from_secs(60))
+            .with_dynamic_secrets(Arc::new(FakeGitHub))
     }
 
     async fn controller(idle: Duration) -> (Controller<Arc<FakeBackend>>, Arc<FakeBackend>) {
@@ -1302,6 +1314,42 @@ mod tests {
         assert!(controller.refresh(&team_ws).await.unwrap());
         assert!(allow(&team_ws).contains(&"org2.example".to_string()));
         assert!(!allow(&team_ws).contains(&"org.example".to_string()));
+    }
+
+    #[tokio::test]
+    async fn personal_policy_reaches_only_when_allowed() {
+        let layer = crate::runner::PolicyLayer {
+            rules: vec![chloe_policy::PathRuleConfig {
+                name: None,
+                hosts: vec!["alice.example".into()],
+                methods: vec![],
+                paths: vec![],
+                action: chloe_policy::Action::Allow,
+            }],
+            ..Default::default()
+        };
+        for allowed in [false, true] {
+            let backend = backend();
+            let pool = crate::store::tests::pool().await;
+            let base = BasePolicy {
+                allow_personal_rules: allowed,
+                ..Default::default()
+            };
+            let controller = controller_with(pool, backend.clone(), Duration::from_secs(60), base);
+            controller
+                .store()
+                .set_policy(&Owner::User("alice".into()), &layer, "alice")
+                .await
+                .unwrap();
+            let mine = workspace(&controller, "mine", "alice").await;
+            let shared = workspace(&controller, "acme/tools", "alice").await;
+            let _a = controller.open(&mine).await.unwrap();
+            let _b = controller.open(&shared).await.unwrap();
+            let allow = |ws: &Workspace| backend.allow.lock().unwrap()[&ws.key()].clone();
+            assert_eq!(allow(&mine).contains(&"alice.example".to_string()), allowed);
+            // 個人の層は、その人が入る Organization のワークスペースには重ならない。
+            assert!(!allow(&shared).contains(&"alice.example".to_string()));
+        }
     }
 
     #[tokio::test]

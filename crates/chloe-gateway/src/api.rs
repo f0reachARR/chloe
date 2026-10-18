@@ -15,6 +15,7 @@
 //! GET    /v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
 //! PUT    /v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
 //! DELETE /v1/secrets/{name}[?owner=..]
+//! GET    /v1/policy                     個人の設定 (PUT、DELETE も /v1/policies と同じ)
 //! GET    /v1/policies/{owner}           Organization か team の設定
 //! PUT    /v1/policies/{owner}           設定 (JSON)
 //! DELETE /v1/policies/{owner}
@@ -34,10 +35,12 @@ use axum::{Extension, Json, Router};
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::PolicyLayer;
 use chloe_controller::workspace::{DiskSizes, RootMode};
+use chloe_secrets::Owner;
 use serde::Deserialize;
 use tracing::info;
 
-use crate::ops::{self, owner_arg, parse_owner, secret_owner};
+use crate::access::personal;
+use crate::ops::{self, owner_arg, owner_or_personal, parse_owner};
 use crate::session::Shared;
 
 /// トークンで確かめた呼び出し元。
@@ -64,6 +67,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/secrets/{name}",
             get(show_secret).put(set_secret).delete(remove_secret),
+        )
+        .route(
+            "/v1/policy",
+            get(show_own_policy)
+                .put(set_own_policy)
+                .delete(remove_own_policy),
         )
         .route(
             "/v1/policies/{*owner}",
@@ -274,7 +283,7 @@ async fn list_secrets(
     Extension(caller): Extension<Caller>,
     Query(query): Query<OwnerQuery>,
 ) -> Result<Response, ops::Error> {
-    let owner = secret_owner(&caller.login, query.owner.as_deref())?;
+    let owner = owner_or_personal(&caller.login, query.owner.as_deref())?;
     let names = ops::list_secrets(&shared, &caller.login, &owner).await?;
     Ok(Json(serde_json::json!({ "owner": owner_arg(&owner), "names": names })).into_response())
 }
@@ -285,7 +294,7 @@ async fn show_secret(
     Path(name): Path<String>,
     Query(query): Query<OwnerQuery>,
 ) -> Result<Response, ops::Error> {
-    let owner = secret_owner(&caller.login, query.owner.as_deref())?;
+    let owner = owner_or_personal(&caller.login, query.owner.as_deref())?;
     let view = ops::show_secret(&shared, &caller.login, &owner, &name).await?;
     Ok(Json(view).into_response())
 }
@@ -297,7 +306,7 @@ async fn set_secret(
     Query(query): Query<OwnerQuery>,
     Json(body): Json<SecretInput>,
 ) -> Result<Response, ops::Error> {
-    let owner = secret_owner(&caller.login, query.owner.as_deref())?;
+    let owner = owner_or_personal(&caller.login, query.owner.as_deref())?;
     ops::set_secret(&shared, &caller.login, &owner, &name, body).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -308,7 +317,7 @@ async fn remove_secret(
     Path(name): Path<String>,
     Query(query): Query<OwnerQuery>,
 ) -> Result<Response, ops::Error> {
-    let owner = secret_owner(&caller.login, query.owner.as_deref())?;
+    let owner = owner_or_personal(&caller.login, query.owner.as_deref())?;
     ops::remove_secret(&shared, &caller.login, &owner, &name).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -318,14 +327,7 @@ async fn show_policy(
     Extension(caller): Extension<Caller>,
     Path(owner): Path<String>,
 ) -> Result<Response, ops::Error> {
-    let owner = parse_owner(&owner)?;
-    match ops::show_policy(&shared, &caller.login, &owner).await? {
-        Some(layer) => Ok(Json(layer).into_response()),
-        None => Err(ops::Error::NotFound(format!(
-            "no settings for {}",
-            owner_arg(&owner)
-        ))),
-    }
+    respond_policy(&shared, &caller, parse_owner(&owner)?).await
 }
 
 async fn set_policy(
@@ -334,13 +336,7 @@ async fn set_policy(
     Path(owner): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, ops::Error> {
-    let owner = parse_owner(&owner)?;
-    // 権限のない利用者には、設定の書き方の誤りより先に権限がないことを伝える。
-    ops::check_policy_admin(&shared, &caller.login, &owner).await?;
-    let layer: PolicyLayer = serde_json::from_slice(&body)
-        .map_err(|e| ops::Error::Invalid(format!("invalid settings: {e}")))?;
-    let updated = ops::set_policy(&shared, &caller.login, &owner, &layer).await?;
-    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
+    save_policy(&shared, &caller, parse_owner(&owner)?, &body).await
 }
 
 async fn remove_policy(
@@ -348,8 +344,65 @@ async fn remove_policy(
     Extension(caller): Extension<Caller>,
     Path(owner): Path<String>,
 ) -> Result<Response, ops::Error> {
-    let owner = parse_owner(&owner)?;
-    let updated = ops::remove_policy(&shared, &caller.login, &owner).await?;
+    drop_policy(&shared, &caller, parse_owner(&owner)?).await
+}
+
+async fn show_own_policy(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Response, ops::Error> {
+    respond_policy(&shared, &caller, personal(&caller.login)).await
+}
+
+async fn set_own_policy(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    body: axum::body::Bytes,
+) -> Result<Response, ops::Error> {
+    save_policy(&shared, &caller, personal(&caller.login), &body).await
+}
+
+async fn remove_own_policy(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Response, ops::Error> {
+    drop_policy(&shared, &caller, personal(&caller.login)).await
+}
+
+async fn respond_policy(
+    shared: &Shared,
+    caller: &Caller,
+    owner: Owner,
+) -> Result<Response, ops::Error> {
+    match ops::show_policy(shared, &caller.login, &owner).await? {
+        Some(layer) => Ok(Json(layer).into_response()),
+        None => Err(ops::Error::NotFound(format!(
+            "no settings for {}",
+            owner_arg(&owner)
+        ))),
+    }
+}
+
+async fn save_policy(
+    shared: &Shared,
+    caller: &Caller,
+    owner: Owner,
+    body: &[u8],
+) -> Result<Response, ops::Error> {
+    // 権限のない利用者には、設定の書き方の誤りより先に権限がないことを伝える。
+    ops::check_policy_admin(shared, &caller.login, &owner).await?;
+    let layer: PolicyLayer = serde_json::from_slice(body)
+        .map_err(|e| ops::Error::Invalid(format!("invalid settings: {e}")))?;
+    let updated = ops::set_policy(shared, &caller.login, &owner, &layer).await?;
+    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
+}
+
+async fn drop_policy(
+    shared: &Shared,
+    caller: &Caller,
+    owner: Owner,
+) -> Result<Response, ops::Error> {
+    let updated = ops::remove_policy(shared, &caller.login, &owner).await?;
     Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
 }
 

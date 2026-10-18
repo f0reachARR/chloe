@@ -175,7 +175,7 @@ impl Store {
             .collect()
     }
 
-    /// 持ち主 (Organization か team) の設定。
+    /// 持ち主 (個人、Organization か team) の設定。
     pub async fn policy(&self, owner: &Owner) -> Result<Option<PolicyLayer>, Error> {
         let row = sqlx::query("SELECT config FROM policies WHERE owner = ?1")
             .bind(owner.to_string())
@@ -218,10 +218,11 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
-    /// ワークスペースの持ち主に重ねる設定の層 (上の層から順)。個人のワークスペースには重ねない。
+    /// ワークスペースの持ち主に重ねる設定の層 (上の層から順)。個人の層を重ねてよいかは
+    /// 呼び出し側が決める ([`crate::Controller::owner_layers`])。
     pub async fn policy_layers(&self, owner: &Owner) -> Result<Vec<PolicyLayer>, Error> {
         let chain = match owner {
-            Owner::User(_) => vec![],
+            Owner::User(_) => vec![owner.clone()],
             Owner::Org(_) => vec![owner.clone()],
             Owner::Team { org, .. } => vec![Owner::Org(org.clone()), owner.clone()],
         };
@@ -876,10 +877,20 @@ pub(crate) mod tests {
             hosts(store.policy_layers(&org).await.unwrap()),
             ["org.example"]
         );
-        // 個人のワークスペースには重ねない。
+        // 個人のワークスペースには、その人の層だけを重ねる。
+        let alice = Owner::User("alice".into());
+        assert!(store.policy_layers(&alice).await.unwrap().is_empty());
+        store
+            .set_policy(&alice, &layer("alice.example"), "alice")
+            .await
+            .unwrap();
+        assert_eq!(
+            hosts(store.policy_layers(&alice).await.unwrap()),
+            ["alice.example"]
+        );
         assert!(
             store
-                .policy_layers(&Owner::User("alice".into()))
+                .policy_layers(&Owner::User("bob".into()))
                 .await
                 .unwrap()
                 .is_empty()

@@ -11,9 +11,9 @@
 //! chloe secret list [--owner OWNER]
 //! chloe secret set [--owner OWNER] KIND   (値は標準入力から読む)
 //! chloe secret rm [--owner OWNER] KIND
-//! chloe policy show OWNER
-//! chloe policy set OWNER                  (TOML を標準入力から読む)
-//! chloe policy rm OWNER
+//! chloe policy show [OWNER]               (OWNER を省くと個人の設定)
+//! chloe policy set [OWNER]                (TOML を標準入力から読む)
+//! chloe policy rm [OWNER]
 //! chloe token create NAME [--expires 30d]   (管理 API のトークン。値はこのときだけ表示する)
 //! chloe token list
 //! chloe token revoke ID
@@ -25,14 +25,14 @@
 //! ```
 //!
 //! ワークスペースの NAME は SSH と同じ書き方 (`name`、`org/name`、`org/team/name`)。
-//! OWNER は Organization (`org`) か team (`org/team`)。シークレットは、OWNER を省くと
+//! OWNER は Organization (`org`) か team (`org/team`)。シークレットと設定は、OWNER を省くと
 //! 接続した利用者の個人のものを扱う。
 
 use chloe_controller::catalog::{self, SecretInput};
 use chloe_controller::runner::PolicyLayer;
 use chloe_controller::workspace::{DiskSizes, RootMode};
 
-use crate::ops::{self, owner_arg, parse_owner, secret_owner};
+use crate::ops::{self, owner_arg, owner_or_personal};
 use crate::session::Shared;
 
 pub struct Output {
@@ -114,9 +114,12 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
         ["secret", "rm", "--owner", owner, name] => {
             secret_rm(shared, login, Some(owner), name).await
         }
-        ["policy", "show", owner] => policy_show(shared, login, owner).await,
-        ["policy", "set", owner] => policy_set(shared, login, owner, stdin).await,
-        ["policy", "rm", owner] => policy_rm(shared, login, owner).await,
+        ["policy", "show"] => policy_show(shared, login, None).await,
+        ["policy", "show", owner] => policy_show(shared, login, Some(owner)).await,
+        ["policy", "set"] => policy_set(shared, login, None, stdin).await,
+        ["policy", "set", owner] => policy_set(shared, login, Some(owner), stdin).await,
+        ["policy", "rm"] => policy_rm(shared, login, None).await,
+        ["policy", "rm", owner] => policy_rm(shared, login, Some(owner)).await,
         ["token", "create", name] => token_create(shared, login, name, None).await,
         ["token", "create", name, "--expires", expires] => {
             token_create(shared, login, name, Some(expires)).await
@@ -143,7 +146,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show OWNER\n  chloe policy set OWNER   (reads TOML from stdin)\n  chloe policy rm OWNER\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team).\nSIZE is in GiB (50G or 50).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -313,7 +316,7 @@ async fn github_logout(shared: &Shared, login: &str) -> Result<String, String> {
 }
 
 async fn secret_list(shared: &Shared, login: &str, owner: Option<&str>) -> Result<String, String> {
-    let owner = secret_owner(login, owner).map_err(shown)?;
+    let owner = owner_or_personal(login, owner).map_err(shown)?;
     let names = ops::list_secrets(shared, login, &owner)
         .await
         .map_err(shown)?;
@@ -328,7 +331,7 @@ async fn secret_set(
     with_spec: bool,
     stdin: &[u8],
 ) -> Result<String, String> {
-    let owner = secret_owner(login, owner).map_err(shown)?;
+    let owner = owner_or_personal(login, owner).map_err(shown)?;
     ops::check_secret_name(name).map_err(shown)?;
     ops::check_secret_manager(shared, login, &owner)
         .await
@@ -359,7 +362,7 @@ async fn secret_show(
     owner: Option<&str>,
     name: &str,
 ) -> Result<String, String> {
-    let owner = secret_owner(login, owner).map_err(shown)?;
+    let owner = owner_or_personal(login, owner).map_err(shown)?;
     let view = ops::show_secret(shared, login, &owner, name)
         .await
         .map_err(shown)?;
@@ -377,15 +380,15 @@ async fn secret_rm(
     owner: Option<&str>,
     name: &str,
 ) -> Result<String, String> {
-    let owner = secret_owner(login, owner).map_err(shown)?;
+    let owner = owner_or_personal(login, owner).map_err(shown)?;
     ops::remove_secret(shared, login, &owner, name)
         .await
         .map_err(shown)?;
     Ok(format!("removed {name} from {}\n", owner_arg(&owner)))
 }
 
-async fn policy_show(shared: &Shared, login: &str, owner: &str) -> Result<String, String> {
-    let owner = parse_owner(owner).map_err(shown)?;
+async fn policy_show(shared: &Shared, login: &str, owner: Option<&str>) -> Result<String, String> {
+    let owner = owner_or_personal(login, owner).map_err(shown)?;
     match ops::show_policy(shared, login, &owner)
         .await
         .map_err(shown)?
@@ -398,10 +401,10 @@ async fn policy_show(shared: &Shared, login: &str, owner: &str) -> Result<String
 async fn policy_set(
     shared: &Shared,
     login: &str,
-    owner: &str,
+    owner: Option<&str>,
     stdin: &[u8],
 ) -> Result<String, String> {
-    let owner = parse_owner(owner).map_err(shown)?;
+    let owner = owner_or_personal(login, owner).map_err(shown)?;
     let text = std::str::from_utf8(stdin).map_err(|_| "the settings must be UTF-8".to_string())?;
     // 権限のない利用者には、設定の書き方の誤りより先に権限がないことを伝える。
     ops::check_policy_admin(shared, login, &owner)
@@ -417,8 +420,8 @@ async fn policy_set(
     ))
 }
 
-async fn policy_rm(shared: &Shared, login: &str, owner: &str) -> Result<String, String> {
-    let owner = parse_owner(owner).map_err(shown)?;
+async fn policy_rm(shared: &Shared, login: &str, owner: Option<&str>) -> Result<String, String> {
+    let owner = owner_or_personal(login, owner).map_err(shown)?;
     let refreshed = ops::remove_policy(shared, login, &owner)
         .await
         .map_err(shown)?;

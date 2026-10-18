@@ -87,10 +87,13 @@ impl Shared {
         }
     }
 
-    /// 持ち主 (Organization か team) の設定を変えられるか。Organization の管理者だけが変えられる。
+    /// 持ち主の設定を変えられるか。Organization と team の設定は Organization の管理者だけが、
+    /// 個人の設定はゲートウェイの `[policy]` で許したときに本人だけが変えられる。
     pub async fn can_manage_policy(&self, login: &str, owner: &Owner) -> Result<bool> {
         match owner {
-            Owner::User(_) => Ok(false),
+            Owner::User(_) => {
+                Ok(*owner == personal(login) && self.controller.base_policy().allow_personal_rules)
+            }
             Owner::Org(org) | Owner::Team { org, .. } => self.is_org_admin(login, org).await,
         }
     }

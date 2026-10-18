@@ -101,7 +101,7 @@ pub async fn list_workspaces(shared: &Shared, login: &str) -> Result<Vec<Workspa
         .collect())
 }
 
-/// ワークスペースを作る。`root` がなければ、Organization と team の設定の既定を使う。
+/// ワークスペースを作る。`root` がなければ、持ち主 (個人、Organization と team) の設定の既定を使う。
 /// `disks` で書かなかったディスクは、ゲートウェイの設定の既定の大きさで作る。
 pub async fn create_workspace(
     shared: &Shared,
@@ -121,11 +121,7 @@ pub async fn create_workspace(
     let root = match root {
         Some(root) => root,
         None => {
-            let layers = shared
-                .controller
-                .store()
-                .policy_layers(&target.owner)
-                .await?;
+            let layers = shared.controller.owner_layers(&target.owner).await?;
             most_specific(&layers, |l| l.root.as_ref()).unwrap_or(RootMode::Ephemeral)
         }
     };
@@ -217,8 +213,8 @@ pub fn parse_owner(arg: &str) -> Result<Owner> {
         .map_err(|_| Error::Invalid(format!("invalid owner: {arg} (use org or org/team)")))
 }
 
-/// シークレットの持ち主。指定がなければ利用者の個人のもの。
-pub fn secret_owner(login: &str, owner: Option<&str>) -> Result<Owner> {
+/// シークレットや設定の持ち主。指定がなければ利用者の個人のもの。
+pub fn owner_or_personal(login: &str, owner: Option<&str>) -> Result<Owner> {
     match owner {
         None => Ok(personal(login)),
         Some(owner) => parse_owner(owner),
@@ -435,13 +431,18 @@ pub async fn remove_secret(shared: &Shared, login: &str, owner: &Owner, name: &s
 
 pub async fn check_policy_admin(shared: &Shared, login: &str, owner: &Owner) -> Result<()> {
     if shared.can_manage_policy(login, owner).await? {
-        Ok(())
-    } else {
-        Err(Error::Forbidden(format!(
+        return Ok(());
+    }
+    Err(Error::Forbidden(match owner {
+        Owner::User(_) if *owner != personal(login) => {
+            "you can only change your own personal settings".to_string()
+        }
+        Owner::User(_) => "personal settings are disabled on this gateway".to_string(),
+        _ => format!(
             "only the administrators of the organization can change the settings of {}",
             owner_arg(owner)
-        )))
-    }
+        ),
+    }))
 }
 
 /// 設定を読む。設定 (宛先と規則) は秘密ではないので、その持ち主のワークスペースに入れる人と
@@ -468,6 +469,13 @@ pub async fn set_policy(
     layer: &PolicyLayer,
 ) -> Result<usize> {
     check_policy_admin(shared, login, owner).await?;
+    // 個人のワークスペースは利用者のトークンを使うので、インストールトークンの範囲は効かない。
+    if matches!(owner, Owner::User(_)) && layer.github.is_some() {
+        return Err(Error::Invalid(
+            "personal settings cannot have github (personal workspaces use your own token)"
+                .to_string(),
+        ));
+    }
     layer
         .check(shared.controller.base_policy())
         .map_err(Error::Invalid)?;

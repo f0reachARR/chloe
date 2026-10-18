@@ -78,10 +78,15 @@ pub struct BasePolicy {
     /// 宛先、メソッド、パスの規則。上から順に評価し、どれにも一致しなければ遮断する。
     #[serde(default)]
     pub rules: Vec<PathRuleConfig>,
+    /// 利用者が自分の個人のワークスペースに規則を足せるようにする。足した規則は、この
+    /// 規則のあとに重ねる (許す宛先を増やすことしかできない)。無効にすると、保存してある
+    /// 個人の規則も重ねない。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_personal_rules: bool,
 }
 
 impl BasePolicy {
-    /// 全体の設定に、Organization と team の設定を (上の層から順に) 重ねる。
+    /// 全体の設定に、個人、Organization、team の設定を (上の層から順に) 重ねる。
     ///
     /// 規則は上の層のものを先に並べるので、最初に一致した規則で決まる評価では、上の層
     /// (サーバーの運用者、Organization) の規則を下の層が覆せない。
@@ -99,7 +104,7 @@ impl BasePolicy {
     }
 }
 
-/// Organization か team の設定 (データベースの `policies`)。
+/// 個人、Organization か team の設定 (データベースの `policies`)。
 ///
 /// 中継のみ (`passthrough`) の規則は置けない。復号しないのでほかの規則が効かず、置けると
 /// 上の層の規則を素通りする宛先を作れてしまうためである。
@@ -264,6 +269,7 @@ mod tests {
     fn layers_keep_upper_rules_first() {
         let base = BasePolicy {
             rules: vec![rule("global", "api.github.com", Action::Deny)],
+            ..Default::default()
         };
         let org = PolicyLayer {
             rules: vec![rule("org", "api.github.com", Action::Allow)],
@@ -304,6 +310,7 @@ mod tests {
     fn layers_cannot_pass_through_or_overlap_passthrough() {
         let base = BasePolicy {
             rules: vec![rule("docker", "*.docker.com", Action::Passthrough)],
+            ..Default::default()
         };
         base.check().unwrap();
         let passthrough = PolicyLayer {
@@ -368,6 +375,7 @@ mod tests {
                     ..rule("acme-only", "api.github.com", Action::Allow)
                 },
             ],
+            ..Default::default()
         };
         let aws: catalog::SecretInput = toml::from_str(
             r#"
