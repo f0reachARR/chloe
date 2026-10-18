@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VM を使う確認をまとめて実行し、結果と所要時間をまとめて出す。
 #
-#   test-all.sh [名前...]   (名前は smoke net root disk mvp github lifecycle node systemd。省略するとすべて)
+#   test-all.sh [名前...]   (名前は smoke net root disk mvp github lifecycle machine node systemd。省略するとすべて)
 #
 # どの確認も VM の名前、状態のディレクトリ、ポートが別なので、すべて並べて実行する。
 # smoke、net、root、disk には、CHLOE_DEV_NAME と CHLOE_DEV_STATE で別の VM と状態を使わせる。
@@ -14,7 +14,7 @@ out="$root/build/dev/test-logs"
 mkdir -p "$out"
 
 names=("$@")
-[ ${#names[@]} -gt 0 ] || names=(smoke net root disk mvp github lifecycle node systemd)
+[ ${#names[@]} -gt 0 ] || names=(smoke net root disk mvp github lifecycle machine node systemd)
 selected() { local n; for n in "${names[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
 # 並べて実行するスクリプトが同時にビルドしないよう、先にビルドしておく。
@@ -32,7 +32,7 @@ run() {
 
 start=$(date +%s)
 pids=()
-for name in smoke net root disk mvp github lifecycle node systemd; do
+for name in smoke net root disk mvp github lifecycle machine node systemd; do
     if selected "$name"; then
         run "$name" &
         pids+=($!)

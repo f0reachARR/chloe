@@ -327,12 +327,17 @@ check api-no-token "401" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.
 check api-wrong-token "401" api chloe_wrong GET /v1/me
 check api-me '"login":"alice"' api "$alice_token" GET /v1/me
 check api-list '"name":"default"' api "$alice_token" GET /v1/workspaces
-check api-create '"name":"acme/from-api","root":"ephemeral","running":false,"workspace_disk_gib":20,"docker_disk_gib":40} 201' \
+check api-create '"name":"acme/from-api","root":"ephemeral","running":false,"workspace_disk_gib":20,"docker_disk_gib":40,"vcpus":4,"memory_mib":4096,"idle_timeout_secs":5} 201' \
     api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
 check api-create-visible-by-ssh "acme/from-api" as alice chloe ws list
 check api-create-not-member "not a member of org:acme" api "$bob_token" POST /v1/workspaces -d '{"name":"acme/bob"}'
 check api-create-duplicate "409" api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
 check api-patch-root '"root":"persistent"' api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"root":"persistent"}'
+check api-patch-machine '"vcpus":2,"memory_mib":8192,"idle_timeout_secs":null} 200' \
+    api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"vcpus":2,"memory_mib":8192,"idle_timeout":"never"}'
+check api-patch-idle '"vcpus":2,"memory_mib":8192,"idle_timeout_secs":7200} 200' \
+    api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"idle_timeout":"2h"}'
+check api-patch-bad-idle "invalid idle timeout: 2x" api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"idle_timeout":"2x"}'
 check api-show-other "404" api "$bob_token" GET /v1/workspaces/acme/from-api
 check api-secret-set "204" api "$alice_token" PUT /v1/secrets/openai_api_key \
     -d '{"value":"real-api-secret","env":["OPENAI_API_KEY"],"placeholder":"sk-proj-{id}","inject":[{"hosts":["api.openai.com"],"header":"authorization"}]}'
