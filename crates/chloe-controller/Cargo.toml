@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 chloe-agent-proto.workspace = true
+chloe-audit.workspace = true
 chloe-policy.workspace = true
 chloe-secrets.workspace = true
 

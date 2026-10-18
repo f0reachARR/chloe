@@ -117,12 +117,32 @@ impl RunnerBackend for LocalBackend {
         Some(self.broker_socket(key))
     }
 
+    async fn tail_requests(
+        &self,
+        key: &str,
+        lines: usize,
+    ) -> Result<Vec<chloe_audit::Record>, Error> {
+        tail_requests(&self.state_dir(key), lines).await
+    }
+
     async fn list(&self) -> Result<Vec<String>, Error> {
         match self {
             Self::Docker(b) => b.list().await,
             Self::Systemd(b) => b.list().await,
         }
     }
+}
+
+/// 状態のディレクトリにある、プロキシのログの末尾を読む。
+pub(crate) async fn tail_requests(
+    state: &Path,
+    lines: usize,
+) -> Result<Vec<chloe_audit::Record>, Error> {
+    let path = state.join("logs/requests.jsonl");
+    tokio::task::spawn_blocking(move || chloe_audit::tail(&path, lines))
+        .await
+        .map_err(|e| Error::Runner(e.to_string()))?
+        .map_err(Error::from)
 }
 
 pub(crate) fn broker_socket(state: &Path) -> PathBuf {

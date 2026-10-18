@@ -64,6 +64,17 @@ impl RunnerBackend for Backend {
         }
     }
 
+    async fn tail_requests(
+        &self,
+        key: &str,
+        lines: usize,
+    ) -> Result<Vec<chloe_audit::Record>, Error> {
+        match self {
+            Self::Local(b) => b.tail_requests(key, lines).await,
+            Self::Cluster(b) => b.tail_requests(key, lines).await,
+        }
+    }
+
     async fn list(&self) -> Result<Vec<String>, Error> {
         match self {
             Self::Local(b) => b.list().await,

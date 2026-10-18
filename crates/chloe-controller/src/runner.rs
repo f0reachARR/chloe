@@ -73,6 +73,13 @@ pub trait RunnerBackend: Send + Sync + 'static {
     /// 待ち受けるときの置き場所。ほかのホストのランナーでは `None` (そのホストの `chloe-node`
     /// が待ち受けて、controller に中継する)。
     fn local_broker_socket(&self, key: &str) -> Option<PathBuf>;
+    /// ランナーのプロキシのログ (`logs/requests.jsonl`) の末尾から、最大 `lines` 件を古い順に
+    /// 読む。止まったランナーのログも読める。ログがなければ空。
+    fn tail_requests(
+        &self,
+        key: &str,
+        lines: usize,
+    ) -> impl Future<Output = Result<Vec<chloe_audit::Record>, Error>> + Send;
     /// 実際に動いているランナーの識別子の一覧。reconcile で記録と突き合わせる。
     fn list(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// ランナーが動くホストの名前。起動したランナーの記録に使う。

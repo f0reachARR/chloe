@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 chloe-agent-proto.workspace = true
+chloe-audit.workspace = true
 chloe-controller.workspace = true
 chloe-github.workspace = true
 chloe-mtls.workspace = true

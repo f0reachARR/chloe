@@ -782,6 +782,18 @@ impl<B: RunnerBackend> Controller<B> {
         Ok(report)
     }
 
+    /// ワークスペースのランナーのプロキシのログの末尾を読む。止まっていても読める。
+    pub async fn tail_requests(
+        &self,
+        workspace: &Workspace,
+        lines: usize,
+    ) -> Result<Vec<chloe_audit::Record>, Error> {
+        self.inner
+            .backend
+            .tail_requests(&workspace.key(), lines)
+            .await
+    }
+
     /// ランナーを止める。接続が残っていても止める。
     pub async fn stop(&self, workspace: &Workspace) -> Result<(), Error> {
         let state = self.state(workspace.id);
@@ -1083,6 +1095,14 @@ mod tests {
 
         fn local_broker_socket(&self, key: &str) -> Option<PathBuf> {
             Some(self.broker_socket(key))
+        }
+
+        async fn tail_requests(
+            &self,
+            _key: &str,
+            _lines: usize,
+        ) -> Result<Vec<chloe_audit::Record>, Error> {
+            Ok(Vec::new())
         }
 
         async fn list(&self) -> Result<Vec<String>, Error> {

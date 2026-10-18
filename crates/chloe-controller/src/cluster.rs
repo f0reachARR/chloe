@@ -228,6 +228,22 @@ impl RunnerBackend for ClusterBackend {
         Ok(Box::new(response.upgrade().await.map_err(http)?))
     }
 
+    async fn tail_requests(
+        &self,
+        key: &str,
+        lines: usize,
+    ) -> Result<Vec<chloe_audit::Record>, Error> {
+        // 一度も起動していないワークスペースには、ログがない。
+        let Some(node) = self.placed(key).await? else {
+            return Ok(Vec::new());
+        };
+        let request = self.client.get(Self::url(
+            &node,
+            &format!("/v1/runners/{key}/requests?lines={lines}"),
+        ));
+        self.call(&node, request).await?.json().await.map_err(http)
+    }
+
     fn local_broker_socket(&self, _key: &str) -> Option<PathBuf> {
         // ホストの chloe-node が待ち受け、コントロールプレーンの内部 API に中継する。
         None

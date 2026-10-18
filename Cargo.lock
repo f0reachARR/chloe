@@ -709,6 +709,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "chloe-agent-proto",
+ "chloe-audit",
  "chloe-policy",
  "chloe-secrets",
  "futures",
@@ -752,6 +753,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chloe-agent-proto",
+ "chloe-audit",
  "chloe-controller",
  "chloe-github",
  "chloe-mtls",
@@ -831,6 +833,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chloe-audit",
  "chloe-controller",
  "chloe-mtls",
  "clap",

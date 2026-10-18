@@ -155,6 +155,14 @@ impl RunnerBackend for SystemdBackend {
         Some(local::broker_socket(&self.state_dir(key)))
     }
 
+    async fn tail_requests(
+        &self,
+        key: &str,
+        lines: usize,
+    ) -> Result<Vec<chloe_audit::Record>, Error> {
+        local::tail_requests(&self.state_dir(key), lines).await
+    }
+
     async fn list(&self) -> Result<Vec<String>, Error> {
         let pattern = format!("{UNIT_PREFIX}*{UNIT_SUFFIX}");
         let output = self
