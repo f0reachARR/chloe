@@ -368,7 +368,8 @@ tui_keys '3jjjjjjjjjjjj'
 # スコープの一覧の最後は acme のワークスペースなので、Organization の規則が効く。
 check tui-rules "example.org" tui_shows "example.org"
 tui_keys '4\r'
-check tui-settings "Settings of alice" tui_shows "Settings of alice"
+# 先頭の個人の設定を開く。個人の設定には、トークンの範囲の欄がない。
+check tui-settings "Root default" tui_shows "Root default"
 # Esc と q を一度に送ると Alt+q になるので、どこからでも閉じる Ctrl+C で閉じる。
 tui_keys '\x03'
 check tui-exits "1049l" tui_shows "$(printf '\033\\[?1049l')"

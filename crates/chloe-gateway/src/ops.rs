@@ -616,12 +616,16 @@ pub async fn rule_scopes(shared: &Shared, login: &str) -> Result<Vec<ScopeEntry>
             editable: shared.can_manage_policy(login, &owner).await?,
             scope: RuleScope::Owner(owner.clone()),
         });
-        for ws in workspaces.iter().filter(|ws| ws.owner == owner) {
-            entries.push(ScopeEntry {
-                editable: shared.can_manage_workspace_policy(login, ws).await?,
-                scope: RuleScope::Workspace(ws.clone()),
-            });
-        }
+        let owned: Vec<&Workspace> = workspaces.iter().filter(|ws| ws.owner == owner).collect();
+        // 変えられるかは持ち主だけで決まるので、GitHub に尋ねるのは持ち主ごとに一度にする。
+        let editable = match owned.first() {
+            Some(ws) => shared.can_manage_workspace_policy(login, ws).await?,
+            None => false,
+        };
+        entries.extend(owned.into_iter().map(|ws| ScopeEntry {
+            scope: RuleScope::Workspace(ws.clone()),
+            editable,
+        }));
     }
     Ok(entries)
 }
