@@ -766,7 +766,7 @@ VM を使う確認は 10 本、440 項目が通った（`mvp` と `node` は、�
 - **末尾だけを読む**：ログには大きさの上限がないので、ファイルの末尾から決めた行数（既定 200、上限 2000）だけを読み、読むバイト数も 1MiB までにする。ローテーションはこの段階では扱わない。
 - **読む場所**：`RunnerBackend` に、ランナーのログの末尾を読む操作を足す。同じホストに置く実装（Docker と systemd）は状態のディレクトリのファイルを読み、`chloe-node` は `GET /v1/runners/{key}/requests` で返す。ランナーが止まっていても読める（ログは状態のディレクトリに残る）。
 - **見る人**：ワークスペースに入れる人なら見られる。共有ワークスペースの HTTP のログはワークスペース単位で、誰の要求かは区別しない（[計画](research-and-plan.md)のとおり）。読むだけなので、監査ログには残さない。
-- **操作**：`chloe ws log NAME [--lines N] [--blocked]`、管理 API の `GET /v1/workspaces/{name}/requests?lines=`、TUI の Workspaces タブの `l` で見る。TUI では一覧を開き、`Enter` で一件の欄をすべて出し、`f` で絞り込み（すべて、遮断、差し替え、中継のみ）を切り替え、`r` で読み直す。自動の更新はしない。
+- **操作**：`chloe ws log NAME [--lines N] [--blocked]`、管理 API の `GET /v1/workspace-requests/{name}?lines=`（`/v1/workspaces/{name}` の `name` は `/` を含むので、規則と同じく別のパスにする）、TUI の Workspaces タブの `l` で見る。TUI では一覧を開き、`Enter` で一件の欄をすべて出し、`f` で絞り込み（すべて、遮断、差し替え、中継のみ）を切り替え、`r` で読み直す。自動の更新はしない。
 
 ## 段階 18 以降の進め方
 

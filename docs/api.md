@@ -51,6 +51,7 @@ API の呼び出しは、利用者、トークンの ID、メソッド、パス�
 | `GET /v1/workspaces/{name}` | ワークスペース |
 | `PATCH /v1/workspaces/{name}` | ルートの扱い、ディスクや VM の大きさ、止めるまでの時間を変える、止める |
 | `DELETE /v1/workspaces/{name}[?disks=true]` | ワークスペースを消す（`disks=true` でなければディスクは残る） |
+| `GET /v1/workspace-requests/{name}[?lines=]` | HTTP の要求の記録の末尾（既定 200 件、2000 件まで） |
 | `GET /v1/secrets[?owner=]` | シークレットの名前の一覧 |
 | `PUT /v1/secrets/{kind}[?owner=]` | シークレットを登録する |
 | `DELETE /v1/secrets/{kind}[?owner=]` | シークレットを消す |
@@ -149,6 +150,20 @@ api /v1/workspace-policies/acme/web -X PUT \
 
 api /v1/workspace-policies/acme/web
 api /v1/workspace-policies/acme/web -X DELETE
+```
+
+### HTTP の要求の記録
+
+ワークスペースの HTTP の要求の記録の末尾を、古い順の配列で返す。
+欄は `chloe-egress` が記録する一行と同じで、知らない欄が増えることがある。
+
+```sh
+api '/v1/workspace-requests/acme/web?lines=2'
+# [{"ts":1792152059.1,"event":"passthrough","host":"registry.npmjs.org"},
+#  {"ts":1792152060.4,"event":"request","host":"api.anthropic.com","sni":"api.anthropic.com",
+#   "method":"POST","path":"/v1/messages","query_keys":[],"http_version":"HTTP/2.0","status":200,
+#   "request_bytes":1834,"body_scanned":true,"error":null,"decision":"allowed",
+#   "injected":["anthropic_api_key-0"],"response_bytes":5120,"duration_ms":2310}]
 ```
 
 ### トークン

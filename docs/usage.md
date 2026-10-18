@@ -357,8 +357,23 @@ team の maintainer は、その team のワークスペースの規則を変え
 足せるのは、上の層（ゲートウェイや Organization）の規則にない宛先だけである（[設定の重ね方](configuration.md#設定の重ね方)）。
 
 HTTPS の通信はプロキシで復号するので、VM の中には chloe の CA の証明書が入っている。
-通信の内容（本文）は記録しない。
-宛先、メソッド、パス、ステータスなどは、ワークスペースごとに記録する。
+通信の内容（本文）、ヘッダーの値、クエリの値は記録しない。
+宛先、メソッド、パス、ステータス、判定（許したか、遮断したならその理由）、差し替えた規則、応答の大きさ、かかった時間を、ワークスペースごとに記録する。
+
+記録は `chloe ws log` か、管理の画面のワークスペースのタブの `l` で見る。
+ワークスペースに入れる人なら見られ、VM が止まっていても見られる。
+宛先が名前の解決からできない、または 403 で断られるときは、ここで遮断の理由を確かめられる。
+
+```sh
+ssh chloe@chloe.example.com chloe ws log api              # 末尾の 200 件
+ssh chloe@chloe.example.com chloe ws log api --blocked    # 末尾の 200 件のうち、遮断したもの
+ssh chloe@chloe.example.com chloe ws log api --lines 1000 # 末尾の 1000 件 (2000 件まで)
+```
+
+一件を一行にし、時刻（UTC）、判定、ステータス、メソッド、ホスト、パス（クエリはキーだけ）、応答の大きさ、かかった時間、差し替えた規則か遮断した規則、誤りをタブで区切って出す。
+判定は `allowed`、`blocked:<理由>`、`passthrough`（復号せずに中継した TLS）などである。
+ストリーミングの応答（SSE など）は、応答を流し終えるまで記録に現れない。
+共有ワークスペースの記録は、誰の要求かを区別しない。
 
 ## ポート転送
 
@@ -388,6 +403,9 @@ ssh -t chloe@chloe.example.com chloe
 ワークスペースのタブでは、`g` でディスクの大きさを変える（`chloe ws disk` と同じく、次の起動から効く）。
 `m` で、VM の vCPU の数とメモリ（次の起動から効く）と、止めるまでの時間を変える。
 `u` で、選んだワークスペースを Rules タブで開く。
+`l` で、選んだワークスペースの HTTP の要求の記録を開く。
+新しいものが下に並び、遮断したものは赤で出る。
+`Enter` で一件の欄をすべて出し、`f` で絞り込み（すべて、遮断、差し替え、中継のみ）を切り替え、`r` で読み直す。
 
 Rules タブでは、左の一覧でスコープ（ゲートウェイ、個人、Organization、team、ワークスペース）を選ぶ。
 右には、そのスコープで効く規則を評価する順に、層の名前と一緒に出す（`▶` がそのスコープ自身の規則）。
@@ -434,6 +452,7 @@ chloe ws idle NAME [TIME]                        最後の接続が切れてか�
 chloe ws policy show NAME                        ワークスペースの規則
 chloe ws policy set NAME                         TOML を標準入力から読む
 chloe ws policy rm NAME
+chloe ws log NAME [--lines N] [--blocked]        HTTP の要求の記録の末尾
 chloe ws stop NAME
 chloe ws rm NAME [--disks]                      --disks ならディスクも消す
 chloe secret list [--owner OWNER]
