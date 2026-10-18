@@ -273,8 +273,14 @@ impl SecretSpec {
                 if rule.format != InjectFormat::BasicPassword {
                     return Err("inject: username_field needs format = \"basic-password\"".into());
                 }
-                if !self.fields.contains_key(username) {
+                let Some(spec) = self.fields.get(username) else {
                     return Err(format!("inject: no such field: {username}"));
+                };
+                // Basic 認証はユーザー名とパスワードを最初の `:` で分けるので、ユーザー名には書けない。
+                if spec.placeholder.contains(':') {
+                    return Err(format!(
+                        "field {username}: the placeholder of a user name cannot contain ':'"
+                    ));
                 }
                 if *username == rule.field {
                     return Err(format!(
@@ -947,10 +953,11 @@ mod tests {
             assert!(spec.validate().is_err(), "{name}");
         }
         // ユーザー名の欄は、定義した欄で、パスワードの欄とは別のもの。
-        let basic = |username: &str| {
+        let basic = |username: &str, placeholder: &str| {
             let input: SecretInput = toml::from_str(&format!(
                 r#"
                 [fields.username]
+                placeholder = "{placeholder}"
                 value = "u"
                 [fields.password]
                 value = "p"
@@ -965,12 +972,13 @@ mod tests {
             .unwrap();
             input.into_parts().map(|(spec, _)| spec.unwrap())
         };
-        let spec = basic("username").unwrap();
+        let spec = basic("username", "user-{id}").unwrap();
         assert_eq!(spec.inject[0].username_field.as_deref(), Some("username"));
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(serde_json::from_str::<SecretSpec>(&json).unwrap(), spec);
-        assert!(basic("login").is_err());
-        assert!(basic("password").is_err());
+        assert!(basic("login", "{id}").is_err());
+        assert!(basic("password", "{id}").is_err());
+        assert!(basic("username", "user:{id}").is_err());
 
         // 欄と直接の値を混ぜられない。
         let mut mixed = aws();
