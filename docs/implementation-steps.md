@@ -643,6 +643,27 @@ VM を使う確認は 9 つ、398 項目がすべて通った（並べて 80 秒
 3. **12c 確かめる**：Ubuntu 24.04 と 26.04 の systemd を動かす特権コンテナに `apt install` で入れ、段階 11 と同じ確認を通す。更新（版を上げて入れ直す）で動いているワークスペースが止まらないこと、削除と purge のあとに何が残るかを確かめる。shigure にも入れて確かめる。
 4. **12d 文書**：インストールの文書を、deb で入れる手順を先にして書き直す。手で置く手順は別の方法として残す。
 
+### 結果（2026-10-18）
+
+`packaging/deb/test.sh` の 32 項目が、Ubuntu 24.04 と 26.04 の両方で通った。
+
+- **12a**：`deploy/` の設定の例のランナーを `kind = "systemd"` にし、状態の置き場所を `/var/lib/chloe/workspaces` にそろえた（tmpfiles.d で作る）。
+- **12b**：`packaging/deb/build.sh` が Ubuntu 24.04 のコンテナでビルドし、`package.sh` が `dpkg-deb` で四つのパッケージを作る。依存は `dpkg-shlibdeps` で求め、`libc6 (>= 2.39)` などになった。利用者 `chloe` は sysusers.d で作る。maintainer script は、unit を `deb-systemd-invoke` と `deb-systemd-helper` で扱う。lintian の警告は、仮の Maintainer と man のページがないことだけを全体で抑え、Firecracker（static-pie）とゲストのカーネルについての警告は、パッケージの override でそのファイルにだけ当てた。三つのパッケージは合わせて約 15MB、`chloe-guest` は約 360MB になった。
+- **12c 確認**：systemd を PID 1 にした Ubuntu の特権コンテナに `apt` で入れ、新しく入れる、ランナーを動かす、版を上げて入れ直す、消す、purge する、を確かめた（`packaging/deb/test.sh`）。途中で次の三つを直した。
+  - 同じ apt の実行で polkitd を新しく入れると、D-Bus が利用者 `polkitd` を作る前の設定のままで、polkitd が名前を取れずに終わり、ランナーの unit を起動できなかった。`chloe-common` の postinst で D-Bus の設定を読み直させ、polkit を起動し直させる。
+  - VM が動いたままランナーを止めると、SIGKILL で終わった unit が failed になった。`SuccessExitStatus=SIGKILL` を足した。
+  - 更新で `chloe-host-net` を restart すると、`Requires=` でたどるランナーまで止まる。`ExecReload=` を足して reload だけを使い、規則の置き直しを一つのトランザクションにした。
+
+  公式の Ubuntu のイメージはサービスの操作を断る `policy-rc.d` を入れているので、確認では消して実際のホストに合わせた。
+- **実際のホストでの確認**：段階 11 で使ったホスト（Ubuntu 24.04）で、手で置いたものを片づけてから deb を作って入れ、段階 11 と同じ項目を確かめた。VM を動かしたまま `chloe-guest` を更新すると、動いている Firecracker は消えた古いファイルを開いたまま読み続け、ゲストの中でページキャッシュを捨ててから読み直しても動いた。
+
+残したもの：
+
+- CI で deb を作ることと、apt のリポジトリ。
+- 版の付け方。タグを打つ運用を決めたら、`~git` を付けない版にする。
+- man のページ。
+- Docker でランナーを動かすとき（`kind = "docker"`）に要る `chloe-dev-runner` のイメージは、deb に入れていない。
+
 ## 段階 13 以降の進め方
 
 段階 13 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。

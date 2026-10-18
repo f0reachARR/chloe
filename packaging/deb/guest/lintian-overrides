@@ -1,0 +1,3 @@
+# VM の中で起動するゲストのカーネル。ホストでは実行しない。
+chloe-guest: statically-linked-binary [usr/lib/chloe/guest/kernel/vmlinux]
+chloe-guest: unstripped-binary-or-object [usr/lib/chloe/guest/kernel/vmlinux]

@@ -1,0 +1,2 @@
+# Firecracker の公式のバイナリは static-pie で、共有ライブラリに見える。
+chloe-common: shared-library-lacks-prerequisites [usr/libexec/chloe/firecracker]

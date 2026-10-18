@@ -102,6 +102,9 @@ EOF
 build_deb() {
     local name="$1" src="$2" tree="$3" deps="$4"
     docs "$name" "$tree"
+    if [[ -f "$src/lintian-overrides" ]]; then
+        install -D -m 644 "$src/lintian-overrides" "$tree/usr/share/lintian/overrides/$name"
+    fi
     mkdir -p "$tree/DEBIAN"
     local size
     size="$(du -sk --exclude=DEBIAN "$tree" | cut -f1)"

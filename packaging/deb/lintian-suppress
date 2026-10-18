@@ -1,8 +1,6 @@
-# 検査で出る警告のうち、意図したもの。
+# 検査で出る警告のうち、パッケージによらず意図したもの (パッケージごとのものは <パッケージ>/lintian-overrides)。
 # 既定の Maintainer は仮のもの。配るときは DEB_MAINTAINER で変える。
 bogus-mail-host
 bogus-mail-host-in-debian-changelog
-# Firecracker の公式のバイナリは static-pie で、共有ライブラリに見える。
-shared-library-lacks-prerequisites
 # man のページはまだない。
 no-manual-page
