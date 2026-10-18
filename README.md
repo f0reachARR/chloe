@@ -88,7 +88,7 @@ ssh -p 2222 <GitHub のログイン名>@127.0.0.1
 
 | 文書 | 内容 |
 | --- | --- |
-| [インストール](docs/install.md) | 必要なもの、ビルド、一台での起動、複数のホスト、更新、バックアップ |
+| [インストール](docs/install.md) | deb の作り方と入れ方、一台での起動、複数のホスト、更新、バックアップ、手で置く手順 |
 | [使い方](docs/usage.md) | 接続、ワークスペース、シークレット、ポート転送、`chloe` コマンド |
 | [設定](docs/configuration.md) | ゲートウェイ、`chloe-node`、GitHub App、個人と Organization と team の設定、ワークスペースの規則の書き方 |
 | [管理 API](docs/api.md) | HTTP(S) の API とトークン |

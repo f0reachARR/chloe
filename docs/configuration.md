@@ -143,7 +143,7 @@ VM の DNS は、`allow` と `passthrough` の規則にある名前だけを引�
 | `kind` | 動かし方 |
 | --- | --- |
 | `docker`（既定） | ランナーのコンテナ（`chloe-dev-runner`）を Docker の特権コンテナで起動する。ゲートウェイを動かす利用者は `docker` のグループに入る |
-| `systemd` | ランナーを systemd の unit（`chloe-runner@ws-<番号>.service`）で起動する。root で動くのはネットワークの準備だけで、ゲートウェイを動かす利用者に root の権限は要らない（[インストール](install.md#ランナーを-systemd-で動かす)） |
+| `systemd` | ランナーを systemd の unit（`chloe-runner@ws-<番号>.service`）で起動する。root で動くのはネットワークの準備だけで、ゲートウェイを動かす利用者に root の権限は要らない（[インストール](install.md#ランナーとホストのネットワーク)） |
 
 `kind = "docker"` のときの項目は次のとおり。
 
@@ -198,7 +198,7 @@ VM の CPU とメモリは固定である（4 vCPU、メモリ 4GiB）。
 既定を下げても、すでにあるディスクは縮まない。
 `[cluster]` のときも、ここに書く（`chloe-node` の設定には書かない）。
 ディスクを広げるのはランナーである。
-ランナーを Docker で動かすときは、更新したあと、どのホストでもランナーのコンテナのイメージ（`chloe-dev-runner`）をビルドし直す（[インストール](install.md#更新)）。
+ランナーを Docker で動かすときは、更新したあと、どのホストでもランナーのコンテナのイメージ（`chloe-dev-runner`）をビルドし直す（[インストール](install.md#ランナーを-docker-で動かす)）。
 
 ### `[cluster]`
 

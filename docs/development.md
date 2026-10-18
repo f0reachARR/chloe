@@ -25,7 +25,7 @@ cargo test --workspace
 
 KVM と Docker が要る。
 `systemd` の確認も Docker の特権コンテナで行うので、root の権限は要らない。
-先にゲストのイメージをビルドしておく（[インストール](install.md#ビルド)）。
+先にゲストのイメージをビルドしておく（[インストール](install.md#deb-を作る)）。
 本物の API キーは使わず、偽の値をシークレットに登録して、差し替えた要求が宛先で 401 になることで確かめる。
 
 ```sh
@@ -54,6 +54,21 @@ images/guest/dev/test-all.sh mvp node   # 名前を指定して実行する
 - 決まった秒数の `sleep` ではなく、条件（ログの行、ポート、ランナーの状態）を `wait_until` で待つ（`images/guest/dev/gateway-lib.sh`）。
 - 停止までの時間と問い合わせの間隔を、確認と確認のあいだにランナーが止まらない程度に短くする。
 - 本物の値（偽の値でも）とトークンを、確認の出力に出さない。
+
+## deb の確認
+
+`packaging/deb/build.sh` で作った deb を、systemd を PID 1 にした Ubuntu の特権コンテナに `apt` で入れて確かめる。
+新しく入れる、ランナーを動かす、版を上げて入れ直す（動いているワークスペースが止まらない）、消す、purge する、の順に確かめる。
+ゲストのイメージは `build/guest` を使う。
+
+```sh
+packaging/deb/build.sh
+packaging/deb/test.sh 24.04
+packaging/deb/test.sh 26.04
+```
+
+`build.sh` は lintian の結果も出す。
+意図した警告は `packaging/deb/lintian-suppress` に理由とともに書く。
 
 ## VM に直接入る
 
