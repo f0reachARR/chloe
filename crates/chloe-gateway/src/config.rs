@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use chloe_controller::docker::DockerConfig;
+use chloe_controller::local::RunnerConfig;
 use chloe_controller::runner::BasePolicy;
 use chloe_controller::workspace::DiskConfig;
 use serde::Deserialize;
@@ -70,9 +70,9 @@ pub struct Config {
     /// ワークスペースのディスクの大きさの既定と上限。
     #[serde(default)]
     pub disks: DiskConfig,
-    /// 同じホストの Docker にランナーを置くときの設定。`cluster` とどちらか一方を書く。
+    /// 同じホスト (Docker か systemd) にランナーを置くときの設定。`cluster` とどちらか一方を書く。
     #[serde(default)]
-    pub runner: Option<DockerConfig>,
+    pub runner: Option<RunnerConfig>,
     /// 複数のホスト (chloe-node) にランナーを置くときの設定。
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(config.idle_timeout_secs, 1800);
         assert!(config.is_allowed("alice"));
         assert!(!config.is_allowed("bob"));
-        assert_eq!(config.runner.unwrap().image, "chloe-dev-runner");
+        assert!(matches!(config.runner, Some(RunnerConfig::Docker(_))));
         assert_eq!(config.ban.max_failures, 10);
         assert!(config.policy.allow_personal_rules);
         assert_eq!(config.policy.rules.len(), 1);

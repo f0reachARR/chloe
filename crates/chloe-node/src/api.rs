@@ -21,7 +21,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Extension, Json, Router};
-use chloe_controller::docker::DockerBackend;
+use chloe_controller::local::LocalBackend;
 use chloe_controller::runner::{RunnerBackend, RunnerSpec};
 use chloe_mtls::{Peer, Role};
 use hyper_util::rt::TokioIo;
@@ -37,7 +37,7 @@ pub const AGENT_UPGRADE: &str = "chloe-agent";
 const MAX_AGENT_WAIT: Duration = Duration::from_secs(120);
 
 pub struct NodeState {
-    pub backend: DockerBackend,
+    pub backend: LocalBackend,
     /// コントロールプレーンへの相互 TLS のクライアント。
     pub control_plane: reqwest::Client,
     pub control_plane_url: String,

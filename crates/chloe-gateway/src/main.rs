@@ -282,7 +282,7 @@ async fn build_controller(
     let master = MasterKey::load_or_generate(&config.master_key)
         .with_context(|| format!("load {}", config.master_key.display()))?;
     let (backend, cluster) = match (&config.runner, &config.cluster) {
-        (Some(runner), None) => (Backend::Docker(runner.backend()?), None),
+        (Some(runner), None) => (Backend::Local(runner.backend()?), None),
         (None, Some(cluster)) => {
             let ca = Arc::new(chloe_mtls::Ca::load_or_create(&cluster.pki_dir)?);
             // 起動のたびにコントロールプレーンの証明書を発行し直す (鍵はファイルに置かない)。

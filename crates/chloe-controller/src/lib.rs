@@ -7,8 +7,10 @@ pub mod catalog;
 pub mod cluster;
 mod controller;
 pub mod docker;
+pub mod local;
 pub mod runner;
 pub mod store;
+pub mod systemd;
 pub mod workspace;
 
 pub use controller::{Controller, DynamicSecrets, ReconcileReport, Session};

@@ -1,16 +1,15 @@
 //! 開発用のランナーの実装。ワークスペースごとに `chloe-dev-runner` のコンテナを起動する。
 //!
-//! ワークスペースの状態は `{state_root}/{key}/` に置く (ワークスペースと Docker のディスク、
-//! vsock、CA、ログ、本物の値の問い合わせ用ソケット)。本物の値はランナーに渡さない。
+//! 状態の置き場所は [`crate::local`] にある。
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chloe_agent_proto::AGENT_PORT;
 use tokio::process::Command;
 use tracing::info;
 
 use crate::Error;
+use crate::local;
 use crate::runner::{AgentStream, RunnerBackend, RunnerSpec};
 
 /// 開発用のランナー (chloe-dev-runner のコンテナ) の設定。
@@ -65,37 +64,15 @@ impl DockerBackend {
         format!("{}{key}", self.name_prefix)
     }
 
-    pub fn state_dir(&self, key: &str) -> PathBuf {
+    fn state_dir(&self, key: &str) -> PathBuf {
         self.state_root.join(key)
-    }
-
-    /// ランナーのプロキシが本物の値を問い合わせる Unix ソケット。
-    pub fn broker_socket(&self, key: &str) -> PathBuf {
-        self.state_dir(key).join("broker.sock")
-    }
-
-    /// guest-agent につながる vsock の Unix ソケット (Firecracker の vsock の UDS)。
-    pub fn vsock_path(&self, key: &str) -> PathBuf {
-        self.state_dir(key).join("vsock.sock")
     }
 }
 
 impl RunnerBackend for DockerBackend {
     async fn start(&self, spec: RunnerSpec) -> Result<(), Error> {
         let state = self.state_dir(&spec.key);
-        let config = state.join("config");
-        tokio::fs::create_dir_all(&config).await?;
-        tokio::fs::write(
-            config.join("policy.json"),
-            serde_json::to_vec_pretty(&spec.policy).map_err(|e| Error::Runner(e.to_string()))?,
-        )
-        .await?;
-        let guest_env: String = spec
-            .guest_env
-            .iter()
-            .map(|(k, v)| format!("{k}={v}\n"))
-            .collect();
-        tokio::fs::write(config.join("guest.env"), guest_env).await?;
+        local::write_config(&state, &spec).await?;
 
         // 止まりきっていない古いコンテナが残っていれば片づける。
         let _ = Command::new("docker")
@@ -120,7 +97,7 @@ impl RunnerBackend for DockerBackend {
                 "-e",
                 &format!("CHLOE_ROOT_MODE={}", spec.root_mode.as_str()),
             ]);
-        // なければ entrypoint.sh の既定で作る。
+        // なければ chloe-runner-start の既定で作る。
         if let Some(gib) = spec.workspace_disk_gib {
             command.args(["-e", &format!("WORKSPACE_SIZE={gib}G")]);
         }
@@ -174,63 +151,36 @@ impl RunnerBackend for DockerBackend {
         if self.is_running(key).await? {
             return Err(Error::Runner(format!("{key} is still running")));
         }
-        match tokio::fs::remove_dir_all(self.state_dir(key)).await {
-            Ok(()) => {
-                info!(key, "runner state removed");
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        local::remove_state_dir(&self.state_dir(key), key).await
     }
 
     async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let line = serde_json::json!({ "policy": spec.policy }).to_string();
-        let socket = self.state_dir(&spec.key).join("egress.sock");
-        let mut stream = tokio::net::UnixStream::connect(&socket).await?;
-        stream.write_all(format!("{line}\n").as_bytes()).await?;
-        let mut response = String::new();
-        BufReader::new(stream).read_line(&mut response).await?;
-        if response.contains("\"ok\":true") {
-            // VM の DNS が問い合わせる名前の一覧も、新しい方針から作り直す。
-            let policy = self.state_dir(&spec.key).join("config/policy.json");
-            let json = serde_json::to_vec_pretty(&spec.policy)
-                .map_err(|e| Error::Runner(e.to_string()))?;
-            tokio::fs::write(&policy, json).await?;
-            let output = Command::new("docker")
-                .args(["exec", &self.container(&spec.key)])
-                .args([
-                    "/opt/chloe/chloe-dns-update",
-                    "/state",
-                    "/state/config/policy.json",
-                ])
-                .output()
-                .await?;
-            if !output.status.success() {
-                return Err(Error::Runner(format!(
-                    "failed to update the DNS allowlist: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
-            Ok(())
-        } else {
-            Err(Error::Runner(format!(
-                "egress rejected the update: {}",
-                response.trim()
-            )))
+        local::send_policy(&self.state_dir(&spec.key), &spec).await?;
+        // VM の DNS が問い合わせる名前の一覧も、新しい方針から作り直す。
+        let output = Command::new("docker")
+            .args(["exec", &self.container(&spec.key)])
+            .args([
+                "/opt/chloe/chloe-dns-update",
+                "/state",
+                "/state/config/policy.json",
+            ])
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(Error::Runner(format!(
+                "failed to update the DNS allowlist: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
+        Ok(())
     }
 
     async fn connect_agent(&self, key: &str, wait: Duration) -> Result<AgentStream, Error> {
-        let stream =
-            chloe_agent_proto::firecracker::connect(&self.vsock_path(key), AGENT_PORT, wait)
-                .await?;
-        Ok(Box::new(stream))
+        local::connect_agent(&self.state_dir(key), wait).await
     }
 
     fn local_broker_socket(&self, key: &str) -> Option<PathBuf> {
-        Some(self.broker_socket(key))
+        Some(local::broker_socket(&self.state_dir(key)))
     }
 
     async fn list(&self) -> Result<Vec<String>, Error> {

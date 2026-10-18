@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use chloe_controller::docker::DockerConfig;
+use chloe_controller::local::RunnerConfig;
 use chloe_controller::runner::RunnerBackend;
 use chloe_mtls::{ClientAuth, Credentials};
 use clap::{Parser, Subcommand};
@@ -60,7 +60,7 @@ struct Config {
     credentials: PathBuf,
     /// コントロールプレーンの内部 API の URL (本物の値の問い合わせを中継する先)。
     control_plane: String,
-    runner: DockerConfig,
+    runner: RunnerConfig,
 }
 
 #[tokio::main]
@@ -150,6 +150,6 @@ mod tests {
     #[test]
     fn parses_shipped_example() {
         let config: Config = toml::from_str(include_str!("../../../deploy/node.toml")).unwrap();
-        assert_eq!(config.runner.image, "chloe-dev-runner");
+        assert!(matches!(config.runner, RunnerConfig::Docker(_)));
     }
 }
