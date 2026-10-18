@@ -42,6 +42,7 @@ images/guest/dev/test-all.sh mvp node   # 名前を指定して実行する
 | `mvp` | 二人の利用者、シークレット、動いたままの更新、ワークスペース、停止、管理 API |
 | `github` | GitHub App（GitHub のふりをするサーバー）、Device Flow を必須にしたログイン、共通のユーザー名と鍵の結び付け、二つの Organization、設定とシークレットの権限、管理の TUI |
 | `lifecycle` | 作業中のエージェントを待つ停止、ゲートウェイの再起動、ポート転送、監査ログ |
+| `machine` | ワークスペースごとの VM の vCPU の数とメモリ、止めるまでの時間（止めないことを含む） |
 | `node` | 二つの `chloe-node`、参加、ディスクを広げること、相互 TLS、つながらないホスト |
 | `systemd` | systemd で動かすランナー（`kind = "systemd"`）。systemd を PID 1 にした特権コンテナをホストの代わりにし、`deploy/` の unit、polkit の規則、ホストのネットワークの規則で、起動、利用者、外への通信と DNS、ホストとプライベートアドレスへの遮断、方針の入れ替え、ゲートウェイの再起動、停止と片づけを確かめる |
 
