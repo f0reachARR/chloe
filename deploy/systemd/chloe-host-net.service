@@ -1,0 +1,15 @@
+[Unit]
+Description=chloe runner host network rules
+Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+# nftables.service が規則をすべて消して置き直すので、そのあとに置く。
+After=network.target nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/chloe/runner.env
+ExecStart=/usr/local/lib/chloe/runner/chloe-host-net up
+ExecStop=/usr/local/lib/chloe/runner/chloe-host-net down
+
+[Install]
+WantedBy=multi-user.target

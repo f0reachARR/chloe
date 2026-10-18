@@ -11,7 +11,7 @@
 #   CHLOE_GUEST_DIR  カーネルと rootfs を置いたディレクトリ (/guest)
 #   CHLOE_EGRESS_BIN chloe-egress のバイナリ (/opt/chloe/bin/chloe-egress)
 #   CHLOE_POLICY     プロキシの方針 (<状態>/config/policy.json)
-#   CHLOE_GUEST_ENV  ゲストに入れる環境変数のファイル (なし)
+#   CHLOE_GUEST_ENV  ゲストに入れる環境変数のファイル (<状態>/config/guest.env があればそれ)
 #   CHLOE_ROOT_MODE  ephemeral か persistent (ephemeral)
 #   WORKSPACE_SIZE、DOCKER_SIZE  ディスクの大きさ (20G、40G)
 #   VCPUS、MEM_MIB   VM の CPU の数とメモリ (4、4096)
@@ -27,6 +27,9 @@ CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}"
 CHLOE_GUEST_DIR="${CHLOE_GUEST_DIR:-/guest}"
 CHLOE_EGRESS_BIN="${CHLOE_EGRESS_BIN:-/opt/chloe/bin/chloe-egress}"
 CHLOE_POLICY="${CHLOE_POLICY:-$state/config/policy.json}"
+if [ -z "${CHLOE_GUEST_ENV:-}" ] && [ -f "$state/config/guest.env" ]; then
+    CHLOE_GUEST_ENV="$state/config/guest.env"
+fi
 VCPUS="${VCPUS:-4}"
 MEM_MIB="${MEM_MIB:-4096}"
 logs="$state/logs"

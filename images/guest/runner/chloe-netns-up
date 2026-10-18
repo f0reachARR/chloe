@@ -1,0 +1,77 @@
+#!/bin/bash
+# ワークスペースのランナーのネットワーク namespace を作る (root で実行する。chloe-netns@.service から呼ぶ)。
+#
+#   chloe-netns-up <ws-番号>
+#
+# namespace (chloe-<ws-番号>) を作り、ホストと veth でつなぐ。veth のアドレスは CHLOE_NET_POOL
+# (既定 10.250.0.0/16) の /30 を、空いている枠から割り当てる。ワークスペースの番号は使い回さず
+# 増え続けるので、番号からは決めない。namespace の中の tap0 と nftables は chloe-runner-net で作る。
+# 外への通信の制限は chloe-host-net が置くホスト側の規則で行う。
+set -euo pipefail
+
+key="$1"
+if [[ ! "$key" =~ ^ws-[0-9]+$ ]]; then
+    echo "invalid runner key: $key" >&2
+    exit 1
+fi
+here="$(cd "$(dirname "$0")" && pwd)"
+user="${CHLOE_RUNNER_USER:-chloe}"
+pool="${CHLOE_NET_POOL:-10.250.0.0/16}"
+netns="chloe-$key"
+dir=/run/chloe-runner
+
+ip_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<< "$1"
+    echo $(((a << 24) | (b << 16) | (c << 8) | d))
+}
+int_to_ip() {
+    echo "$((($1 >> 24) & 255)).$((($1 >> 16) & 255)).$((($1 >> 8) & 255)).$(($1 & 255))"
+}
+
+base="$(ip_to_int "${pool%/*}")"
+slots=$(((1 << (32 - ${pool#*/})) / 4))
+
+# 枠の割り当ては、同時に起動するほかのランナーと重ならないよう flock をかけて行う。
+mkdir -p "$dir/slots"
+exec 9> "$dir/lock"
+flock 9
+slot=""
+for f in "$dir"/slots/*; do
+    if [[ -f "$f" && "$(cat "$f")" == "$key" ]]; then
+        slot="${f##*/}"
+        break
+    fi
+done
+if [[ -z "$slot" ]]; then
+    for ((n = 0; n < slots; n++)); do
+        if [[ ! -e "$dir/slots/$n" ]]; then
+            slot="$n"
+            break
+        fi
+    done
+fi
+if [[ -z "$slot" ]]; then
+    echo "no free address in $pool" >&2
+    exit 1
+fi
+echo "$key" > "$dir/slots/$slot"
+exec 9>&-
+
+host_ip="$(int_to_ip $((base + slot * 4 + 1)))"
+ns_ip="$(int_to_ip $((base + slot * 4 + 2)))"
+veth="cw$slot"
+
+# 前に止まりきらなかったものが残っていれば作り直す。
+ip netns del "$netns" 2> /dev/null || true
+ip link del "$veth" 2> /dev/null || true
+ip netns add "$netns"
+ip link add "$veth" type veth peer name uplink netns "$netns"
+ip addr add "$host_ip/30" dev "$veth"
+ip link set "$veth" up
+ip -n "$netns" addr add "$ns_ip/30" dev uplink
+ip -n "$netns" link set uplink up
+ip -n "$netns" route add default via "$host_ip"
+# VM の出口も egress も IPv4 だけを使う。
+ip netns exec "$netns" sysctl -q -w net.ipv6.conf.all.disable_ipv6=1
+CHLOE_NET_MODE=proxy ip netns exec "$netns" "$here/chloe-runner-net" "$(id -u "$user")"

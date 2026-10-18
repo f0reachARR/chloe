@@ -1,0 +1,12 @@
+// chloe の利用者 (ゲートウェイと chloe-node) に、ワークスペースのランナーの unit の起動、停止、
+// 読み直しだけを許す (/etc/polkit-1/rules.d/50-chloe.rules)。
+polkit.addRule(function (action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" && subject.user == "chloe") {
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+        if (/^chloe-runner@ws-[0-9]+\.service$/.test(unit) &&
+            (verb == "start" || verb == "stop" || verb == "reload")) {
+            return polkit.Result.YES;
+        }
+    }
+});

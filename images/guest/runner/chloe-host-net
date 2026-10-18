@@ -1,0 +1,53 @@
+#!/bin/sh
+# ランナーの namespace から外への通信の、ホスト側の規則を置く (root で実行する。chloe-host-net.service から呼ぶ)。
+#
+#   chloe-host-net up|down
+#
+# 外へ出られるのは namespace の中の egress と dnsmasq だけである (VM の通信は namespace の中で
+# egress と dnsmasq に向けられ、転送されない)。ホスト側では次のように扱う。
+#   - namespace からホストへの通信を落とす (コントロールプレーンの API、sshd などを守る)。
+#   - namespace からプライベートアドレスへの転送を落とす。egress は宛先のアドレスを確かめないので、
+#     内部のアドレスに解決される名前を許すと、ここで止める。ただし DNS (53 番) は通す。上流の
+#     DNS サーバーが LAN の中にあることが多いためである。
+#   - namespace 同士の転送を落とす。
+#   - 外へ出るときに masquerade する。
+set -eu
+
+pool="${CHLOE_NET_POOL:-10.250.0.0/16}"
+
+case "${1:-}" in
+up)
+    nft delete table inet chloe-host 2> /dev/null || true
+    nft -f - <<EOF
+table inet chloe-host {
+    chain input {
+        type filter hook input priority filter; policy accept;
+        iifname "cw*" ct state established,related accept
+        iifname "cw*" counter drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "cw*" oifname "cw*" counter drop
+        iifname "cw*" meta nfproto ipv6 counter drop
+        iifname "cw*" meta l4proto { tcp, udp } th dport 53 accept
+        iifname "cw*" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } counter drop
+        iifname "cw*" accept
+        oifname "cw*" ct state established,related accept
+        oifname "cw*" counter drop
+    }
+    chain postrouting {
+        type nat hook postrouting priority srcnat;
+        ip saddr $pool oifname != "cw*" masquerade
+    }
+}
+EOF
+    sysctl -q -w net.ipv4.ip_forward=1
+    ;;
+down)
+    nft delete table inet chloe-host 2> /dev/null || true
+    ;;
+*)
+    echo "usage: $0 up|down" >&2
+    exit 2
+    ;;
+esac

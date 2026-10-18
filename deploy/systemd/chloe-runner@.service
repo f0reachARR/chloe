@@ -1,0 +1,28 @@
+# ワークスペースのランナー (プロキシ、DNS、Firecracker)。ゲートウェイか chloe-node が
+# systemctl start chloe-runner@ws-<番号> で起動する (deploy/polkit/50-chloe.rules で chloe に許す)。
+[Unit]
+Description=chloe runner %i
+Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+Requires=chloe-netns@%i.service
+After=chloe-netns@%i.service
+
+[Service]
+# ゲートウェイか chloe-node と同じ利用者で動かす (状態のディレクトリの持ち主)。
+User=chloe
+Group=chloe
+SupplementaryGroups=kvm
+EnvironmentFile=/etc/chloe/runner.env
+Environment=CHLOE_NET_MODE=proxy
+NetworkNamespacePath=/run/netns/chloe-%i
+# namespace の中からは、ホストのループバックで答える systemd-resolved に届かないので、上流を見せる。
+BindReadOnlyPaths=-/run/systemd/resolve/resolv.conf:/etc/resolv.conf
+NoNewPrivileges=yes
+PrivateTmp=yes
+ExecStart=/usr/local/lib/chloe/runner/chloe-runner-start ${CHLOE_STATE_ROOT}/%i
+ExecReload=/usr/local/lib/chloe/runner/chloe-dns-update ${CHLOE_STATE_ROOT}/%i ${CHLOE_STATE_ROOT}/%i/config/policy.json
+# 止まったランナーは controller が片づける (Docker の --rm と同じ)。失敗した unit も残さない。
+Restart=no
+CollectMode=inactive-or-failed
+# controller は VM の中を止めてからランナーを止める。残ったプロセス (Firecracker が終わったあとの
+# プロキシと DNS) は待たずに終わらせる (Docker の docker rm -f と同じ)。
+KillSignal=SIGKILL

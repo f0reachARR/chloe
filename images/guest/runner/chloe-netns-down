@@ -1,0 +1,25 @@
+#!/bin/bash
+# chloe-netns-up で作ったネットワーク namespace を消し、veth のアドレスの枠を返す (root で実行する)。
+#
+#   chloe-netns-down <ws-番号>
+#
+# namespace を消すと、中にある veth の片方が消え、ホスト側の片方も一緒に消える。
+set -euo pipefail
+
+key="$1"
+if [[ ! "$key" =~ ^ws-[0-9]+$ ]]; then
+    echo "invalid runner key: $key" >&2
+    exit 1
+fi
+dir=/run/chloe-runner
+
+ip netns del "chloe-$key" 2> /dev/null || true
+mkdir -p "$dir/slots"
+exec 9> "$dir/lock"
+flock 9
+for f in "$dir"/slots/*; do
+    if [[ -f "$f" && "$(cat "$f")" == "$key" ]]; then
+        ip link del "cw${f##*/}" 2> /dev/null || true
+        rm -f "$f"
+    fi
+done

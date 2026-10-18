@@ -2,12 +2,13 @@
 Description=chloe gateway
 Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
 After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
+# ランナーを Docker で動かすとき (設定の [runner] の kind が docker) だけ Docker を使う。
+Wants=network-online.target docker.service
 
 [Service]
-# docker グループの利用者で動かす (ランナーのコンテナを起動するため)。root で動かすなら User= と
-# Group= と AmbientCapabilities= を消す。
+# 専用の利用者で動かす。ランナーを Docker で動かすときは、この利用者を docker のグループに入れる
+# (ランナーのコンテナを起動するため)。systemd で動かすときは、polkit の規則でランナーの unit の
+# 操作を許す (deploy/polkit/50-chloe.rules)。
 User=chloe
 Group=chloe
 # 1024 未満のポート (22 番) で待ち受けるため。

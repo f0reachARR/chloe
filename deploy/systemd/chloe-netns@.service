@@ -1,0 +1,14 @@
+# ワークスペースのランナーのネットワーク namespace (chloe-runner@.service が引き込む)。
+[Unit]
+Description=chloe runner network namespace %i
+Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+Requires=chloe-host-net.service
+After=chloe-host-net.service
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/chloe/runner.env
+ExecStart=/usr/local/lib/chloe/runner/chloe-netns-up %i
+ExecStopPost=/usr/local/lib/chloe/runner/chloe-netns-down %i
