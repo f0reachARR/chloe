@@ -22,7 +22,7 @@ use crate::runner::{
     label_rules,
 };
 use crate::store::Store;
-use crate::workspace::{DiskConfig, Workspace};
+use crate::workspace::{DiskConfig, IdleStop, MachineConfig, Workspace};
 
 /// VM を止めるときに、VM の中で再起動を頼んでから待つ時間の既定値。
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -164,6 +164,8 @@ struct Inner<B> {
     backend: B,
     base: BasePolicy,
     disks: DiskConfig,
+    machine: MachineConfig,
+    /// ワークスペースで決めていなければ使う、停止までの時間。
     idle_timeout: Duration,
     stop_timeout: Duration,
     activity_poll: Duration,
@@ -251,6 +253,7 @@ impl<B: RunnerBackend> Controller<B> {
                 backend,
                 base,
                 disks: DiskConfig::default(),
+                machine: MachineConfig::default(),
                 idle_timeout,
                 stop_timeout: GRACEFUL_STOP_TIMEOUT,
                 activity_poll: ACTIVITY_POLL,
@@ -285,6 +288,11 @@ impl<B: RunnerBackend> Controller<B> {
     /// ディスクの大きさの既定と上限を変える。
     pub fn with_disks(self, disks: DiskConfig) -> Self {
         self.configure(|inner| inner.disks = disks)
+    }
+
+    /// VM の大きさの既定を変える。
+    pub fn with_machine(self, machine: MachineConfig) -> Self {
+        self.configure(|inner| inner.machine = machine)
     }
 
     /// データベースの外で作るシークレットの出どころを足す。
@@ -391,6 +399,16 @@ impl<B: RunnerBackend> Controller<B> {
     /// ディスクの大きさの既定と上限 (ゲートウェイの `[disks]`)。
     pub fn disks(&self) -> &DiskConfig {
         &self.inner.disks
+    }
+
+    /// VM の大きさの既定 (ゲートウェイの `[machine]`)。
+    pub fn machine(&self) -> &MachineConfig {
+        &self.inner.machine
+    }
+
+    /// ワークスペースで決めていないときの停止までの時間 (ゲートウェイの `idle_timeout_secs`)。
+    pub fn idle_timeout(&self) -> Duration {
+        self.inner.idle_timeout
     }
 
     pub fn store(&self) -> &Store {
@@ -566,6 +584,7 @@ impl<B: RunnerBackend> Controller<B> {
             workspace,
             &self.inner.base.with_layers(layers),
             &self.inner.disks,
+            &self.inner.machine,
             &placeholders,
             &specs,
         ))
@@ -583,7 +602,22 @@ impl<B: RunnerBackend> Controller<B> {
         self.schedule_idle_stop(workspace_id);
     }
 
-    /// 接続がないまま `idle_timeout` が経ったらランナーを止める予約をする。
+    /// ワークスペースの停止までの時間を変えたときに、接続のないランナーの停止を予約し直す。
+    /// 時間は今から数え直す。ランナーを把握していなければ何もしない。
+    pub fn reschedule_idle_stop(&self, workspace_id: i64) {
+        if self
+            .inner
+            .runners
+            .lock()
+            .unwrap()
+            .contains_key(&workspace_id)
+        {
+            self.schedule_idle_stop(workspace_id);
+        }
+    }
+
+    /// 接続がないまま停止までの時間 (ワークスペースで決めていなければ `idle_timeout`) が
+    /// 経ったらランナーを止める予約をする。止めないワークスペースでは、前の予約を取り消すだけにする。
     /// 止める前に VM の中のエージェントに作業中かを尋ね、作業中なら `max_busy_wait` までは
     /// `activity_poll` ごとに尋ね直して待つ。そのあいだに接続されたら予約を取り消す。
     fn schedule_idle_stop(&self, workspace_id: i64) {
@@ -606,7 +640,18 @@ impl<B: RunnerBackend> Controller<B> {
         let controller = self.clone();
         tokio::spawn(async move {
             let inner = &controller.inner;
-            tokio::time::sleep(inner.idle_timeout).await;
+            let idle_stop = match inner.store.get(workspace_id).await {
+                Ok(Some(workspace)) => workspace.idle_stop,
+                Ok(None) => IdleStop::Default,
+                Err(error) => {
+                    warn!(workspace_id, "failed to read the idle timeout: {error}");
+                    IdleStop::Default
+                }
+            };
+            let Some(timeout) = idle_stop.timeout(inner.idle_timeout) else {
+                return;
+            };
+            tokio::time::sleep(timeout).await;
             let busy_since = tokio::time::Instant::now();
             loop {
                 if !still_idle() {
@@ -872,7 +917,7 @@ impl<B: RunnerBackend> Controller<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::{DiskSizes, RootMode, WorkspaceRef};
+    use crate::workspace::{DiskSizes, IdleStop, MachineSize, RootMode, WorkspaceRef};
     use chloe_agent_proto::ExitStatus;
     use chloe_secrets::{MasterKey, Owner};
     use std::path::PathBuf;
@@ -1136,6 +1181,8 @@ mod tests {
                 &WorkspaceRef::parse(name, login).unwrap(),
                 RootMode::Ephemeral,
                 DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
                 login,
             )
             .await
@@ -1335,6 +1382,68 @@ mod tests {
 
         let _again = controller.open(&ws).await.unwrap();
         assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn follows_the_idle_stop_of_the_workspace() {
+        let ms = Duration::from_millis;
+        let (controller, backend) = controller(ms(200)).await;
+        let ws = workspace(&controller, "api", "alice").await;
+        let store = controller.store();
+        store.set_idle_stop(ws.id, IdleStop::Never).await.unwrap();
+        drop(controller.open(&ws).await.unwrap());
+        tokio::time::sleep(ms(700)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 0, "never stops");
+
+        // 接続がないまま既定に戻すと、今から数えて止める。
+        store.set_idle_stop(ws.id, IdleStop::Default).await.unwrap();
+        controller.reschedule_idle_stop(ws.id);
+        tokio::time::sleep(ms(700)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+
+        // 止める予約のあとで止めないに変えると、予約が取り消される。
+        drop(controller.open(&ws).await.unwrap());
+        store.set_idle_stop(ws.id, IdleStop::Never).await.unwrap();
+        controller.reschedule_idle_stop(ws.id);
+        tokio::time::sleep(ms(700)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+        assert!(backend.is_running(&ws.key()).await.unwrap());
+
+        // 把握していないワークスペースには何もしない。
+        let other = workspace(&controller, "other", "alice").await;
+        controller.reschedule_idle_stop(other.id);
+        assert!(
+            !controller
+                .inner
+                .runners
+                .lock()
+                .unwrap()
+                .contains_key(&other.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn passes_the_machine_size_to_the_runner() {
+        let (controller, _backend) = controller(Duration::from_secs(60)).await;
+        let controller = controller.with_machine(MachineConfig {
+            vcpus: 2,
+            memory_mib: 2048,
+        });
+        let ws = workspace(&controller, "api", "alice").await;
+        let spec = controller.build(&ws).await.unwrap();
+        assert_eq!((spec.vcpus, spec.memory_mib), (Some(2), Some(2048)));
+        let machine = MachineSize {
+            vcpus: Some(8),
+            memory_mib: None,
+        };
+        controller
+            .store()
+            .set_machine(ws.id, machine)
+            .await
+            .unwrap();
+        let ws = controller.store().get(ws.id).await.unwrap().unwrap();
+        let spec = controller.build(&ws).await.unwrap();
+        assert_eq!((spec.vcpus, spec.memory_mib), (Some(8), Some(2048)));
     }
 
     #[tokio::test]
@@ -1564,6 +1673,8 @@ mod tests {
                 &WorkspaceRef::parse("w", "alice").unwrap(),
                 RootMode::Ephemeral,
                 DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
                 "alice",
             )
             .await
@@ -1574,6 +1685,8 @@ mod tests {
                 &WorkspaceRef::parse("w", "bob").unwrap(),
                 RootMode::Ephemeral,
                 DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
                 "bob",
             )
             .await

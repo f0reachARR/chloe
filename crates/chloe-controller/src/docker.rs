@@ -104,6 +104,12 @@ impl RunnerBackend for DockerBackend {
         if let Some(gib) = spec.docker_disk_gib {
             command.args(["-e", &format!("DOCKER_SIZE={gib}G")]);
         }
+        if let Some(vcpus) = spec.vcpus {
+            command.args(["-e", &format!("VCPUS={vcpus}")]);
+        }
+        if let Some(mib) = spec.memory_mib {
+            command.args(["-e", &format!("MEM_MIB={mib}")]);
+        }
         command
             .args(["-v", &format!("{}:/guest:ro", self.guest_dir.display())])
             .args(["-v", &format!("{}:/state", state.display())])

@@ -11,7 +11,7 @@ use sqlx::{Row, SqlitePool};
 use crate::Error;
 use crate::catalog::{self, SecretSpec};
 use crate::runner::{PolicyLayer, WorkspacePolicy};
-use crate::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
+use crate::workspace::{DiskSizes, IdleStop, MachineSize, RootMode, Workspace, WorkspaceRef};
 
 #[derive(Clone)]
 pub struct Store {
@@ -29,17 +29,22 @@ impl Store {
         target: &WorkspaceRef,
         root_mode: RootMode,
         disks: DiskSizes,
+        machine: MachineSize,
+        idle_stop: IdleStop,
         created_by: &str,
     ) -> Result<Workspace, Error> {
         let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
-            "INSERT INTO workspaces (owner, name, root_mode, workspace_disk_gib, docker_disk_gib, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO workspaces (owner, name, root_mode, workspace_disk_gib, docker_disk_gib, vcpus, memory_mib, idle_timeout_secs, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(target.owner.to_string())
         .bind(&target.name)
         .bind(root_mode.as_str())
         .bind(disks.workspace_gib)
         .bind(disks.docker_gib)
+        .bind(machine.vcpus)
+        .bind(machine.memory_mib)
+        .bind(idle_stop.to_column())
         .bind(created_by)
         .bind(now())
         .execute(&mut *tx)
@@ -58,12 +63,14 @@ impl Store {
             name: target.name.clone(),
             root_mode,
             disks,
+            machine,
+            idle_stop,
         })
     }
 
     pub async fn find(&self, target: &WorkspaceRef) -> Result<Option<Workspace>, Error> {
         let row = sqlx::query(
-            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib FROM workspaces WHERE owner = ?1 AND name = ?2",
+            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib, vcpus, memory_mib, idle_timeout_secs FROM workspaces WHERE owner = ?1 AND name = ?2",
         )
         .bind(target.owner.to_string())
         .bind(&target.name)
@@ -74,7 +81,7 @@ impl Store {
 
     pub async fn get(&self, id: i64) -> Result<Option<Workspace>, Error> {
         let row = sqlx::query(
-            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib FROM workspaces WHERE id = ?1",
+            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib, vcpus, memory_mib, idle_timeout_secs FROM workspaces WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -87,7 +94,7 @@ impl Store {
         let mut workspaces = Vec::new();
         for owner in owners {
             let rows = sqlx::query(
-            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib FROM workspaces WHERE owner = ?1 ORDER BY name",
+            "SELECT id, owner, name, root_mode, workspace_disk_gib, docker_disk_gib, vcpus, memory_mib, idle_timeout_secs FROM workspaces WHERE owner = ?1 ORDER BY name",
         )
             .bind(owner.to_string())
             .fetch_all(&self.pool)
@@ -131,6 +138,25 @@ impl Store {
         .bind(disks.docker_gib)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn set_machine(&self, id: i64, machine: MachineSize) -> Result<(), Error> {
+        sqlx::query("UPDATE workspaces SET vcpus = ?2, memory_mib = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(machine.vcpus)
+            .bind(machine.memory_mib)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_idle_stop(&self, id: i64, idle_stop: IdleStop) -> Result<(), Error> {
+        sqlx::query("UPDATE workspaces SET idle_timeout_secs = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(idle_stop.to_column())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -629,6 +655,11 @@ fn workspace_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Workspace, Error>
             workspace_gib: row.try_get("workspace_disk_gib")?,
             docker_gib: row.try_get("docker_disk_gib")?,
         },
+        machine: MachineSize {
+            vcpus: row.try_get("vcpus")?,
+            memory_mib: row.try_get("memory_mib")?,
+        },
+        idle_stop: IdleStop::from_column(row.try_get("idle_timeout_secs")?),
     })
 }
 
@@ -728,12 +759,26 @@ pub(crate) mod tests {
         let store = Store::new(pool().await);
         let api = WorkspaceRef::parse("api", "alice").unwrap();
         let ws = store
-            .create(&api, RootMode::Ephemeral, DiskSizes::default(), "alice")
+            .create(
+                &api,
+                RootMode::Ephemeral,
+                DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
+                "alice",
+            )
             .await
             .unwrap();
         assert!(matches!(
             store
-                .create(&api, RootMode::Ephemeral, DiskSizes::default(), "alice")
+                .create(
+                    &api,
+                    RootMode::Ephemeral,
+                    DiskSizes::default(),
+                    MachineSize::default(),
+                    IdleStop::Default,
+                    "alice"
+                )
                 .await,
             Err(Error::AlreadyExists(_))
         ));
@@ -749,7 +794,14 @@ pub(crate) mod tests {
 
         let org = WorkspaceRef::parse("fortefibre/web", "alice").unwrap();
         store
-            .create(&org, RootMode::Persistent, DiskSizes::default(), "alice")
+            .create(
+                &org,
+                RootMode::Persistent,
+                DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
+                "alice",
+            )
             .await
             .unwrap();
         let listed = store
@@ -856,6 +908,8 @@ pub(crate) mod tests {
                 &WorkspaceRef::parse("a", "alice").unwrap(),
                 RootMode::Ephemeral,
                 DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
                 "alice",
             )
             .await
@@ -963,7 +1017,14 @@ pub(crate) mod tests {
         let store = Store::new(pool().await);
         let target = WorkspaceRef::parse("acme/web", "alice").unwrap();
         let ws = store
-            .create(&target, RootMode::Ephemeral, DiskSizes::default(), "alice")
+            .create(
+                &target,
+                RootMode::Ephemeral,
+                DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
+                "alice",
+            )
             .await
             .unwrap();
         let policy = |host: &str| WorkspacePolicy {
@@ -998,7 +1059,14 @@ pub(crate) mod tests {
             .unwrap();
         store.delete(ws.id).await.unwrap();
         let again = store
-            .create(&target, RootMode::Ephemeral, DiskSizes::default(), "alice")
+            .create(
+                &target,
+                RootMode::Ephemeral,
+                DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
+                "alice",
+            )
             .await
             .unwrap();
         assert_eq!(store.workspace_policy(again.id).await.unwrap(), None);
@@ -1017,6 +1085,8 @@ pub(crate) mod tests {
                 &WorkspaceRef::parse("a", "alice").unwrap(),
                 RootMode::Ephemeral,
                 DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
                 "alice",
             )
             .await
@@ -1026,6 +1096,8 @@ pub(crate) mod tests {
                 &WorkspaceRef::parse("b", "alice").unwrap(),
                 RootMode::Ephemeral,
                 DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
                 "alice",
             )
             .await

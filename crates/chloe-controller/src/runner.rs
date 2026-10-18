@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::Error;
 use crate::catalog::{self, SecretSpec, SignKind};
-use crate::workspace::{DiskConfig, RootMode, Workspace};
+use crate::workspace::{DiskConfig, MachineConfig, RootMode, Workspace};
 
 /// guest-agent への接続。vsock か、それを中継した接続。
 pub trait AgentIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -36,6 +36,12 @@ pub struct RunnerSpec {
     /// Docker のディスクの大きさ (GiB)。扱いは `workspace_disk_gib` と同じ。
     #[serde(default)]
     pub docker_disk_gib: Option<u32>,
+    /// VM の vCPU の数。なければランナーの既定で起動する (古い controller から受け取ったとき)。
+    #[serde(default)]
+    pub vcpus: Option<u32>,
+    /// VM のメモリ (MiB)。扱いは `vcpus` と同じ。
+    #[serde(default)]
+    pub memory_mib: Option<u32>,
     /// プロキシの方針。差し替えの規則は持つが、本物の値は持たない。
     pub policy: PolicyConfig,
     /// VM の環境変数に入れるプレースホルダー。
@@ -231,6 +237,7 @@ pub fn build_spec(
     workspace: &Workspace,
     base: &BasePolicy,
     disks: &DiskConfig,
+    machine: &MachineConfig,
     placeholders: &std::collections::BTreeMap<(String, String), String>,
     specs: &[(String, SecretSpec)],
 ) -> RunnerSpec {
@@ -338,6 +345,8 @@ pub fn build_spec(
         root_mode: workspace.root_mode,
         workspace_disk_gib: Some(disks.workspace_gib(workspace.disks)),
         docker_disk_gib: Some(disks.docker_gib(workspace.disks)),
+        vcpus: Some(machine.vcpus(workspace.machine)),
+        memory_mib: Some(machine.memory_mib(workspace.machine)),
         policy,
         guest_env,
         guest_files,
@@ -423,9 +432,9 @@ mod tests {
         assert!(toml::from_str::<BasePolicy>(r#"allow = ["x.example"]"#).is_err());
     }
 
-    /// ディスクの大きさを持たない古い controller の spec も、chloe-node が受け取れる。
+    /// ディスクや VM の大きさを持たない古い controller の spec も、chloe-node が受け取れる。
     #[test]
-    fn reads_specs_without_disk_sizes() {
+    fn reads_specs_without_sizes() {
         let spec: RunnerSpec = serde_json::from_str(
             r#"{"key": "ws-1", "root_mode": "ephemeral", "policy": {"rules": []}, "guest_env": []}"#,
         )
@@ -433,6 +442,8 @@ mod tests {
         assert!(spec.guest_files.is_empty());
         assert_eq!(spec.workspace_disk_gib, None);
         assert_eq!(spec.docker_disk_gib, None);
+        assert_eq!(spec.vcpus, None);
+        assert_eq!(spec.memory_mib, None);
     }
 
     #[test]
@@ -446,6 +457,11 @@ mod tests {
                 workspace_gib: Some(50),
                 docker_gib: None,
             },
+            machine: crate::workspace::MachineSize {
+                vcpus: Some(8),
+                memory_mib: None,
+            },
+            idle_stop: crate::workspace::IdleStop::Default,
         };
         let placeholders = [
             ("anthropic_api_key", "value", "sk-ant-api03-chloeA"),
@@ -493,6 +509,7 @@ mod tests {
             &ws,
             &base,
             &DiskConfig::default(),
+            &MachineConfig::default(),
             &placeholders,
             &[
                 preset("anthropic_api_key"),
@@ -505,6 +522,8 @@ mod tests {
         assert_eq!(spec.key, "ws-7");
         assert_eq!(spec.workspace_disk_gib, Some(50));
         assert_eq!(spec.docker_disk_gib, Some(40));
+        assert_eq!(spec.vcpus, Some(8));
+        assert_eq!(spec.memory_mib, Some(4096));
         assert_eq!(
             spec.guest_env[..2],
             [

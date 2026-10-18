@@ -131,7 +131,14 @@ pub async fn create_workspace(
     let ws = shared
         .controller
         .store()
-        .create(&target, root, disks, login)
+        .create(
+            &target,
+            root,
+            disks,
+            Default::default(),
+            Default::default(),
+            login,
+        )
         .await?;
     Ok(info(shared, &ws, false))
 }

@@ -101,6 +101,12 @@ impl RunnerBackend for SystemdBackend {
         if let Some(gib) = spec.docker_disk_gib {
             env.push_str(&format!("DOCKER_SIZE={gib}G\n"));
         }
+        if let Some(vcpus) = spec.vcpus {
+            env.push_str(&format!("VCPUS={vcpus}\n"));
+        }
+        if let Some(mib) = spec.memory_mib {
+            env.push_str(&format!("MEM_MIB={mib}\n"));
+        }
         tokio::fs::write(state.join("config/runner.env"), env).await?;
 
         let unit = unit(&spec.key);

@@ -159,6 +159,132 @@ impl DiskConfig {
     }
 }
 
+/// Firecracker の VM に割り当てられる vCPU の数の上限。
+pub const MAX_VCPUS: u32 = 32;
+/// VM のメモリの下限 (MiB)。これより小さいと、systemd と Docker が動くゲストが起動しきらない。
+pub const MIN_MEMORY_MIB: u32 = 512;
+
+/// VM の大きさ。`None` はゲートウェイの設定の既定 ([`MachineConfig`])。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MachineSize {
+    pub vcpus: Option<u32>,
+    /// メモリ (MiB)。
+    pub memory_mib: Option<u32>,
+}
+
+/// VM の大きさの既定 (ゲートウェイの `[machine]`)。
+///
+/// 上限は置かない。ホストより大きな VM は、起動するときに失敗するか、ホストのメモリを
+/// 取り合う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MachineConfig {
+    pub vcpus: u32,
+    pub memory_mib: u32,
+}
+
+impl Default for MachineConfig {
+    fn default() -> Self {
+        Self {
+            vcpus: 4,
+            memory_mib: 4096,
+        }
+    }
+}
+
+impl MachineConfig {
+    /// 既定が VM に割り当てられる値かを確かめる。
+    pub fn check(&self) -> Result<(), String> {
+        self.validate(MachineSize {
+            vcpus: Some(self.vcpus),
+            memory_mib: Some(self.memory_mib),
+        })
+        .map_err(|e| format!("machine: {e}"))
+    }
+
+    /// 既定を当てはめた vCPU の数。
+    pub fn vcpus(&self, machine: MachineSize) -> u32 {
+        machine.vcpus.unwrap_or(self.vcpus)
+    }
+
+    /// 既定を当てはめたメモリ (MiB)。
+    pub fn memory_mib(&self, machine: MachineSize) -> u32 {
+        machine.memory_mib.unwrap_or(self.memory_mib)
+    }
+
+    /// 書いた値が VM に割り当てられるかを確かめる。
+    pub fn validate(&self, requested: MachineSize) -> Result<(), Error> {
+        if let Some(vcpus) = requested.vcpus
+            && !(1..=MAX_VCPUS).contains(&vcpus)
+        {
+            return Err(Error::Invalid(format!(
+                "the number of vCPUs must be between 1 and {MAX_VCPUS}"
+            )));
+        }
+        if let Some(mib) = requested.memory_mib
+            && mib < MIN_MEMORY_MIB
+        {
+            return Err(Error::Invalid(format!(
+                "the memory must be at least {MIN_MEMORY_MIB} MiB"
+            )));
+        }
+        Ok(())
+    }
+
+    /// `current` を `requested` に変えた大きさを返す。書かなかったほうは変えない。
+    pub fn validate_change(
+        &self,
+        current: MachineSize,
+        requested: MachineSize,
+    ) -> Result<MachineSize, Error> {
+        self.validate(requested)?;
+        Ok(MachineSize {
+            vcpus: requested.vcpus.or(current.vcpus),
+            memory_mib: requested.memory_mib.or(current.memory_mib),
+        })
+    }
+}
+
+/// 最後の接続が閉じてから、ランナーを止めるまで。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IdleStop {
+    /// ゲートウェイの設定の `idle_timeout_secs`。
+    #[default]
+    Default,
+    /// 秒数。
+    After(u32),
+    /// 接続がなくても止めない (`chloe ws stop` で止める)。
+    Never,
+}
+
+impl IdleStop {
+    /// 止めるまでの時間。止めないなら `None`。
+    pub fn timeout(self, default: std::time::Duration) -> Option<std::time::Duration> {
+        match self {
+            Self::Default => Some(default),
+            Self::After(secs) => Some(std::time::Duration::from_secs(secs.into())),
+            Self::Never => None,
+        }
+    }
+
+    /// データベースに入れる値。NULL は既定、0 は止めない。
+    pub fn to_column(self) -> Option<u32> {
+        match self {
+            Self::Default => None,
+            Self::After(secs) => Some(secs),
+            Self::Never => Some(0),
+        }
+    }
+
+    pub fn from_column(value: Option<u32>) -> Self {
+        match value {
+            None => Self::Default,
+            Some(0) => Self::Never,
+            Some(secs) => Self::After(secs),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub id: i64,
@@ -166,6 +292,8 @@ pub struct Workspace {
     pub name: String,
     pub root_mode: RootMode,
     pub disks: DiskSizes,
+    pub machine: MachineSize,
+    pub idle_stop: IdleStop,
 }
 
 impl Workspace {
@@ -283,6 +411,8 @@ mod tests {
                 name: r.name,
                 root_mode: RootMode::Ephemeral,
                 disks: DiskSizes::default(),
+                machine: MachineSize::default(),
+                idle_stop: IdleStop::Default,
             }
         };
         assert_eq!(ws("default").hostname(), "default");
@@ -337,5 +467,40 @@ mod tests {
             .check()
             .is_err()
         );
+    }
+
+    #[test]
+    fn machines_fit_firecracker() {
+        let config = MachineConfig::default();
+        config.check().unwrap();
+        let size = |vcpus, memory_mib| MachineSize { vcpus, memory_mib };
+        // 書かなかったほうは変えない。
+        let changed = config
+            .validate_change(size(Some(2), None), size(None, Some(16384)))
+            .unwrap();
+        assert_eq!(changed, size(Some(2), Some(16384)));
+        assert_eq!(config.vcpus(MachineSize::default()), 4);
+        assert_eq!(config.memory_mib(MachineSize::default()), 4096);
+        // 小さくもできる。
+        config.validate(size(Some(1), Some(512))).unwrap();
+        config.validate(size(Some(32), None)).unwrap();
+        assert!(config.validate(size(Some(0), None)).is_err());
+        assert!(config.validate(size(Some(33), None)).is_err());
+        assert!(config.validate(size(None, Some(511))).is_err());
+        assert!(MachineConfig { vcpus: 0, ..config }.check().is_err());
+    }
+
+    #[test]
+    fn idle_stop_round_trips_through_the_column() {
+        for idle in [IdleStop::Default, IdleStop::After(7200), IdleStop::Never] {
+            assert_eq!(IdleStop::from_column(idle.to_column()), idle);
+        }
+        let default = std::time::Duration::from_secs(1800);
+        assert_eq!(IdleStop::Default.timeout(default), Some(default));
+        assert_eq!(
+            IdleStop::After(60).timeout(default),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(IdleStop::Never.timeout(default), None);
     }
 }

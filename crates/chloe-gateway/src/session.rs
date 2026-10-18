@@ -14,7 +14,9 @@ use chloe_agent_proto::{
     AgentMessage, ClientMessage, ConnectRequest, Connection as AgentConnection, ExecRequest,
     PROTOCOL_VERSION, TtyRequest, WindowSize,
 };
-use chloe_controller::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
+use chloe_controller::workspace::{
+    DiskSizes, IdleStop, MachineSize, RootMode, Workspace, WorkspaceRef,
+};
 use chloe_controller::{Controller, Error as ControllerError};
 use chloe_github::{DeviceCode, GitHubApp, UserToken};
 use chloe_secrets::Owner;
@@ -66,7 +68,14 @@ impl Shared {
             bail!("no such workspace: {target} (create it with `chloe ws create {target}`)");
         }
         match store
-            .create(&target, RootMode::Ephemeral, DiskSizes::default(), login)
+            .create(
+                &target,
+                RootMode::Ephemeral,
+                DiskSizes::default(),
+                MachineSize::default(),
+                IdleStop::Default,
+                login,
+            )
             .await
         {
             Ok(ws) => Ok(ws),
