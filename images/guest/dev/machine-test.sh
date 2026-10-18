@@ -69,7 +69,7 @@ as_alice() { ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 "$@"; }
 # ワークスペースにつなぐ。引数: ワークスペースの名前、コマンド
 in_ws() { local ws="$1"; shift; ssh "${ssh_opts[@]}" -i "$work/alice" "alice+$ws@127.0.0.1" "$@"; }
 # ワークスペース名 → ランナーの識別子 (作った順)。
-key_of() { case "$1" in big) echo ws-1 ;; small) echo ws-2 ;; esac; }
+key_of() { case "$1" in big) echo ws-1 ;; small) echo ws-2 ;; tiny) echo ws-3 ;; esac; }
 running() {
     local container="$prefix$(key_of "$1")"
     [ -n "$(docker ps -q --filter "name=^$container\$")" ] && echo running || echo stopped
@@ -97,6 +97,11 @@ check machine-big "matches" machine_is big 3 2700 3072
 check machine-default "matches" machine_is small 2 1700 2048
 check reject-cpus "between 1 and 32" as_alice chloe ws machine big --cpus 33
 check reject-memory "at least 512 MiB" as_alice chloe ws machine big --memory 256M
+# 受け付けるいちばん小さいメモリでも起動する。
+check create-tiny "created tiny" as_alice chloe ws create tiny --cpus 1 --memory 512M
+check machine-tiny "matches" machine_is tiny 1 380 512
+wait_until 60 in_ws tiny 'systemctl is-active --quiet docker' || true
+check docker-tiny "active" in_ws tiny 'systemctl is-active docker'
 
 section "resize from the next start"
 check resize "4 vCPUs and 2G of memory from the next start" as_alice chloe ws machine big --cpus 4 --memory 2G
