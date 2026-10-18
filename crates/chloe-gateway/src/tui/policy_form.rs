@@ -1,7 +1,11 @@
-//! Organization と team の設定のフォーム。`chloe policy set` に渡す TOML と同じ形
-//! ([`PolicyLayer`]) にする。
+//! 規則と設定のフォーム。`chloe policy set` に渡す TOML と同じ形 ([`PolicyLayer`]) にする。
+//!
+//! 規則は Rules タブで、スコープ (個人、Organization、team、ワークスペース) ごとに編集する
+//! ([`rules_form`])。Settings タブは、規則のほか (ルートの扱いとトークンの範囲) を編集する
+//! ([`form`])。
 
 use chloe_controller::runner::PolicyLayer;
+use chloe_policy::PathRuleConfig;
 use serde_json::{Map, Value, json};
 
 use super::form::{Field, Form, RowKind};
@@ -10,17 +14,37 @@ const INHERIT: &str = "(not set)";
 const ALL: &str = "all";
 const LISTED: &str = "listed";
 
-/// 設定のフォーム。`inherited` は上の層 (team なら Organization) の名前と設定。
-pub fn form(owner: &str, layer: Option<&PolicyLayer>, inherited: &[(String, PolicyLayer)]) -> Form {
+/// スコープ自身の規則のフォーム。
+pub fn rules_form(scope: &str, rules: &[PathRuleConfig]) -> Form {
+    let mut form = Form::new(
+        format!("Rules of {scope}"),
+        vec![
+            Field::note("Scope", scope),
+            Field::rows("rules", "Rules", RULE_ROW, vec![]).help(
+                "Allow or deny by host, method and path. The upper layers' rules are checked first; \
+                 requests no rule matches are blocked.",
+            ),
+        ],
+    );
+    if let Ok(json) = serde_json::to_value(rules) {
+        fill_rules(&mut form, &json);
+    }
+    form
+}
+
+/// 設定のフォーム。`inherited` は上の層 (team なら Organization) の名前と設定。個人の設定
+/// (`personal`) には、トークンの範囲の欄を出さない。
+pub fn form(
+    owner: &str,
+    personal: bool,
+    layer: Option<&PolicyLayer>,
+    inherited: &[(String, PolicyLayer)],
+) -> Form {
     let mut fields = vec![Field::note("Owner", owner)];
     for (name, upper) in inherited {
         fields.push(Field::note(format!("From {name}").as_str(), summary(upper)));
     }
-    fields.extend([
-        Field::rows("rules", "Rules", RULE_ROW, vec![]).help(
-            "Allow or deny by host, method and path. The upper layers' rules are checked first; \
-             requests no rule matches are blocked.",
-        ),
+    fields.push(
         Field::choice(
             "root",
             "Root default",
@@ -28,15 +52,19 @@ pub fn form(owner: &str, layer: Option<&PolicyLayer>, inherited: &[(String, Poli
             INHERIT,
         )
         .help("Whether new workspaces keep changes to the root file system."),
-        Field::choice("repos", "GitHub repos", &[ALL, LISTED], ALL)
-            .help("Repositories the installation token of shared workspaces can use."),
-        Field::text("repositories", "Repositories", "")
-            .shown_when("repos", LISTED)
-            .help("Repository names without the organization, separated by commas."),
-        Field::rows("permissions", "GitHub perms", PERMISSION_ROW, vec![]).help(
-            "Narrow the token's permissions (e.g. contents = read). None means all of the app's.",
-        ),
-    ]);
+    );
+    if !personal {
+        fields.extend([
+            Field::choice("repos", "GitHub repos", &[ALL, LISTED], ALL)
+                .help("Repositories the installation token of shared workspaces can use."),
+            Field::text("repositories", "Repositories", "")
+                .shown_when("repos", LISTED)
+                .help("Repository names without the organization, separated by commas."),
+            Field::rows("permissions", "GitHub perms", PERMISSION_ROW, vec![]).help(
+                "Narrow the token's permissions (e.g. contents = read). None means all of the app's.",
+            ),
+        ]);
+    }
     let mut form = Form::new(format!("Settings of {owner}"), fields);
     if let Some(layer) = layer
         && let Ok(json) = serde_json::to_value(layer)
@@ -98,9 +126,6 @@ fn permission_row(name: &str, level: &str) -> Form {
 /// 上の層の設定を一行にする。
 fn summary(layer: &PolicyLayer) -> String {
     let mut parts = Vec::new();
-    if !layer.rules.is_empty() {
-        parts.push(format!("{} rule(s)", layer.rules.len()));
-    }
     if let Some(root) = layer.root {
         parts.push(format!("root {}", root.as_str()));
     }
@@ -114,17 +139,19 @@ fn summary(layer: &PolicyLayer) -> String {
     }
 }
 
-fn fill(form: &mut Form, json: &Value) {
-    let strings = |v: &Value| -> Vec<String> {
-        v.as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let rules = json["rules"]
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 規則の一覧 (JSON の配列) を、規則の欄の行にする。
+fn fill_rules(form: &mut Form, rules: &Value) {
+    let rows = rules
         .as_array()
         .into_iter()
         .flatten()
@@ -138,7 +165,10 @@ fn fill(form: &mut Form, json: &Value) {
             )
         })
         .collect();
-    set_rows(form, "rules", rules);
+    set_rows(form, "rules", rows);
+}
+
+fn fill(form: &mut Form, json: &Value) {
     if let Some(root) = json["root"].as_str() {
         form.set_choice("root", root);
     }
@@ -163,8 +193,8 @@ fn set_rows(form: &mut Form, key: &str, rows: Vec<Form>) {
     }
 }
 
-pub fn to_layer(form: &Form) -> Result<PolicyLayer, String> {
-    let mut json = Map::new();
+/// 規則のフォームの規則。
+pub fn to_rules(form: &Form) -> Result<Vec<PathRuleConfig>, String> {
     let mut rules = Vec::new();
     for row in form.rows("rules") {
         let hosts = row.list("hosts");
@@ -190,7 +220,12 @@ pub fn to_layer(form: &Form) -> Result<PolicyLayer, String> {
         rule.insert("action".into(), json!(row.choice("action")));
         rules.push(Value::Object(rule));
     }
-    json.insert("rules".into(), Value::Array(rules));
+    serde_json::from_value(Value::Array(rules)).map_err(|e| format!("invalid rules: {e}"))
+}
+
+/// 設定のフォームの設定。規則は持たない (保存するときに、今の規則を残す)。
+pub fn to_layer(form: &Form) -> Result<PolicyLayer, String> {
+    let mut json = Map::new();
     let root = form.choice("root");
     if root != INHERIT {
         json.insert("root".into(), json!(root));
@@ -229,6 +264,29 @@ mod tests {
         let layer: PolicyLayer = toml::from_str(
             r#"
             root = "persistent"
+            [github]
+            repositories = ["tools"]
+            permissions = { contents = "read" }
+            "#,
+        )
+        .unwrap();
+        let form = form("acme", false, Some(&layer), &[]);
+        assert_eq!(form.choice("repos"), LISTED);
+        assert_eq!(to_layer(&form).unwrap(), layer);
+        assert_eq!(
+            to_layer(&super::form("acme", false, None, &[])).unwrap(),
+            PolicyLayer::default()
+        );
+        // 個人の設定には、トークンの範囲の欄がない。
+        let personal = super::form("alice", true, None, &[]);
+        assert!(!personal.fields.iter().any(|f| f.key == "repos"));
+        assert_eq!(to_layer(&personal).unwrap(), PolicyLayer::default());
+    }
+
+    #[test]
+    fn round_trips_rules() {
+        let layer: PolicyLayer = toml::from_str(
+            r#"
             [[rules]]
             hosts = ["example.org", "pypi.org"]
             action = "allow"
@@ -238,19 +296,12 @@ mod tests {
             methods = ["POST"]
             paths = ["/*/git-receive-pack"]
             action = "deny"
-            [github]
-            repositories = ["tools"]
-            permissions = { contents = "read" }
             "#,
         )
         .unwrap();
-        let form = form("acme", Some(&layer), &[]);
-        assert_eq!(form.choice("repos"), LISTED);
-        assert_eq!(to_layer(&form).unwrap(), layer);
-        assert_eq!(
-            to_layer(&super::form("acme", None, &[])).unwrap(),
-            PolicyLayer::default()
-        );
+        let form = rules_form("acme", &layer.rules);
+        assert_eq!(to_rules(&form).unwrap(), layer.rules);
+        assert!(to_rules(&rules_form("acme", &[])).unwrap().is_empty());
     }
 
     #[test]
@@ -259,14 +310,17 @@ mod tests {
             root: Some(chloe_controller::workspace::RootMode::Persistent),
             ..Default::default()
         };
-        let form = form("acme/dev", None, &[("acme".into(), org)]);
+        let form = form("acme/dev", false, None, &[("acme".into(), org)]);
         assert!(form.fields.iter().any(|f| f.label == "From acme"));
     }
 
     #[test]
     fn rejects_incomplete_rows() {
-        let mut form = form("acme", None, &[]);
+        let mut form = form("acme", false, None, &[]);
         form.set_choice("repos", LISTED);
         assert!(to_layer(&form).is_err());
+        let mut rules = rules_form("acme", &[]);
+        set_rows(&mut rules, "rules", vec![(RULE_ROW.make)()]);
+        assert!(to_rules(&rules).is_err());
     }
 }

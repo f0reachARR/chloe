@@ -158,7 +158,10 @@ async fn perform(
                 let ws = ops::create_workspace(shared, login, &name, root, disks)
                     .await
                     .map_err(shown)?;
-                done(format!("created {}", ws.name), vec![Action::LoadWorkspaces])
+                done(
+                    format!("created {}", ws.name),
+                    vec![Action::LoadWorkspaces, Action::LoadRuleScopes],
+                )
             }
             Action::SetRoot { name, root } => {
                 let ws = ops::set_root(shared, login, &name, root)
@@ -204,7 +207,7 @@ async fn perform(
                 let kept = if disks { "" } else { " (its disks are kept)" };
                 done(
                     format!("removed {}{kept}", ws.display_name()),
-                    vec![Action::LoadWorkspaces],
+                    vec![Action::LoadWorkspaces, Action::LoadRuleScopes],
                 )
             }
             Action::LoadOwners => {
@@ -277,8 +280,8 @@ async fn perform(
                     inherited,
                 }
             }
-            Action::SavePolicy { owner, layer } => {
-                let refreshed = ops::set_policy(shared, login, &owner, &layer)
+            Action::SaveSettings { owner, settings } => {
+                let refreshed = ops::set_owner_settings(shared, login, &owner, settings)
                     .await
                     .map_err(shown)?;
                 done(
@@ -289,16 +292,46 @@ async fn perform(
                     vec![],
                 )
             }
-            Action::RemovePolicy(owner) => {
-                let refreshed = ops::remove_policy(shared, login, &owner)
+            Action::ResetSettings(owner) => {
+                let refreshed = ops::set_owner_settings(shared, login, &owner, Default::default())
                     .await
                     .map_err(shown)?;
                 done(
                     format!(
-                        "removed the settings of {} ({refreshed} running workspace(s) updated)",
+                        "reset the settings of {} ({refreshed} running workspace(s) updated)",
                         ops::owner_arg(&owner)
                     ),
                     vec![],
+                )
+            }
+            Action::LoadRuleScopes => {
+                Outcome::RuleScopes(ops::rule_scopes(shared, login).await.map_err(shown)?)
+            }
+            Action::ShowRules(scope) => {
+                Outcome::Rules(ops::show_rules(shared, login, scope).await.map_err(shown)?)
+            }
+            Action::SaveRules { scope, rules } => {
+                let refreshed = ops::set_rules(shared, login, &scope, rules)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!(
+                        "saved the rules of {} ({refreshed} running workspace(s) updated)",
+                        scope.label()
+                    ),
+                    vec![Action::ShowRules(scope)],
+                )
+            }
+            Action::ClearRules(scope) => {
+                let refreshed = ops::set_rules(shared, login, &scope, vec![])
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!(
+                        "removed the rules of {} ({refreshed} running workspace(s) updated)",
+                        scope.label()
+                    ),
+                    vec![Action::ShowRules(scope)],
                 )
             }
             Action::LoadTokens => {

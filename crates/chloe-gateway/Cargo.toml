@@ -15,6 +15,7 @@ chloe-agent-proto.workspace = true
 chloe-controller.workspace = true
 chloe-github.workspace = true
 chloe-mtls.workspace = true
+chloe-policy.workspace = true
 chloe-secrets.workspace = true
 
 anyhow.workspace = true

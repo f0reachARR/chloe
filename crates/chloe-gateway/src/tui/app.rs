@@ -4,9 +4,10 @@
 //! [`Outcome`] として受け取る。操作そのものは [`super::perform`] が行う。
 
 use chloe_controller::catalog::SecretInput;
-use chloe_controller::runner::PolicyLayer;
+use chloe_controller::runner::{PolicyLayer, RuleOrigin};
 use chloe_controller::store::{ApiToken, SshKey};
 use chloe_controller::workspace::{DiskSizes, RootMode};
+use chloe_policy::{Action as RuleAction, PathRuleConfig};
 use chloe_secrets::Owner;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -17,7 +18,7 @@ use terminput::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::form::{Field, Form, FormEvent, RowKind};
 use super::{policy_form, secret_form};
-use crate::ops::{SecretView, WorkspaceInfo, owner_arg};
+use crate::ops::{RuleScope, RulesView, ScopeEntry, SecretView, WorkspaceInfo, owner_arg};
 
 /// ゲートウェイに頼む操作。シークレットの値を含むので、Debug で書き出さない。
 #[derive(Clone)]
@@ -60,11 +61,20 @@ pub enum Action {
         name: String,
     },
     ShowPolicy(Owner),
-    SavePolicy {
+    /// 持ち主の設定のうち、規則のほかを置き換える (規則は残す)。
+    SaveSettings {
         owner: Owner,
-        layer: PolicyLayer,
+        settings: PolicyLayer,
     },
-    RemovePolicy(Owner),
+    /// 持ち主の設定のうち、規則のほかを消す (規則は残す)。
+    ResetSettings(Owner),
+    LoadRuleScopes,
+    ShowRules(RuleScope),
+    SaveRules {
+        scope: RuleScope,
+        rules: Vec<PathRuleConfig>,
+    },
+    ClearRules(RuleScope),
     LoadTokens,
     CreateToken {
         name: String,
@@ -89,8 +99,9 @@ impl Action {
             Self::RemoveWorkspace { .. } => "ws rm",
             Self::SaveSecret { .. } => "secret set",
             Self::RemoveSecret { .. } => "secret rm",
-            Self::SavePolicy { .. } => "policy set",
-            Self::RemovePolicy(_) => "policy rm",
+            Self::SaveSettings { .. } | Self::ResetSettings(_) => "policy set",
+            Self::SaveRules { .. } => "rules set",
+            Self::ClearRules(_) => "rules rm",
             Self::CreateToken { .. } => "token create",
             Self::RevokeToken(_) => "token revoke",
             Self::RemoveKey(_) => "key rm",
@@ -118,6 +129,8 @@ pub enum Outcome {
         layer: Option<PolicyLayer>,
         inherited: Vec<(String, PolicyLayer)>,
     },
+    RuleScopes(Vec<ScopeEntry>),
+    Rules(RulesView),
     Tokens(Vec<ApiToken>),
     TokenCreated {
         id: i64,
@@ -143,15 +156,17 @@ pub enum Outcome {
 pub enum Tab {
     Workspaces,
     Secrets,
+    Rules,
     Settings,
     Tokens,
     Keys,
     GitHub,
 }
 
-const TABS: [Tab; 6] = [
+const TABS: [Tab; 7] = [
     Tab::Workspaces,
     Tab::Secrets,
+    Tab::Rules,
     Tab::Settings,
     Tab::Tokens,
     Tab::Keys,
@@ -163,7 +178,8 @@ impl Tab {
         match self {
             Self::Workspaces => "Workspaces",
             Self::Secrets => "Secrets",
-            Self::Settings => "Org settings",
+            Self::Rules => "Rules",
+            Self::Settings => "Settings",
             Self::Tokens => "API tokens",
             Self::Keys => "SSH keys",
             Self::GitHub => "GitHub",
@@ -172,9 +188,10 @@ impl Tab {
 
     fn hints(self) -> &'static str {
         match self {
-            Self::Workspaces => "n new  r switch root  g disks  s stop  d delete",
+            Self::Workspaces => "n new  r switch root  g disks  u rules  s stop  d delete",
             Self::Secrets => "o owner  n new  Enter edit  d delete",
-            Self::Settings => "Enter edit  d delete",
+            Self::Rules => "Enter edit rules  d delete rules",
+            Self::Settings => "Enter edit  d reset",
             Self::Tokens => "n new  d revoke",
             Self::Keys => "d remove",
             Self::GitHub => "l sign in again  o sign out",
@@ -199,6 +216,7 @@ enum Purpose {
         builtin: bool,
     },
     Policy(Owner),
+    Rules(RuleScope),
     NewToken,
     /// 下の行の一覧の、この番号の行。
     Row(usize),
@@ -248,6 +266,9 @@ pub struct App {
     owners: Vec<Owner>,
     secret_owner: usize,
     secrets: Vec<String>,
+    /// Rules タブのスコープの一覧と、選んでいるスコープで効く規則。
+    scopes: Vec<ScopeEntry>,
+    rules: Option<RulesView>,
     tokens: Vec<ApiToken>,
     keys: Vec<SshKey>,
     github: String,
@@ -268,6 +289,8 @@ impl App {
             owners: Vec::new(),
             secret_owner: 0,
             secrets: Vec::new(),
+            scopes: Vec::new(),
+            rules: None,
             tokens: Vec::new(),
             keys: Vec::new(),
             github: String::new(),
@@ -281,6 +304,7 @@ impl App {
         self.track(vec![
             Action::LoadWorkspaces,
             Action::LoadOwners,
+            Action::LoadRuleScopes,
             Action::LoadTokens,
             Action::LoadKeys,
             Action::GitHubStatus,
@@ -308,19 +332,33 @@ impl App {
         match tab {
             Tab::Workspaces => self.workspaces.len(),
             Tab::Secrets => self.secrets.len(),
-            Tab::Settings => self.setting_owners().len(),
+            Tab::Rules => self.scopes.len(),
+            Tab::Settings => self.owners.len(),
             Tab::Tokens => self.tokens.len(),
             Tab::Keys => self.keys.len(),
             Tab::GitHub => 0,
         }
     }
 
-    /// 設定を持てる持ち主 (Organization と team)。
-    fn setting_owners(&self) -> Vec<&Owner> {
-        self.owners
-            .iter()
-            .filter(|o| !matches!(o, Owner::User(_)))
-            .collect()
+    /// Rules タブで選んでいるスコープ。
+    fn selected_scope(&self) -> Option<&ScopeEntry> {
+        self.scopes.get(self.selected[tab_index(Tab::Rules)])
+    }
+
+    /// 選んでいるスコープで効く規則を、まだ読んでいなければ読む。
+    fn show_selected_rules(&self) -> Vec<Action> {
+        match self.selected_scope() {
+            Some(entry) if self.rules.as_ref().map(|r| &r.scope) != Some(&entry.scope) => {
+                vec![Action::ShowRules(entry.scope.clone())]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// 読んである、選んでいるスコープの規則。
+    fn selected_rules(&self) -> Option<&RulesView> {
+        let entry = self.selected_scope()?;
+        self.rules.as_ref().filter(|r| r.scope == entry.scope)
     }
 
     fn secret_owner(&self) -> Option<&Owner> {
@@ -334,6 +372,7 @@ impl App {
                 Some(owner) => vec![Action::LoadSecrets(owner.clone())],
                 None => vec![Action::LoadOwners],
             },
+            Tab::Rules => vec![Action::LoadRuleScopes],
             Tab::Settings => vec![Action::LoadOwners],
             Tab::Tokens => vec![Action::LoadTokens],
             Tab::Keys => vec![Action::LoadKeys],
@@ -361,6 +400,16 @@ impl App {
     }
 
     fn handle_main_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let before = (self.tab, self.selection());
+        let actions = self.handle_move_key(key);
+        // Rules タブでスコープを選んだら、そのスコープで効く規則を読む。
+        if self.current() == Tab::Rules && (self.tab, self.selection()) != before {
+            return self.show_selected_rules();
+        }
+        actions
+    }
+
+    fn handle_move_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             // Esc はフォームなどを閉じるのに使うので、続けて押しても終わらないようにする。
@@ -368,7 +417,7 @@ impl App {
             KeyCode::Tab if shift => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
             KeyCode::Left => self.tab = (self.tab + TABS.len() - 1) % TABS.len(),
             KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % TABS.len(),
-            KeyCode::Char(c @ '1'..='6') => self.tab = c as usize - '1' as usize,
+            KeyCode::Char(c @ '1'..='7') => self.tab = c as usize - '1' as usize,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected[self.tab] = self.selection().saturating_sub(1)
             }
@@ -439,6 +488,22 @@ impl App {
                     });
                 }
             }
+            (Tab::Workspaces, KeyCode::Char('u')) => {
+                let Some(ws) = self.workspaces.get(selected) else {
+                    return vec![];
+                };
+                let found = self.scopes.iter().position(
+                    |e| matches!(&e.scope, RuleScope::Workspace(w) if w.display_name() == ws.name),
+                );
+                match found {
+                    Some(index) => {
+                        self.tab = tab_index(Tab::Rules);
+                        self.selected[self.tab] = index;
+                        return self.show_selected_rules();
+                    }
+                    None => self.status = Some((format!("no rules found for {}", ws.name), true)),
+                }
+            }
             (Tab::Workspaces, KeyCode::Char('d')) => {
                 if let Some(ws) = self.workspaces.get(selected) {
                     self.modals.push(Modal::RemoveWorkspace {
@@ -503,16 +568,47 @@ impl App {
                     });
                 }
             }
+            (Tab::Rules, KeyCode::Enter | KeyCode::Char('e')) => {
+                let Some(view) = self.selected_rules() else {
+                    return self.show_selected_rules();
+                };
+                if !view.editable {
+                    self.status = Some((
+                        format!("you cannot change the rules of {}", view.scope.label()),
+                        true,
+                    ));
+                    return vec![];
+                }
+                self.modals.push(Modal::Form {
+                    form: policy_form::rules_form(&view.scope.label(), &view.own),
+                    purpose: Purpose::Rules(view.scope.clone()),
+                    saving: false,
+                });
+            }
+            (Tab::Rules, KeyCode::Char('d')) => {
+                if let Some(view) = self.selected_rules()
+                    && view.editable
+                    && !view.own.is_empty()
+                {
+                    self.modals.push(Modal::Confirm {
+                        message: format!("Delete the rules of {}?", view.scope.label()),
+                        action: Action::ClearRules(view.scope.clone()),
+                    });
+                }
+            }
             (Tab::Settings, KeyCode::Enter | KeyCode::Char('e')) => {
-                if let Some(owner) = self.setting_owners().get(selected) {
-                    return vec![Action::ShowPolicy((*owner).clone())];
+                if let Some(owner) = self.owners.get(selected) {
+                    return vec![Action::ShowPolicy(owner.clone())];
                 }
             }
             (Tab::Settings, KeyCode::Char('d')) => {
-                if let Some(owner) = self.setting_owners().get(selected).map(|o| (*o).clone()) {
+                if let Some(owner) = self.owners.get(selected).cloned() {
                     self.modals.push(Modal::Confirm {
-                        message: format!("Delete the settings of {}?", owner_arg(&owner)),
-                        action: Action::RemovePolicy(owner),
+                        message: format!(
+                            "Reset the settings of {}? Its rules are kept.",
+                            owner_arg(&owner)
+                        ),
+                        action: Action::ResetSettings(owner),
                     });
                 }
             }
@@ -766,10 +862,31 @@ impl App {
                 layer,
                 inherited,
             } => self.modals.push(Modal::Form {
-                form: policy_form::form(&owner_arg(&owner), layer.as_ref(), &inherited),
+                form: policy_form::form(
+                    &owner_arg(&owner),
+                    matches!(owner, Owner::User(_)),
+                    layer.as_ref(),
+                    &inherited,
+                ),
                 purpose: Purpose::Policy(owner),
                 saving: false,
             }),
+            Outcome::RuleScopes(scopes) => {
+                let current = self.selected_scope().map(|e| e.scope.clone());
+                let index = current
+                    .and_then(|c| scopes.iter().position(|e| e.scope == c))
+                    .unwrap_or(0);
+                self.scopes = scopes;
+                self.selected[tab_index(Tab::Rules)] = index;
+                // 一覧を読み直したら、規則も読み直す (変えられるかが変わることがある)。
+                self.rules = None;
+                actions = self.show_selected_rules();
+            }
+            Outcome::Rules(view) => {
+                if self.selected_scope().map(|e| &e.scope) == Some(&view.scope) {
+                    self.rules = Some(view);
+                }
+            }
             Outcome::Tokens(tokens) => self.tokens = tokens,
             Outcome::TokenCreated { id, name, token } => {
                 self.close_saving_form();
@@ -913,10 +1030,14 @@ impl App {
                 render_list(frame, list_area, items, self.selection());
                 return;
             }
+            Tab::Rules => {
+                self.render_rules(frame, inner);
+                return;
+            }
             Tab::Settings => self
-                .setting_owners()
+                .owners
                 .iter()
-                .map(|o| ListItem::new(owner_arg(o)))
+                .map(|o| ListItem::new(format!("{:<32} {}", owner_arg(o), owner_kind(o))))
                 .collect(),
             Tab::Tokens => self
                 .tokens
@@ -959,6 +1080,117 @@ impl App {
         };
         render_list(frame, inner, items, self.selection());
     }
+}
+
+impl App {
+    /// Rules タブ。左にスコープの一覧、右に選んでいるスコープで効く規則を評価する順に出す。
+    fn render_rules(&self, frame: &mut Frame, area: Rect) {
+        let [list_area, rules_area] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(area);
+        let items: Vec<ListItem> = self
+            .scopes
+            .iter()
+            .map(|entry| {
+                let (depth, kind) = scope_shape(&entry.scope);
+                let access = if entry.editable { "edit" } else { "view" };
+                let name = format!("{}{}", "  ".repeat(depth), entry.scope.label());
+                ListItem::new(format!("{name:<26} {kind:<8} {access}"))
+            })
+            .collect();
+        render_list(frame, list_area, items, self.selection());
+        let block = Block::bordered().title(match self.selected_scope() {
+            Some(entry) => format!(" Rules applied to {} ", entry.scope.label()),
+            None => " Rules ".to_string(),
+        });
+        let inner = block.inner(rules_area);
+        frame.render_widget(block, rules_area);
+        let Some(view) = self.selected_rules() else {
+            frame.render_widget(Paragraph::new("…".dark_gray()), inner);
+            return;
+        };
+        let mut lines: Vec<Line> = view
+            .rules
+            .iter()
+            .map(|(origin, rule)| {
+                let own = is_own(&view.scope, origin);
+                let text = format!(
+                    "{} {:<14} {}",
+                    if own { "▶" } else { " " },
+                    origin_label(origin),
+                    describe_rule(rule)
+                );
+                if own {
+                    Line::from(text.bold())
+                } else {
+                    Line::from(text)
+                }
+            })
+            .collect();
+        lines.push(Line::from("  anything else is blocked".dark_gray()));
+        if !view.editable {
+            lines.push(Line::default());
+            lines.push(Line::from("  (view only)".dark_gray()));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+}
+
+fn tab_index(tab: Tab) -> usize {
+    TABS.iter().position(|t| *t == tab).unwrap_or(0)
+}
+
+fn owner_kind(owner: &Owner) -> &'static str {
+    match owner {
+        Owner::User(_) => "personal",
+        Owner::Org(_) => "org",
+        Owner::Team { .. } => "team",
+    }
+}
+
+/// スコープの一覧での字下げと種類。ワークスペースは持ち主の下に、team は Organization の下に置く。
+fn scope_shape(scope: &RuleScope) -> (usize, &'static str) {
+    let depth = |owner: &Owner| usize::from(matches!(owner, Owner::Team { .. }));
+    match scope {
+        RuleScope::Gateway => (0, "config"),
+        RuleScope::Owner(owner) => (depth(owner), owner_kind(owner)),
+        RuleScope::Workspace(ws) => (depth(&ws.owner) + 1, "ws"),
+    }
+}
+
+/// 規則がスコープ自身のものか。
+fn is_own(scope: &RuleScope, origin: &RuleOrigin) -> bool {
+    match (scope, origin) {
+        (RuleScope::Gateway, RuleOrigin::Gateway) => true,
+        (RuleScope::Owner(owner), RuleOrigin::Owner(from)) => owner == from,
+        (RuleScope::Workspace(_), RuleOrigin::Workspace) => true,
+        _ => false,
+    }
+}
+
+fn origin_label(origin: &RuleOrigin) -> String {
+    match origin {
+        RuleOrigin::Gateway => "gateway".into(),
+        RuleOrigin::Owner(owner) => owner_arg(owner),
+        RuleOrigin::Workspace => "workspace".into(),
+        RuleOrigin::Secret => "(secrets)".into(),
+    }
+}
+
+fn describe_rule(rule: &PathRuleConfig) -> String {
+    let action = match rule.action {
+        RuleAction::Allow => "allow",
+        RuleAction::Deny => "deny",
+        RuleAction::Passthrough => "pass",
+    };
+    let mut text = format!("{action:<5} {}", rule.hosts.join(", "));
+    if !rule.methods.is_empty() {
+        text.push_str(&format!(" {}", rule.methods.join(",")));
+    }
+    if !rule.paths.is_empty() {
+        text.push_str(&format!(" {}", rule.paths.join(", ")));
+    }
+    text
 }
 
 /// ディスクの大きさの欄。空なら `None`。
@@ -1031,9 +1263,13 @@ fn submit(form: &Form, purpose: &Purpose) -> Result<Action, String> {
                 keep_values: existing.is_some(),
             })
         }
-        Purpose::Policy(owner) => Ok(Action::SavePolicy {
+        Purpose::Policy(owner) => Ok(Action::SaveSettings {
             owner: owner.clone(),
-            layer: policy_form::to_layer(form)?,
+            settings: policy_form::to_layer(form)?,
+        }),
+        Purpose::Rules(scope) => Ok(Action::SaveRules {
+            scope: scope.clone(),
+            rules: policy_form::to_rules(form)?,
         }),
         Purpose::NewToken => {
             let name = form.text("name");
@@ -1209,7 +1445,7 @@ mod tests {
     fn app() -> App {
         let mut app = App::new("alice");
         let actions = app.start();
-        assert_eq!(actions.len(), 5);
+        assert_eq!(actions.len(), 6);
         app.apply(Outcome::Workspaces(vec![WorkspaceInfo {
             name: "default".into(),
             root: RootMode::Ephemeral,
@@ -1226,6 +1462,9 @@ mod tests {
             owner: Owner::User("alice".into()),
             names: vec!["openai_api_key".into()],
         });
+        let more = app.apply(Outcome::RuleScopes(scopes()));
+        // 一覧を読んだら、先頭のスコープ (gateway) の規則を読む。
+        assert!(matches!(&more[..], [Action::ShowRules(RuleScope::Gateway)]));
         app.apply(Outcome::Tokens(vec![]));
         app.apply(Outcome::Keys(vec![]));
         app.apply(Outcome::GitHub("signed in".into()));
@@ -1241,7 +1480,7 @@ mod tests {
         // 持ち主を切り替えると、その持ち主のシークレットを読む。
         let actions = app.handle_key(key(KeyCode::Char('o')));
         assert!(matches!(&actions[..], [Action::LoadSecrets(Owner::Org(o))] if o == "acme"));
-        app.handle_key(key(KeyCode::Char('6')));
+        app.handle_key(key(KeyCode::Char('7')));
         assert!(screen(&app).contains("signed in"));
         app.handle_key(key(KeyCode::Char('q')));
         assert!(app.quit);
@@ -1355,6 +1594,126 @@ mod tests {
             &actions[..],
             [Action::RemoveWorkspace { name, disks: true }] if name == "default"
         ));
+    }
+
+    fn workspace(id: i64, owner: Owner, name: &str) -> chloe_controller::workspace::Workspace {
+        chloe_controller::workspace::Workspace {
+            id,
+            owner,
+            name: name.into(),
+            root_mode: RootMode::Ephemeral,
+            disks: DiskSizes::default(),
+        }
+    }
+
+    fn scopes() -> Vec<ScopeEntry> {
+        let acme = Owner::Org("acme".into());
+        [
+            (RuleScope::Gateway, false),
+            (RuleScope::Owner(Owner::User("alice".into())), true),
+            (
+                RuleScope::Workspace(workspace(1, Owner::User("alice".into()), "default")),
+                true,
+            ),
+            (RuleScope::Owner(acme.clone()), false),
+            (RuleScope::Workspace(workspace(2, acme, "web")), true),
+        ]
+        .into_iter()
+        .map(|(scope, editable)| ScopeEntry { scope, editable })
+        .collect()
+    }
+
+    fn rule(host: &str, action: RuleAction) -> PathRuleConfig {
+        PathRuleConfig {
+            name: None,
+            hosts: vec![host.into()],
+            methods: vec![],
+            paths: vec![],
+            action,
+        }
+    }
+
+    #[test]
+    fn edits_rules_of_the_selected_scope() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('3')));
+        // 選んだスコープで効く規則を読む。
+        for _ in 0..4 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        let actions = app.handle_key(key(KeyCode::Up));
+        let [Action::ShowRules(scope @ RuleScope::Owner(Owner::Org(_)))] = &actions[..] else {
+            panic!("expected the rules of acme");
+        };
+        let acme = Owner::Org("acme".into());
+        app.apply(Outcome::Rules(RulesView {
+            scope: scope.clone(),
+            editable: false,
+            rules: vec![
+                (RuleOrigin::Gateway, rule("github.com", RuleAction::Allow)),
+                (
+                    RuleOrigin::Owner(acme.clone()),
+                    rule("example.org", RuleAction::Allow),
+                ),
+            ],
+            own: vec![rule("example.org", RuleAction::Allow)],
+        }));
+        let text = screen(&app);
+        assert!(text.contains("Rules applied to acme"));
+        assert!(text.contains("▶ acme"));
+        assert!(text.contains("anything else is blocked"));
+        // 変えられないスコープでは、フォームを開かない。
+        assert!(app.handle_key(key(KeyCode::Enter)).is_empty());
+        assert!(app.modals.is_empty());
+        assert!(screen(&app).contains("you cannot change the rules of acme"));
+
+        // ワークスペースのスコープで、規則を足して保存する。
+        let actions = app.handle_key(key(KeyCode::Down));
+        let [Action::ShowRules(scope)] = &actions[..] else {
+            panic!("expected the rules of acme/web");
+        };
+        app.apply(Outcome::Rules(RulesView {
+            scope: scope.clone(),
+            editable: true,
+            rules: vec![],
+            own: vec![],
+        }));
+        app.handle_key(key(KeyCode::Enter));
+        let form = form_mut(&mut app);
+        while form.fields[form.focus].key != "rules" {
+            form.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('a')));
+        form_mut(&mut app).handle_key(key(KeyCode::Tab));
+        type_text(form_mut(&mut app), "pypi.org");
+        app.handle_key(ctrl('s'));
+        app.handle_key(key(KeyCode::Esc));
+        let actions = app.handle_key(ctrl('s'));
+        let [Action::SaveRules { scope, rules }] = &actions[..] else {
+            panic!("expected a save");
+        };
+        assert!(matches!(scope, RuleScope::Workspace(ws) if ws.display_name() == "acme/web"));
+        assert_eq!(rules, &[rule("pypi.org", RuleAction::Allow)]);
+    }
+
+    #[test]
+    fn opens_the_rules_of_a_workspace() {
+        let mut app = app();
+        let actions = app.handle_key(key(KeyCode::Char('u')));
+        assert!(matches!(
+            &actions[..],
+            [Action::ShowRules(RuleScope::Workspace(ws))] if ws.name == "default"
+        ));
+        assert_eq!(app.current(), Tab::Rules);
+        // 古い結果 (ほかのスコープのもの) は使わない。
+        app.apply(Outcome::Rules(RulesView {
+            scope: RuleScope::Gateway,
+            editable: false,
+            rules: vec![(RuleOrigin::Gateway, rule("github.com", RuleAction::Allow))],
+            own: vec![],
+        }));
+        assert!(!screen(&app).contains("github.com"));
     }
 
     #[test]

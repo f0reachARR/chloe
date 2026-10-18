@@ -364,9 +364,11 @@ check tui-created "created tui-ws" tui_shows "created tui-ws"
 check tui-created-listed "tui-ws" as alice chloe ws list
 tui_keys '2o'
 check tui-org-secrets "openai_api_key" tui_shows "openai_api_key"
-tui_keys '3\r'
-# 一覧の先頭の acme の設定を開く。
-check tui-org-settings "example.org" tui_shows "example.org"
+tui_keys '3jjjjjjjjjjjj'
+# スコープの一覧の最後は acme のワークスペースなので、Organization の規則が効く。
+check tui-rules "example.org" tui_shows "example.org"
+tui_keys '4\r'
+check tui-settings "Settings of alice" tui_shows "Settings of alice"
 # Esc と q を一度に送ると Alt+q になるので、どこからでも閉じる Ctrl+C で閉じる。
 tui_keys '\x03'
 check tui-exits "1049l" tui_shows "$(printf '\033\\[?1049l')"

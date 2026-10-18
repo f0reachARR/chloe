@@ -4,9 +4,12 @@
 //! 使う。権限の確認はここで行い、結果は型のある値で返す (表示は呼ぶ側が決める)。
 
 use chloe_controller::catalog::{self, SecretInput, SecretSpec};
-use chloe_controller::runner::{PolicyLayer, WorkspacePolicy, most_specific};
+use chloe_controller::runner::{
+    PolicyLayer, RuleOrigin, WorkspacePolicy, label_rules, most_specific,
+};
 use chloe_controller::store::{ApiToken, SshKey};
 use chloe_controller::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
+use chloe_policy::PathRuleConfig;
 use chloe_secrets::{ExposeSecret, Owner};
 use serde::Serialize;
 
@@ -563,6 +566,174 @@ pub async fn remove_workspace_policy(
         )));
     }
     Ok(shared.refresh_workspace(workspace).await? as usize)
+}
+
+/// 規則を置く場所。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleScope {
+    /// ゲートウェイの `[policy]`。設定ファイルで変えるので、見るだけ。
+    Gateway,
+    /// 持ち主 (個人、Organization か team) の設定。
+    Owner(Owner),
+    /// ワークスペースの設定。
+    Workspace(Workspace),
+}
+
+impl RuleScope {
+    /// 画面に出す名前。
+    pub fn label(&self) -> String {
+        match self {
+            Self::Gateway => "gateway".to_string(),
+            Self::Owner(owner) => owner_arg(owner),
+            Self::Workspace(ws) => ws.display_name(),
+        }
+    }
+}
+
+/// 利用者が見られるスコープと、規則を変えられるか。
+#[derive(Debug, Clone)]
+pub struct ScopeEntry {
+    pub scope: RuleScope,
+    pub editable: bool,
+}
+
+/// 利用者が見られるスコープを、gateway、個人、Organization、その team の順に並べる。
+/// それぞれの持ち主のすぐあとに、そのワークスペースを置く。
+pub async fn rule_scopes(shared: &Shared, login: &str) -> Result<Vec<ScopeEntry>> {
+    let mut owners = shared.owners_for(login).await?;
+    owners.sort_by_key(|owner| match owner {
+        Owner::User(_) => (0, String::new(), String::new()),
+        Owner::Org(org) => (1, org.clone(), String::new()),
+        Owner::Team { org, team } => (1, org.clone(), team.clone()),
+    });
+    let workspaces = shared.controller.store().list(&owners).await?;
+    let mut entries = vec![ScopeEntry {
+        scope: RuleScope::Gateway,
+        editable: false,
+    }];
+    for owner in owners {
+        entries.push(ScopeEntry {
+            editable: shared.can_manage_policy(login, &owner).await?,
+            scope: RuleScope::Owner(owner.clone()),
+        });
+        for ws in workspaces.iter().filter(|ws| ws.owner == owner) {
+            entries.push(ScopeEntry {
+                editable: shared.can_manage_workspace_policy(login, ws).await?,
+                scope: RuleScope::Workspace(ws.clone()),
+            });
+        }
+    }
+    Ok(entries)
+}
+
+/// スコープで効く規則と、そのスコープ自身の規則。
+#[derive(Debug, Clone)]
+pub struct RulesView {
+    pub scope: RuleScope,
+    pub editable: bool,
+    /// 評価する順の規則と、その出どころ。
+    pub rules: Vec<(RuleOrigin, PathRuleConfig)>,
+    /// スコープ自身の規則 (編集するもの)。
+    pub own: Vec<PathRuleConfig>,
+}
+
+pub async fn show_rules(shared: &Shared, login: &str, scope: RuleScope) -> Result<RulesView> {
+    let controller = &shared.controller;
+    let base = controller.base_policy();
+    Ok(match &scope {
+        RuleScope::Gateway => RulesView {
+            rules: label_rules(base, &[], &[]),
+            own: base.rules.clone(),
+            editable: false,
+            scope,
+        },
+        RuleScope::Owner(owner) => {
+            let own = show_policy(shared, login, owner)
+                .await?
+                .map(|layer| layer.rules)
+                .unwrap_or_default();
+            RulesView {
+                rules: controller.owner_rules(owner).await?,
+                own,
+                editable: shared.can_manage_policy(login, owner).await?,
+                scope,
+            }
+        }
+        RuleScope::Workspace(ws) => {
+            let (ws, policy) = show_workspace_policy(shared, login, &ws.display_name()).await?;
+            RulesView {
+                rules: controller.workspace_rules(&ws).await?,
+                own: policy.map(|p| p.rules).unwrap_or_default(),
+                editable: shared.can_manage_workspace_policy(login, &ws).await?,
+                scope: RuleScope::Workspace(ws),
+            }
+        }
+    })
+}
+
+/// スコープ自身の規則を置き換える。持ち主の設定では、規則のほか (ルートの扱いとトークンの
+/// 範囲) は残す。規則を空にして何も残らなければ、設定を消す。送ったランナーの数を返す。
+pub async fn set_rules(
+    shared: &Shared,
+    login: &str,
+    scope: &RuleScope,
+    rules: Vec<PathRuleConfig>,
+) -> Result<usize> {
+    let store = shared.controller.store();
+    match scope {
+        RuleScope::Gateway => Err(Error::Invalid(
+            "the gateway's rules are set in its configuration file".to_string(),
+        )),
+        RuleScope::Owner(owner) => {
+            update_policy(shared, login, owner, |layer| layer.rules = rules).await
+        }
+        RuleScope::Workspace(ws) => {
+            let ws = find_workspace(shared, login, &ws.display_name()).await?;
+            if rules.is_empty() {
+                check_workspace_policy_admin(shared, login, &ws).await?;
+                if store.workspace_policy(ws.id).await?.is_none() {
+                    return Ok(0);
+                }
+                return remove_workspace_policy(shared, login, &ws).await;
+            }
+            set_workspace_policy(shared, login, &ws, &WorkspacePolicy { rules }).await
+        }
+    }
+}
+
+/// 持ち主の設定のうち、規則のほか (ルートの扱いとトークンの範囲) を `settings` のものに
+/// 置き換える。規則は残す。
+pub async fn set_owner_settings(
+    shared: &Shared,
+    login: &str,
+    owner: &Owner,
+    settings: PolicyLayer,
+) -> Result<usize> {
+    update_policy(shared, login, owner, |layer| {
+        layer.root = settings.root;
+        layer.github = settings.github;
+    })
+    .await
+}
+
+/// 持ち主の設定を `change` で書き換えて保存する。何も残らなければ設定を消す。
+async fn update_policy(
+    shared: &Shared,
+    login: &str,
+    owner: &Owner,
+    change: impl FnOnce(&mut PolicyLayer),
+) -> Result<usize> {
+    check_policy_admin(shared, login, owner).await?;
+    let existing = shared.controller.store().policy(owner).await?;
+    let mut layer = existing.clone().unwrap_or_default();
+    change(&mut layer);
+    if layer != PolicyLayer::default() {
+        return set_policy(shared, login, owner, &layer).await;
+    }
+    if existing.is_none() {
+        return Ok(0);
+    }
+    remove_policy(shared, login, owner).await
 }
 
 /// ディスクの大きさ (`50G`、`50GiB`、`50`。単位は GiB)。

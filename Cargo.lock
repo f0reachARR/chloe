@@ -748,6 +748,7 @@ dependencies = [
  "chloe-controller",
  "chloe-github",
  "chloe-mtls",
+ "chloe-policy",
  "chloe-secrets",
  "clap",
  "futures",
