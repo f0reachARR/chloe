@@ -113,6 +113,9 @@ pub struct InjectRuleConfig {
     pub format: InjectFormat,
     /// 本物の値を問い合わせるときの名前 (開発用のプロキシでは環境変数の名前にもなる)。
     pub secret_env: String,
+    /// `basic-password` で、Basic 認証のユーザー名も差し替えるときのプレースホルダーと名前。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<Credential>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +125,7 @@ pub enum InjectFormat {
     #[default]
     Replace,
     /// Basic 認証のパスワードがプレースホルダーのとき、パスワードを本物に置き換える。
+    /// `username` があれば、ユーザー名がそのプレースホルダーのときにユーザー名も置き換える。
     BasicPassword,
 }
 
@@ -188,7 +192,7 @@ struct Binding {
     placeholder: String,
     hosts: Vec<String>,
     rule: String,
-    /// Basic 認証のパスワードとしても探す。
+    /// Basic 認証のユーザー名とパスワードとしても探す。
     basic: bool,
 }
 
@@ -199,6 +203,7 @@ struct InjectRule {
     header: String,
     format: InjectFormat,
     secret: String,
+    username: Option<Credential>,
 }
 
 /// 書き換えの予定。
@@ -208,12 +213,14 @@ pub struct Plan {
     signings: Vec<Signing>,
 }
 
-/// `header` 番目のヘッダーを `rule` 番目の規則で、`secret` の本物の値に差し替える。
+/// `header` 番目のヘッダーを `rule` 番目の規則で、`secret` (と Basic 認証のユーザー名なら
+/// `username`) の本物の値に差し替える。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Substitution {
     header: usize,
     rule: usize,
-    secret: String,
+    secret: Option<String>,
+    username: Option<String>,
 }
 
 /// `header` 番目のヘッダー (`Authorization`) を、`rule` 番目の署名の規則で作り直す。
@@ -312,17 +319,23 @@ impl Policy {
                 header: rule.header.to_ascii_lowercase(),
                 format: rule.format,
                 secret: rule.secret_env.clone(),
+                username: rule.username.clone(),
             })
             .collect();
-        let mut bindings: Vec<Binding> = rules
-            .iter()
-            .map(|rule| Binding {
-                placeholder: rule.placeholder.clone(),
-                hosts: rule.hosts.clone(),
-                rule: rule.name.clone(),
-                basic: rule.format == InjectFormat::BasicPassword,
-            })
-            .collect();
+        let mut bindings: Vec<Binding> = Vec::new();
+        for rule in &rules {
+            let basic = rule.format == InjectFormat::BasicPassword;
+            let placeholders = std::iter::once(&rule.placeholder)
+                .chain(rule.username.as_ref().map(|u| &u.placeholder));
+            for placeholder in placeholders {
+                bindings.push(Binding {
+                    placeholder: placeholder.clone(),
+                    hosts: rule.hosts.clone(),
+                    rule: rule.name.clone(),
+                    basic,
+                });
+            }
+        }
         for rule in &config.sign {
             for credential in rule.scheme.credentials() {
                 bindings.push(Binding {
@@ -394,7 +407,7 @@ impl Policy {
         let mut names: Vec<String> = plan
             .substitutions
             .iter()
-            .map(|s| s.secret.clone())
+            .flat_map(|s| s.secret.iter().chain(&s.username).cloned())
             .collect();
         for s in &plan.signings {
             let SignScheme::AwsSigV4 {
@@ -424,9 +437,14 @@ impl Policy {
         let get = |name: &str| value(name).ok_or_else(|| name.to_string());
         let mut work = headers.to_vec();
         for s in &plan.substitutions {
-            let secret = get(&s.secret)?;
+            let secret = s.secret.as_deref().map(get).transpose()?;
+            let username = s.username.as_deref().map(get).transpose()?;
             let rule = &self.rules[s.rule];
-            if let Some(new) = rule.render(&work[s.header].1, secret.expose_secret()) {
+            if let Some(new) = rule.render(
+                &work[s.header].1,
+                secret.as_ref().map(|v| v.expose_secret()),
+                username.as_ref().map(|v| v.expose_secret()),
+            ) {
                 work[s.header].1 = new;
             }
         }
@@ -512,7 +530,9 @@ impl Policy {
             let in_headers = request.headers.iter().any(|(_, value)| {
                 contains_bytes(value, binding.placeholder.as_bytes())
                     || (binding.basic
-                        && basic_credentials(value).is_some_and(|(_, p)| p == binding.placeholder))
+                        && basic_credentials(value).is_some_and(|(u, p)| {
+                            u == binding.placeholder || p == binding.placeholder
+                        }))
             });
             let in_url = request.path_and_query.contains(&binding.placeholder);
             let in_body = request
@@ -536,11 +556,19 @@ impl Policy {
                 continue;
             }
             for (index, (name, value)) in request.headers.iter().enumerate() {
-                if *name == rule.header && rule.renders(value) {
+                if *name != rule.header {
+                    continue;
+                }
+                if let Some((username, password)) = rule.matches(value) {
                     plan.substitutions.push(Substitution {
                         header: index,
                         rule: rule_index,
-                        secret: rule.secret.clone(),
+                        secret: password.then(|| rule.secret.clone()),
+                        username: rule
+                            .username
+                            .as_ref()
+                            .filter(|_| username)
+                            .map(|u| u.secret_env.clone()),
                     });
                 }
             }
@@ -639,28 +667,49 @@ fn basic_credentials(value: &[u8]) -> Option<(String, String)> {
 }
 
 impl InjectRule {
-    /// Basic 認証のパスワードがプレースホルダーなら、そのユーザー名を返す。
-    fn basic_user(&self, value: &[u8]) -> Option<String> {
-        let (user, password) = basic_credentials(value)?;
-        (password == self.placeholder).then_some(user)
+    fn is_username(&self, user: &str) -> bool {
+        self.username
+            .as_ref()
+            .is_some_and(|u| u.placeholder == user)
     }
 
-    /// この規則で差し替えられる値か。
-    fn renders(&self, value: &[u8]) -> bool {
-        match self.format {
-            InjectFormat::BasicPassword => self.basic_user(value).is_some(),
-            InjectFormat::Replace => contains_bytes(value, self.placeholder.as_bytes()),
-        }
+    /// この規則で差し替えられる値なら、ユーザー名とパスワード (`replace` では値) のそれぞれを
+    /// 差し替えるかを返す。
+    fn matches(&self, value: &[u8]) -> Option<(bool, bool)> {
+        let (username, password) = match self.format {
+            InjectFormat::BasicPassword => {
+                let (user, password) = basic_credentials(value)?;
+                (self.is_username(&user), password == self.placeholder)
+            }
+            InjectFormat::Replace => (false, contains_bytes(value, self.placeholder.as_bytes())),
+        };
+        (username || password).then_some((username, password))
     }
 
-    fn render(&self, value: &[u8], secret: &str) -> Option<Vec<u8>> {
+    /// `secret` (パスワードか値) と `username` の、与えられたほうを差し替える。
+    fn render(
+        &self,
+        value: &[u8],
+        secret: Option<&str>,
+        username: Option<&str>,
+    ) -> Option<Vec<u8>> {
         match self.format {
             InjectFormat::BasicPassword => {
-                let user = self.basic_user(value)?;
-                let token = BASE64.encode(format!("{user}:{secret}"));
-                Some(format!("Basic {token}").into_bytes())
+                let (mut user, mut password) = basic_credentials(value)?;
+                let mut changed = false;
+                if let Some(real) = username.filter(|_| self.is_username(&user)) {
+                    user = real.to_string();
+                    changed = true;
+                }
+                if let Some(real) = secret.filter(|_| password == self.placeholder) {
+                    password = real.to_string();
+                    changed = true;
+                }
+                let token = BASE64.encode(format!("{user}:{password}"));
+                changed.then(|| format!("Basic {token}").into_bytes())
             }
             InjectFormat::Replace => {
+                let secret = secret?;
                 let value = std::str::from_utf8(value).ok()?;
                 value
                     .contains(&self.placeholder)
@@ -947,6 +996,65 @@ mod tests {
         let leaked = Req::https("httpbin.org")
             .header("authorization", &basic)
             .eval(&p);
+        assert_eq!(reason(leaked), BlockReason::PlaceholderToUnboundHost);
+    }
+
+    #[test]
+    fn injects_basic_username() {
+        const USER_PH: &str = "user-chloe0123";
+        let config: PolicyConfig = serde_json::from_value(serde_json::json!({
+            "rules": [{ "hosts": ["apt.example.com", "example.org"], "action": "allow" }],
+            "inject": [{
+                "name": "apt",
+                "placeholder": PH,
+                "hosts": ["apt.example.com"],
+                "header": "authorization",
+                "format": "basic-password",
+                "secret_env": "PASS",
+                "username": { "placeholder": USER_PH, "secret_env": "USER" }
+            }]
+        }))
+        .unwrap();
+        let p = Policy::new(config);
+        let basic = |user: &str, password: &str| {
+            format!("Basic {}", BASE64.encode(format!("{user}:{password}")))
+        };
+        let eval = |host: &'static str, value: &str| {
+            let mut req = Req::https(host).header("authorization", value);
+            let decision = req.eval(&p);
+            (decision, req.header_value("authorization"))
+        };
+        let injected = Decision::Allowed {
+            injected: vec!["apt".into()],
+        };
+
+        // ユーザー名とパスワードのどちらも差し替える。
+        let headers = vec![("authorization".to_string(), basic(USER_PH, PH).into_bytes())];
+        let (_, plan) = p.evaluate(&Request {
+            host: "apt.example.com",
+            sni: Some("apt.example.com"),
+            tls: true,
+            method: "GET",
+            path_and_query: "/",
+            headers: &headers,
+            body: None,
+        });
+        assert_eq!(p.secrets_needed(&plan), ["PASS", "USER"]);
+        assert_eq!(
+            eval("apt.example.com", &basic(USER_PH, PH)),
+            (injected.clone(), basic("real-user", "real-pass"))
+        );
+        // プレースホルダーでない側は、送られたまま残す。
+        assert_eq!(
+            eval("apt.example.com", &basic("deploy", PH)),
+            (injected.clone(), basic("deploy", "real-pass"))
+        );
+        assert_eq!(
+            eval("apt.example.com", &basic(USER_PH, "x")),
+            (injected, basic("real-user", "x"))
+        );
+        // ユーザー名のプレースホルダーも、登録していない宛先へは送らせない。
+        let (leaked, _) = eval("example.org", &basic(USER_PH, "x"));
         assert_eq!(reason(leaked), BlockReason::PlaceholderToUnboundHost);
     }
 
