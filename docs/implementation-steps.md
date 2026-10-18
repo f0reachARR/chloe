@@ -28,7 +28,8 @@
 | 9 | 複数台の物理サーバー | コントロールプレーンとランナーのホストを分け、HTTPS (相互 TLS) で通信する | 二台のホストのランナーを一つのゲートウェイから使える |
 | 10 | 接続と管理の使い勝手 | ワークスペースのホスト名、Device Flow を必須にしたログインと共通のユーザー名、管理の TUI | `ssh chloe@host` で入れて、`ssh -t chloe@host chloe` で設定を変えられる |
 | 11 | Docker を使わないランナー | ランナーを systemd の unit で動かし、root で動かす部分をネットワークの準備に絞る | 段階 6 のテストが、Docker のない root の使えるホストで通る |
-| 12 | Kubernetes | runner の Pod 化、PVC、NetworkPolicy | 段階 6 のテストが Kubernetes 上で通る |
+| 12 | deb のパッケージ | ゲートウェイ、`chloe-node`、ランナーの部品を Ubuntu の deb にする | Ubuntu 24.04 と 26.04 に `apt install` で入れ、ランナーが動く |
+| 13 | Kubernetes | runner の Pod 化、PVC、NetworkPolicy | 段階 6 のテストが Kubernetes 上で通る |
 
 段階 1 と 2 は互いに依存しないので並行して進められる。
 段階 3 から 5 は、それぞれ前の段階の上に積む。
@@ -613,7 +614,36 @@ VM を使う確認は 9 つ、398 項目がすべて通った（並べて 80 秒
 - jailer。Firecracker は `chloe` の利用者の権限で動くだけで、chroot、namespace、cgroup の制限はかけていない（seccomp は Firecracker の既定のもの）。
 - deb のパッケージ。ランナーの unit とスクリプトの置き場所（今は `/usr/local/lib/chloe/runner`）は、パッケージにするときに `/usr/libexec/chloe` などへ移す。
 
-## 段階 12 以降の進め方
+## 段階 12：deb のパッケージ
 
-段階 12 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。
+今は、ビルドしたものを `install` で手で置く。
+ホストを増やすたびに同じ手順を繰り返すことになり、更新でファイルを置き忘れやすい。
+段階 11 でランナーのコンテナのイメージが要らなくなったので、ホストに置くものはすべてファイルになり、deb にまとめられる。
+
+### 決めたこと（2026-10-18）
+
+- **パッケージの分け方**：
+  - `chloe-common`：`chloe-egress`、ランナーのスクリプト、Firecracker、ランナーの unit 三つ、polkit の規則、`/etc/chloe/runner.env`。利用者 `chloe`（`kvm` のグループ）と、状態のディレクトリ（`/var/lib/chloe`、`/var/lib/chloe/workspaces`）を作る。
+  - `chloe-gateway`：`chloe-gateway`、その unit、`/etc/chloe/gateway.toml`。`chloe-common` に依存する。
+  - `chloe-node`：`chloe-node`、その unit、`/etc/chloe/node.toml`。`chloe-common` に依存する。
+  - `chloe-guest`：ゲストのカーネルとルートファイルシステム（約 2.3GB）。ビルドしたときの Claude Code と Codex を含むので、作るのは指定したときだけにし、公開する場所には置かない。`chloe-common` は `Suggests` で示すだけにする。
+- **置き場所**：`/usr/bin`（`chloe-gateway`、`chloe-node`）、`/usr/libexec/chloe`（`chloe-egress`、ランナーのスクリプト、Firecracker）、`/usr/lib/chloe/guest`（ゲストのイメージ）。`deploy/` の unit と設定の例は、手で置くときの `/usr/local` のまま残し、パッケージを作るときにパスを書き換える。手で置く手順を壊さず、元を一つに保つためである。
+- **既定の設定**：`deploy/gateway.toml` と `deploy/node.toml` の `[runner]` を `kind = "systemd"` にする。Docker で動かす書き方は、注釈と [設定](configuration.md) に残す。状態の置き場所は、ゲートウェイのホストでも `chloe-node` のホストでも `/var/lib/chloe/workspaces` にそろえ、`runner.env` を書き換えずに使えるようにする。
+- **Firecracker**：Apache-2.0 で再配布できるので、公式のリリースのバイナリを `chloe-common` に入れる。`chloe-runner-start` は、同じディレクトリに `firecracker` があればそれを使い、なければ `PATH` から探す。
+- **unit の扱い**：インストールしただけでは、どの unit も有効にせず、起動もしない。設定の例のままでは、ゲートウェイが 22 番で待ち受けて sshd とぶつかり、`allowed_users` も仮の名前だからである。更新のときは、動いているゲートウェイと `chloe-node` だけを起動し直す（動いているワークスペースは止まらない）。ランナーの unit は、更新では止めない。止めるのは `chloe-common` を消すときだけにする。
+- **purge**：`/var/lib/chloe` は消さない。マスター鍵を失うと、保存したシークレットを読めなくなるからである。
+- **ビルド**：`packaging/deb/build.sh` が Ubuntu 24.04 のコンテナの中でバイナリをビルドし、`dpkg-deb` でパッケージにする。24.04 の glibc（2.39）でビルドすれば 26.04 でも動く。依存（`Depends`）は `dpkg-shlibdeps` で求める。cargo-deb は使わない。Rust のクレートではない `chloe-guest` と、パスの書き換えを一つのスクリプトで扱えるからである。
+- **版**：タグを打つまでは `0.1.0~git<日付>.<短いハッシュ>` にする。
+- **配り方**：この段階では `build/deb/` にファイルを作るところまでにする。CI と apt のリポジトリは作らない。
+
+### 進め方
+
+1. **12a 既定を systemd に**：`deploy/` の設定の例を `kind = "systemd"` にし、状態の置き場所をそろえる。`chloe-runner-start` が同じディレクトリの Firecracker を使えるようにする。
+2. **12b パッケージを作る**：`packaging/deb/` に、ビルド用のコンテナ、パッケージごとの control と maintainer script、`build.sh` を置く。lintian で検査する。
+3. **12c 確かめる**：Ubuntu 24.04 と 26.04 の systemd を動かす特権コンテナに `apt install` で入れ、段階 11 と同じ確認を通す。更新（版を上げて入れ直す）で動いているワークスペースが止まらないこと、削除と purge のあとに何が残るかを確かめる。shigure にも入れて確かめる。
+4. **12d 文書**：インストールの文書を、deb で入れる手順を先にして書き直す。手で置く手順は別の方法として残す。
+
+## 段階 13 以降の進め方
+
+段階 13 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。
 段階 2 の結果によって段階 4 の設計（HTTP/2 の扱い、差し替えの位置など）が変わりうるので、先に細かく決めない。
