@@ -232,7 +232,7 @@ check files-after-boot "password chloe" as alice+files 'cat /etc/apt/auth.conf.d
 check files-not-logged "clean" sh -c '! grep -q real-file-secret "$0" && echo clean' "$logs/gateway.log"
 # 消すと、置いたファイルも消える。
 as alice chloe secret rm file_token >/dev/null
-check files-removed "absent" as alice+files 'ls /etc/apt/auth.conf.d/chloe-test.conf ~/.netrc 2>/dev/null || echo absent'
+check files-removed "2 absent" as alice+files 'echo "$(ls /etc/apt/auth.conf.d/chloe-test.conf ~/.netrc 2>&1 | grep -c "No such file") absent"'
 as alice chloe ws rm files --disks >/dev/null
 
 section "workspaces"
