@@ -126,6 +126,13 @@ last_anthropic_request() { egress_log "$1" | grep '"host":"api.anthropic.com"' |
 check alice-injected '"injected":["anthropic_api_key-0"]' last_anthropic_request "$alice_key"
 check bob-not-injected '"injected":[]' last_anthropic_request "$bob_key"
 check secret-served "secret served" sh -c 'grep "secret served" "$0" | sed "s/\x1b\[[0-9;]*m//g" | grep -o "secret served.*anthropic_api_key" | tail -1' "$logs/gateway.log"
+# 応答の本文を流し終えてから、大きさとかかった時間を入れて記録する。
+check response-size-logged '"response_bytes":' last_anthropic_request "$alice_key"
+check duration-logged '"duration_ms":' last_anthropic_request "$alice_key"
+# 利用者は、ワークスペースの HTTP のログを chloe ws log で見られる。
+ws_log_line() { as "$1" chloe ws log "$2" | grep "$3" | tail -1; }
+check ws-log $'\t401\tGET\tapi.anthropic.com\t/v1/models\t' ws_log_line alice default api.anthropic.com
+check ws-log-injected $'ms\tanthropic_api_key-0\t' ws_log_line alice default api.anthropic.com
 
 section "updating a running workspace"
 check live-update "used from the next request" sh -c 'echo real-secret-A2 | "$@"' _ \
@@ -182,6 +189,8 @@ check custom-env "echo_chloe" as alice 'printenv ECHO_TOKEN'
 echo_headers() { as alice "curl -s -H \"Authorization: Bearer \$ECHO_TOKEN\" https://httpbin.org/headers"; }
 check custom-injected "Bearer real-custom-secret" echo_headers
 check custom-unbound "placeholder-to-unbound-host" as alice "curl -sS -H \"x-leak: \$ECHO_TOKEN\" https://api.anthropic.com/v1/models"
+check ws-log-blocked $'\tblocked:placeholder-to-unbound-host\t403\t' sh -c '"$@" | tail -1' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe ws log default --blocked
 check custom-value-only "saved echo_token" sh -c 'echo real-custom-secret-2 | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe secret set echo_token
 check custom-value-updated "Bearer real-custom-secret-2" echo_headers
@@ -262,6 +271,7 @@ check ws-create-org "created acme/proj" as alice chloe ws create acme/proj --roo
 check ws-create-not-member "not a member" as bob chloe ws create acme/proj2
 check ws-org-member "user" as alice+acme/proj 'id -un'
 check ws-org-not-member "Permission denied" as bob+acme/proj true
+check ws-log-not-member "no such workspace: acme/proj" as bob chloe ws log acme/proj
 check ws-org-list "acme/proj	persistent" as alice chloe ws list
 check ws-disk-grow "30G workspace disk and a 40G Docker disk from the next start" as alice chloe ws disk acme/proj --workspace 30G
 check ws-disk-no-shrink "cannot be shrunk" as alice chloe ws disk acme/proj --workspace 25G
@@ -311,6 +321,8 @@ for _ in $(seq 120); do
     sleep 1
 done
 check idle-stop "yes" echo "$stopped"
+# 止まったワークスペースのログも見られる。
+check ws-log-stopped "api.anthropic.com" as alice chloe ws log default --lines 2000
 check workspace-kept "kept" as alice 'cat /workspace/marker'
 check home-kept "kept" as alice 'cat ~/.claude/marker'
 
@@ -339,6 +351,9 @@ check api-patch-idle '"vcpus":2,"memory_mib":8192,"idle_timeout_secs":7200} 200'
     api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"idle_timeout":"2h"}'
 check api-patch-bad-idle "invalid idle timeout: 2x" api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"idle_timeout":"2x"}'
 check api-show-other "404" api "$bob_token" GET /v1/workspaces/acme/from-api
+check api-requests '"event":"request"' api "$alice_token" GET '/v1/workspace-requests/default?lines=5'
+check api-requests-lines "between 1 and 2000" api "$alice_token" GET '/v1/workspace-requests/default?lines=0'
+check api-requests-other "404" api "$bob_token" GET /v1/workspace-requests/acme/proj
 check api-secret-set "204" api "$alice_token" PUT /v1/secrets/openai_api_key \
     -d '{"value":"real-api-secret","env":["OPENAI_API_KEY"],"placeholder":"sk-proj-{id}","inject":[{"hosts":["api.openai.com"],"header":"authorization"}]}'
 check api-secret-show '"placeholder":"sk-proj-{id}"' api "$alice_token" GET /v1/secrets/openai_api_key

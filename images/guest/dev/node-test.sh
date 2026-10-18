@@ -136,6 +136,9 @@ check secret-n2 "401" anthropic bob
 sleep 1
 check injected-n1 '"injected":["anthropic_api_key-0"]' sh -c 'grep api.anthropic.com "$0" | tail -1' "$state/n1/workspaces/ws-1/logs/requests.jsonl"
 check injected-n2 '"injected":["anthropic_api_key-0"]' sh -c 'grep api.anthropic.com "$0" | tail -1' "$state/n2/workspaces/ws-2/logs/requests.jsonl"
+# ゲートウェイは、ログを置いたホストの chloe-node から読む。
+check ws-log-n1 "api.anthropic.com" sh -c '"$@" | grep anthropic_api_key-0' _ ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe ws log default
+check ws-log-n2 "api.anthropic.com" sh -c '"$@" | grep anthropic_api_key-0' _ ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe ws log default
 check served-relayed "secret served" sh -c 'strip_colors() { sed "s/\x1b\[[0-9;]*m//g" "$@"; }; strip_colors "$0" | grep -o "secret served.*anthropic_api_key" | tail -1' "$logs/gateway.log"
 check no-secret-on-node "clean" sh -c '! grep -rq "real-secret" "$0" "$1" && echo clean' "$logs/n1.log" "$logs/n2.log"
 
