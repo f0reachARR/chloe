@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 chloe-agent-proto = { path = "crates/chloe-agent-proto" }
+chloe-audit = { path = "crates/chloe-audit" }
 chloe-controller = { path = "crates/chloe-controller" }
 chloe-github = { path = "crates/chloe-github" }
 chloe-mtls = { path = "crates/chloe-mtls" }
