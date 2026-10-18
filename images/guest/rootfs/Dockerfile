@@ -1,9 +1,25 @@
 # ゲストのルートファイルシステム。
 # VM には読み取り専用で付け、起動時に tmpfs を重ねる (overlay-init)。
-FROM ubuntu:26.04
 
-ARG CLAUDE_CODE_CHANNEL=stable
-ARG CODEX_VERSION=rust-v0.163.0
+# mise (ツールの版の管理)。リリースの署名を確かめてから取り出す。
+FROM ubuntu:26.04 AS mise
+ARG MISE_VERSION=2026.10.4
+ARG MISE_MINISIGN_KEY=RWTC3g8W3z4RZK3V3qv7fa1QY4JEWyBtqIHW+85QlJpZc5yG+uNYNBSZ
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl minisign \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    base="https://github.com/jdx/mise/releases/download/v${MISE_VERSION}"; \
+    asset="mise-v${MISE_VERSION}-linux-x64"; \
+    cd /tmp; \
+    curl -fsSLO "$base/SHASUMS256.txt"; \
+    curl -fsSLO "$base/SHASUMS256.txt.minisig"; \
+    curl -fsSLO "$base/$asset"; \
+    minisign -Vm SHASUMS256.txt -P "$MISE_MINISIGN_KEY"; \
+    grep " ./$asset\$" SHASUMS256.txt | sha256sum -c --strict; \
+    install -m 755 "$asset" /mise
+
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -26,19 +42,9 @@ RUN install -m 0755 -d /etc/apt/keyrings \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# Claude Code (ネイティブバイナリ)。更新はイメージの作り直しで行う。
-RUN base=https://downloads.claude.ai/claude-code-releases \
-    && version="$(curl -fsSL "$base/$CLAUDE_CODE_CHANNEL")" \
-    && checksum="$(curl -fsSL "$base/$version/manifest.json" | jq -r '.platforms["linux-x64"].checksum')" \
-    && curl -fsSL -o /usr/local/bin/claude "$base/$version/linux-x64/claude" \
-    && echo "$checksum  /usr/local/bin/claude" | sha256sum -c - \
-    && chmod 0755 /usr/local/bin/claude
-
-# Codex
-RUN curl -fsSL "https://github.com/openai/codex/releases/download/$CODEX_VERSION/codex-x86_64-unknown-linux-musl.tar.gz" \
-        | tar -xz -C /usr/local/bin \
-    && mv /usr/local/bin/codex-x86_64-unknown-linux-musl /usr/local/bin/codex \
-    && chmod 0755 /usr/local/bin/codex
+# コーディングエージェントなどのツールは、利用者が mise で入れる (ホームディレクトリに入り、
+# ワークスペースのディスクに残る)。更新は mise の版を上げてイメージを作り直す。
+COPY --from=mise /mise /usr/local/bin/mise
 
 RUN locale-gen en_US.UTF-8 \
     && useradd --create-home --shell /bin/bash --groups docker,sudo user \

@@ -25,7 +25,7 @@ mkdir -p "$bin"
 cp "$root/target/x86_64-unknown-linux-musl/release/chloe-guest-agent" "$bin/"
 
 release="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$root" rev-parse --short HEAD)"
-step "build the root filesystem image (Ubuntu, Docker, Claude Code, Codex)"
+step "build the root filesystem image (Ubuntu, Docker, mise)"
 # 端末でなければ (CI やログに残すとき)、各手順の出力をそのまま出す。
 progress=auto
 [ -t 2 ] || progress=plain

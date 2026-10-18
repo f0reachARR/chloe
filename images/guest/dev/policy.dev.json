@@ -78,6 +78,7 @@
         "github.com",
         "api.github.com",
         "*.githubusercontent.com",
+        "mise-versions.jdx.dev",
         "httpbin.org",
         "example.org"
       ],

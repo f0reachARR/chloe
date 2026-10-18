@@ -82,6 +82,8 @@ hosts = [
     "github.com",
     "api.github.com",
     "*.githubusercontent.com",
+    # mise が引くツールの版の一覧 (ダウンロードの多くは github.com から)。
+    "mise-versions.jdx.dev",
     "registry.npmjs.org",
     "pypi.org",
     "files.pythonhosted.org",

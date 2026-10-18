@@ -1,0 +1,5 @@
+# すべての利用者に効く mise の設定。
+[settings]
+# mise はイメージに入れてあり、更新はイメージの作り直しで行う (mise self-update は使えない)。
+# 新しい版の問い合わせ (mise.jdx.dev) と警告をしない。
+disable_update_warning = true

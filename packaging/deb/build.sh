@@ -6,8 +6,7 @@
 # Ubuntu 24.04 のコンテナの中で、ゲートウェイ、chloe-node、chloe-egress をビルドし、
 # chloe-common、chloe-gateway、chloe-node を作る。--guest を付けると、build/guest の
 # ゲストのイメージから chloe-guest も作る (先に images/guest/kernel/build.sh と
-# images/guest/rootfs/build.sh を実行しておく)。chloe-guest にはビルドしたときの Claude Code と
-# Codex が入るので、公開する場所には置かない。
+# images/guest/rootfs/build.sh を実行しておく)。
 #
 # 環境変数 DEB_MAINTAINER で control の Maintainer を変えられる。
 set -euo pipefail
