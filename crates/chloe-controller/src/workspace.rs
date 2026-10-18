@@ -199,7 +199,7 @@ impl MachineConfig {
             vcpus: Some(self.vcpus),
             memory_mib: Some(self.memory_mib),
         })
-        .map_err(|e| format!("machine: {e}"))
+        .map_err(|e| e.to_string())
     }
 
     /// 既定を当てはめた vCPU の数。

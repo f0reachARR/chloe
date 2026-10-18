@@ -7,9 +7,10 @@
 //! ```text
 //! GET    /v1/me
 //! GET    /v1/workspaces
-//! POST   /v1/workspaces                 {"name": "acme/web", "root": "persistent", "workspace_disk_gib": 50}
+//! POST   /v1/workspaces                 {"name": "acme/web", "root": "persistent", "workspace_disk_gib": 50, "vcpus": 8, "idle_timeout": "2h"}
 //! GET    /v1/workspaces/{name}          name は SSH と同じ書き方 (acme/dev/tools など)
-//! PATCH  /v1/workspaces/{name}          {"root": "ephemeral"}、{"docker_disk_gib": 80} か {"running": false}
+//! PATCH  /v1/workspaces/{name}          {"root": "ephemeral"}、{"docker_disk_gib": 80}、{"memory_mib": 16384}、
+//!                                       {"idle_timeout": "never"} か {"running": false}
 //! DELETE /v1/workspaces/{name}[?disks=true]   disks=true ならディスクも消す
 //! GET    /v1/secrets[?owner=acme]       シークレットの名前の一覧
 //! GET    /v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
@@ -35,7 +36,7 @@ use axum::routing::{delete, get};
 use axum::{Extension, Json, Router};
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
-use chloe_controller::workspace::{DiskSizes, RootMode};
+use chloe_controller::workspace::{DiskSizes, MachineSize, RootMode};
 use chloe_secrets::Owner;
 use serde::Deserialize;
 use tracing::info;
@@ -197,6 +198,13 @@ struct CreateWorkspace {
     workspace_disk_gib: Option<u32>,
     #[serde(default)]
     docker_disk_gib: Option<u32>,
+    #[serde(default)]
+    vcpus: Option<u32>,
+    #[serde(default)]
+    memory_mib: Option<u32>,
+    /// `30m`、`2h`、`never`、`default` (`chloe ws idle` と同じ書き方)。
+    #[serde(default)]
+    idle_timeout: Option<String>,
 }
 
 async fn create_workspace(
@@ -204,11 +212,22 @@ async fn create_workspace(
     Extension(caller): Extension<Caller>,
     Json(body): Json<CreateWorkspace>,
 ) -> Result<Response, ops::Error> {
-    let disks = DiskSizes {
-        workspace_gib: body.workspace_disk_gib,
-        docker_gib: body.docker_disk_gib,
+    let options = ops::NewWorkspace {
+        root: body.root,
+        disks: DiskSizes {
+            workspace_gib: body.workspace_disk_gib,
+            docker_gib: body.docker_disk_gib,
+        },
+        machine: MachineSize {
+            vcpus: body.vcpus,
+            memory_mib: body.memory_mib,
+        },
+        idle_stop: match &body.idle_timeout {
+            Some(text) => ops::parse_idle_stop(text)?,
+            None => Default::default(),
+        },
     };
-    let ws = ops::create_workspace(&shared, &caller.login, &body.name, body.root, disks).await?;
+    let ws = ops::create_workspace(&shared, &caller.login, &body.name, options).await?;
     Ok((StatusCode::CREATED, Json(ws)).into_response())
 }
 
@@ -230,6 +249,14 @@ struct UpdateWorkspace {
     workspace_disk_gib: Option<u32>,
     #[serde(default)]
     docker_disk_gib: Option<u32>,
+    /// VM の大きさ。次の起動から効く。
+    #[serde(default)]
+    vcpus: Option<u32>,
+    #[serde(default)]
+    memory_mib: Option<u32>,
+    /// 最後の接続が閉じてから止めるまで。`30m`、`2h`、`never`、`default`。
+    #[serde(default)]
+    idle_timeout: Option<String>,
     /// `false` で止める。起動は SSH でつないだときに行うので、`true` は受け付けない。
     #[serde(default)]
     running: Option<bool>,
@@ -250,8 +277,24 @@ async fn update_workspace(
         workspace_gib: body.workspace_disk_gib,
         docker_gib: body.docker_disk_gib,
     };
+    let machine = MachineSize {
+        vcpus: body.vcpus,
+        memory_mib: body.memory_mib,
+    };
+    // 書き方の誤りは、何かを変える前に返す。
+    let idle_stop = body
+        .idle_timeout
+        .as_deref()
+        .map(ops::parse_idle_stop)
+        .transpose()?;
     if disks != DiskSizes::default() {
         ops::set_disks(&shared, &caller.login, &name, disks).await?;
+    }
+    if machine != MachineSize::default() {
+        ops::set_machine(&shared, &caller.login, &name, machine).await?;
+    }
+    if let Some(idle_stop) = idle_stop {
+        ops::set_idle_stop(&shared, &caller.login, &name, idle_stop).await?;
     }
     if let Some(root) = body.root {
         ops::set_root(&shared, &caller.login, &name, root).await?;

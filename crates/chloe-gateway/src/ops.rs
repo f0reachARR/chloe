@@ -8,7 +8,9 @@ use chloe_controller::runner::{
     PolicyLayer, RuleOrigin, WorkspacePolicy, label_rules, most_specific,
 };
 use chloe_controller::store::{ApiToken, SshKey};
-use chloe_controller::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
+use chloe_controller::workspace::{
+    DiskSizes, IdleStop, MachineSize, RootMode, Workspace, WorkspaceRef,
+};
 use chloe_policy::PathRuleConfig;
 use chloe_secrets::{ExposeSecret, Owner};
 use serde::Serialize;
@@ -78,17 +80,40 @@ pub struct WorkspaceInfo {
     pub workspace_disk_gib: u32,
     /// Docker のディスクの大きさ (GiB)。既定を当てはめたもの。
     pub docker_disk_gib: u32,
+    /// VM の vCPU の数。既定を当てはめたもの。
+    pub vcpus: u32,
+    /// VM のメモリ (MiB)。既定を当てはめたもの。
+    pub memory_mib: u32,
+    /// 最後の接続が閉じてから止めるまでの秒数。既定を当てはめたもの。止めないなら `None`。
+    pub idle_timeout_secs: Option<u64>,
 }
 
 fn info(shared: &Shared, ws: &Workspace, running: bool) -> WorkspaceInfo {
     let disks = shared.controller.disks();
+    let machine = shared.controller.machine();
     WorkspaceInfo {
         name: ws.display_name(),
         root: ws.root_mode,
         running,
         workspace_disk_gib: disks.workspace_gib(ws.disks),
         docker_disk_gib: disks.docker_gib(ws.disks),
+        vcpus: machine.vcpus(ws.machine),
+        memory_mib: machine.memory_mib(ws.machine),
+        idle_timeout_secs: ws
+            .idle_stop
+            .timeout(shared.controller.idle_timeout())
+            .map(|d| d.as_secs()),
     }
+}
+
+/// 作るワークスペースの設定。書かなかったものは既定を使う。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NewWorkspace {
+    /// なければ、持ち主 (個人、Organization と team) の設定の既定。
+    pub root: Option<RootMode>,
+    pub disks: DiskSizes,
+    pub machine: MachineSize,
+    pub idle_stop: IdleStop,
 }
 
 pub async fn list_workspaces(shared: &Shared, login: &str) -> Result<Vec<WorkspaceInfo>> {
@@ -104,14 +129,13 @@ pub async fn list_workspaces(shared: &Shared, login: &str) -> Result<Vec<Workspa
         .collect())
 }
 
-/// ワークスペースを作る。`root` がなければ、持ち主 (個人、Organization と team) の設定の既定を使う。
-/// `disks` で書かなかったディスクは、ゲートウェイの設定の既定の大きさで作る。
+/// ワークスペースを作る。書かなかった設定は、ルートの扱いなら持ち主 (個人、Organization と
+/// team) の設定の既定、ほかはゲートウェイの設定の既定を使う。
 pub async fn create_workspace(
     shared: &Shared,
     login: &str,
     name: &str,
-    root: Option<RootMode>,
-    disks: DiskSizes,
+    options: NewWorkspace,
 ) -> Result<WorkspaceInfo> {
     let target = WorkspaceRef::parse(name, login).map_err(|e| Error::Invalid(e.to_string()))?;
     if !shared.can_access(login, &target.owner).await? {
@@ -120,8 +144,9 @@ pub async fn create_workspace(
             target.owner
         )));
     }
-    shared.controller.disks().validate_new(disks)?;
-    let root = match root {
+    shared.controller.disks().validate_new(options.disks)?;
+    shared.controller.machine().validate(options.machine)?;
+    let root = match options.root {
         Some(root) => root,
         None => {
             let layers = shared.controller.owner_layers(&target.owner).await?;
@@ -134,9 +159,9 @@ pub async fn create_workspace(
         .create(
             &target,
             root,
-            disks,
-            Default::default(),
-            Default::default(),
+            options.disks,
+            options.machine,
+            options.idle_stop,
             login,
         )
         .await?;
@@ -191,6 +216,45 @@ pub async fn set_disks(
         .set_disk_sizes(ws.id, disks)
         .await?;
     ws.disks = disks;
+    Ok(ws)
+}
+
+/// VM の vCPU の数とメモリを変える。書かなかったほうは変えず、次の起動から効く。
+pub async fn set_machine(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    machine: MachineSize,
+) -> Result<Workspace> {
+    let mut ws = find_workspace(shared, login, name).await?;
+    let machine = shared
+        .controller
+        .machine()
+        .validate_change(ws.machine, machine)?;
+    shared
+        .controller
+        .store()
+        .set_machine(ws.id, machine)
+        .await?;
+    ws.machine = machine;
+    Ok(ws)
+}
+
+/// 最後の接続が閉じてから止めるまでの時間を変える。動いていて接続がなければ、今から数え直す。
+pub async fn set_idle_stop(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    idle_stop: IdleStop,
+) -> Result<Workspace> {
+    let mut ws = find_workspace(shared, login, name).await?;
+    shared
+        .controller
+        .store()
+        .set_idle_stop(ws.id, idle_stop)
+        .await?;
+    shared.controller.reschedule_idle_stop(ws.id);
+    ws.idle_stop = idle_stop;
     Ok(ws)
 }
 
@@ -758,6 +822,70 @@ pub fn parse_gib(size: &str) -> Result<u32> {
         .map_err(|_| Error::Invalid(format!("invalid size: {size} (write it in GiB, like 50G)")))
 }
 
+/// メモリの大きさ (`8G`、`8GiB`、`512M`、`512MiB`) を MiB にする。
+pub fn parse_mib(size: &str) -> Result<u32> {
+    let invalid = || Error::Invalid(format!("invalid size: {size} (write it like 8G or 512M)"));
+    let (number, scale) =
+        if let Some(n) = size.strip_suffix("GiB").or_else(|| size.strip_suffix('G')) {
+            (n, 1024)
+        } else if let Some(n) = size.strip_suffix("MiB").or_else(|| size.strip_suffix('M')) {
+            (n, 1)
+        } else {
+            return Err(invalid());
+        };
+    let number: u32 = number.parse().map_err(|_| invalid())?;
+    number.checked_mul(scale).ok_or_else(invalid)
+}
+
+/// MiB を、GiB で割り切れれば `8G`、そうでなければ `512M` の形で表す。
+pub fn format_mib(mib: u32) -> String {
+    if mib.is_multiple_of(1024) {
+        format!("{}G", mib / 1024)
+    } else {
+        format!("{mib}M")
+    }
+}
+
+/// 停止までの時間 (`90s`、`30m`、`2h`、`1d`、`never`、`default`)。
+pub fn parse_idle_stop(text: &str) -> Result<IdleStop> {
+    let invalid = || {
+        Error::Invalid(format!(
+            "invalid idle timeout: {text} (use e.g. 30m, 2h, never or default)"
+        ))
+    };
+    match text {
+        "never" => return Ok(IdleStop::Never),
+        "default" => return Ok(IdleStop::Default),
+        _ => {}
+    }
+    let (number, unit) = text.split_at(text.len().saturating_sub(1));
+    let number: u32 = number.parse().map_err(|_| invalid())?;
+    let unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err(invalid()),
+    };
+    match number.checked_mul(unit) {
+        Some(secs) if secs > 0 => Ok(IdleStop::After(secs)),
+        _ => Err(invalid()),
+    }
+}
+
+/// 停止までの秒数を、割り切れるいちばん大きな単位で表す (`30m`、`2h`)。止めないなら `never`。
+pub fn format_idle(secs: Option<u64>) -> String {
+    let Some(secs) = secs else {
+        return "never".into();
+    };
+    for (unit, scale) in [("d", 24 * 60 * 60), ("h", 60 * 60), ("m", 60)] {
+        if secs >= scale && secs % scale == 0 {
+            return format!("{}{unit}", secs / scale);
+        }
+    }
+    format!("{secs}s")
+}
+
 /// `30d`、`12h` のような期間を秒にする。
 pub fn parse_duration(text: &str) -> Result<i64> {
     let invalid = || Error::Invalid(format!("invalid duration: {text} (use e.g. 30d or 12h)"));
@@ -862,6 +990,37 @@ mod tests {
         assert_eq!(parse_gib("30").unwrap(), 30);
         assert!(parse_gib("1T").is_err());
         assert!(parse_gib("-1").is_err());
+    }
+
+    #[test]
+    fn parses_memory_sizes() {
+        assert_eq!(parse_mib("8G").unwrap(), 8192);
+        assert_eq!(parse_mib("2GiB").unwrap(), 2048);
+        assert_eq!(parse_mib("512M").unwrap(), 512);
+        assert_eq!(parse_mib("768MiB").unwrap(), 768);
+        // 単位のない数は GiB とも MiB とも読めるので受け付けない。
+        assert!(parse_mib("4096").is_err());
+        assert!(parse_mib("1T").is_err());
+        assert!(parse_mib("9999999G").is_err());
+        assert_eq!(format_mib(8192), "8G");
+        assert_eq!(format_mib(1536), "1536M");
+    }
+
+    #[test]
+    fn parses_idle_timeouts() {
+        assert_eq!(parse_idle_stop("90s").unwrap(), IdleStop::After(90));
+        assert_eq!(parse_idle_stop("30m").unwrap(), IdleStop::After(1800));
+        assert_eq!(parse_idle_stop("2h").unwrap(), IdleStop::After(7200));
+        assert_eq!(parse_idle_stop("1d").unwrap(), IdleStop::After(86400));
+        assert_eq!(parse_idle_stop("never").unwrap(), IdleStop::Never);
+        assert_eq!(parse_idle_stop("default").unwrap(), IdleStop::Default);
+        for bad in ["0m", "30", "m", "-1h", "1w"] {
+            assert!(parse_idle_stop(bad).is_err(), "{bad}");
+        }
+        assert_eq!(format_idle(Some(1800)), "30m");
+        assert_eq!(format_idle(Some(7200)), "2h");
+        assert_eq!(format_idle(Some(90)), "90s");
+        assert_eq!(format_idle(None), "never");
     }
 
     const HF: &str = r#"

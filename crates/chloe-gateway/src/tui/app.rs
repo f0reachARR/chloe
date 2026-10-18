@@ -6,7 +6,7 @@
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::{PolicyLayer, RuleOrigin};
 use chloe_controller::store::{ApiToken, SshKey};
-use chloe_controller::workspace::{DiskSizes, RootMode};
+use chloe_controller::workspace::{DiskSizes, IdleStop, MachineSize, RootMode};
 use chloe_policy::{Action as RuleAction, PathRuleConfig};
 use chloe_secrets::Owner;
 use ratatui::Frame;
@@ -18,7 +18,10 @@ use terminput::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::form::{Field, Form, FormEvent, RowKind};
 use super::{policy_form, secret_form};
-use crate::ops::{RuleScope, RulesView, ScopeEntry, SecretView, WorkspaceInfo, owner_arg};
+use crate::ops::{
+    NewWorkspace, RuleScope, RulesView, ScopeEntry, SecretView, WorkspaceInfo, format_idle,
+    format_mib, owner_arg,
+};
 
 /// ゲートウェイに頼む操作。シークレットの値を含むので、Debug で書き出さない。
 #[derive(Clone)]
@@ -26,12 +29,17 @@ pub enum Action {
     LoadWorkspaces,
     CreateWorkspace {
         name: String,
-        root: Option<RootMode>,
-        disks: DiskSizes,
+        options: NewWorkspace,
     },
     SetDisks {
         name: String,
         disks: DiskSizes,
+    },
+    /// VM の大きさと停止までの時間。変えたものだけを持つ。
+    SetMachine {
+        name: String,
+        machine: MachineSize,
+        idle_stop: Option<IdleStop>,
     },
     SetRoot {
         name: String,
@@ -95,6 +103,7 @@ impl Action {
             Self::CreateWorkspace { .. } => "ws create",
             Self::SetRoot { .. } => "ws root",
             Self::SetDisks { .. } => "ws disk",
+            Self::SetMachine { .. } => "ws machine",
             Self::StopWorkspace(_) => "ws stop",
             Self::RemoveWorkspace { .. } => "ws rm",
             Self::SaveSecret { .. } => "secret set",
@@ -188,7 +197,9 @@ impl Tab {
 
     fn hints(self) -> &'static str {
         match self {
-            Self::Workspaces => "n new  r switch root  g disks  u rules  s stop  d delete",
+            Self::Workspaces => {
+                "n new  r switch root  g disks  m machine  u rules  s stop  d delete"
+            }
             Self::Secrets => "o owner  n new  Enter edit  d delete",
             Self::Rules => "Enter edit rules  d delete rules",
             Self::Settings => "Enter edit  d reset",
@@ -208,6 +219,13 @@ enum Purpose {
         name: String,
         workspace_gib: u32,
         docker_gib: u32,
+    },
+    /// VM の大きさと停止までの時間。開いたときの値を持ち、変えた欄だけを送る。
+    Machine {
+        name: String,
+        vcpus: u32,
+        memory_mib: u32,
+        idle: String,
     },
     Secret {
         owner: Owner,
@@ -453,6 +471,12 @@ impl App {
                             .help("in GiB, like 50G. Empty for the default. Holds /workspace and the home directory."),
                         Field::text("docker", "Docker disk", "")
                             .help("in GiB, like 80G. Empty for the default. Holds Docker images and containers."),
+                        Field::text("cpus", "vCPUs", "")
+                            .help("the number of vCPUs (1-32). Empty for the default."),
+                        Field::text("memory", "Memory", "")
+                            .help("like 8G or 512M. Empty for the default."),
+                        Field::text("idle", "Idle stop", "")
+                            .help("stops the VM this long after the last connection closes, like 30m or 2h. never keeps it running. Empty for the default."),
                     ],
                 ),
                 purpose: Purpose::NewWorkspace,
@@ -483,6 +507,32 @@ impl App {
                             name: ws.name.clone(),
                             workspace_gib: ws.workspace_disk_gib,
                             docker_gib: ws.docker_disk_gib,
+                        },
+                        saving: false,
+                    });
+                }
+            }
+            (Tab::Workspaces, KeyCode::Char('m')) => {
+                if let Some(ws) = self.workspaces.get(selected) {
+                    let idle = format_idle(ws.idle_timeout_secs);
+                    let next = "The new size applies from the next start.";
+                    self.modals.push(Modal::Form {
+                        form: Form::new(
+                            format!("Machine of {}", ws.name),
+                            vec![
+                                Field::text("cpus", "vCPUs", &ws.vcpus.to_string())
+                                    .help(format!("the number of vCPUs (1-32). {next}")),
+                                Field::text("memory", "Memory", &format_mib(ws.memory_mib))
+                                    .help(format!("like 8G or 512M. {next}")),
+                                Field::text("idle", "Idle stop", &idle)
+                                    .help("stops the VM this long after the last connection closes, like 30m or 2h. never keeps it running; default uses the gateway's."),
+                            ],
+                        ),
+                        purpose: Purpose::Machine {
+                            name: ws.name.clone(),
+                            vcpus: ws.vcpus,
+                            memory_mib: ws.memory_mib,
+                            idle,
                         },
                         saving: false,
                     });
@@ -1003,11 +1053,13 @@ impl App {
                 .map(|ws| {
                     let state = if ws.running { "running" } else { "stopped" };
                     ListItem::new(format!(
-                        "{:<32} {:<11} {state:<8} {}G/{}G",
+                        "{:<32} {:<11} {state:<8} {:<10} {:>2} vCPU {:>5}  idle {}",
                         ws.name,
                         ws.root.as_str(),
-                        ws.workspace_disk_gib,
-                        ws.docker_disk_gib
+                        format!("{}G/{}G", ws.workspace_disk_gib, ws.docker_disk_gib),
+                        ws.vcpus,
+                        format_mib(ws.memory_mib),
+                        format_idle(ws.idle_timeout_secs)
                     ))
                 })
                 .collect(),
@@ -1204,6 +1256,39 @@ fn optional_gib(form: &Form, key: &str) -> Result<Option<u32>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// vCPU の数の欄。空なら `None`。
+fn optional_vcpus(form: &Form) -> Result<Option<u32>, String> {
+    let text = form.text("cpus");
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse()
+        .map(Some)
+        .map_err(|_| format!("invalid number of vCPUs: {text}"))
+}
+
+/// メモリの欄。空なら `None`。
+fn optional_mib(form: &Form) -> Result<Option<u32>, String> {
+    let text = form.text("memory");
+    if text.is_empty() {
+        return Ok(None);
+    }
+    crate::ops::parse_mib(&text)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// 停止までの時間の欄。空なら `None`。
+fn optional_idle(form: &Form) -> Result<Option<IdleStop>, String> {
+    let text = form.text("idle");
+    if text.is_empty() {
+        return Ok(None);
+    }
+    crate::ops::parse_idle_stop(&text)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 /// フォームを、保存する操作にする。
 fn submit(form: &Form, purpose: &Purpose) -> Result<Action, String> {
     match purpose {
@@ -1217,11 +1302,44 @@ fn submit(form: &Form, purpose: &Purpose) -> Result<Action, String> {
                 "persistent" => Some(RootMode::Persistent),
                 _ => None,
             };
-            let disks = DiskSizes {
-                workspace_gib: optional_gib(form, "workspace")?,
-                docker_gib: optional_gib(form, "docker")?,
+            let options = NewWorkspace {
+                root,
+                disks: DiskSizes {
+                    workspace_gib: optional_gib(form, "workspace")?,
+                    docker_gib: optional_gib(form, "docker")?,
+                },
+                machine: MachineSize {
+                    vcpus: optional_vcpus(form)?,
+                    memory_mib: optional_mib(form)?,
+                },
+                idle_stop: optional_idle(form)?.unwrap_or_default(),
             };
-            Ok(Action::CreateWorkspace { name, root, disks })
+            Ok(Action::CreateWorkspace { name, options })
+        }
+        Purpose::Machine {
+            name,
+            vcpus,
+            memory_mib,
+            idle,
+        } => {
+            // 変えなかった欄は送らない (既定のままの値を、今の既定の値に固定しない)。
+            let machine = MachineSize {
+                vcpus: optional_vcpus(form)?.filter(|n| n != vcpus),
+                memory_mib: optional_mib(form)?.filter(|n| n != memory_mib),
+            };
+            let idle_stop = if form.text("idle") == *idle {
+                None
+            } else {
+                optional_idle(form)?
+            };
+            if machine == MachineSize::default() && idle_stop.is_none() {
+                return Err("change a value".into());
+            }
+            Ok(Action::SetMachine {
+                name: name.clone(),
+                machine,
+                idle_stop,
+            })
         }
         Purpose::Disks {
             name,
@@ -1452,6 +1570,9 @@ mod tests {
             running: true,
             workspace_disk_gib: 20,
             docker_disk_gib: 40,
+            vcpus: 4,
+            memory_mib: 4096,
+            idle_timeout_secs: Some(1800),
         }]));
         let more = app.apply(Outcome::Owners(vec![
             Owner::User("alice".into()),
@@ -1513,6 +1634,37 @@ mod tests {
     }
 
     #[test]
+    fn changes_the_machine_with_a_form() {
+        let mut app = app();
+        assert!(screen(&app).contains("4 vCPU    4G  idle 30m"));
+        app.handle_key(key(KeyCode::Char('m')));
+        // 今の値が入っている。変えた欄だけを送る。
+        form_mut(&mut app).handle_key(key(KeyCode::Backspace));
+        type_text(form_mut(&mut app), "8");
+        form_mut(&mut app).handle_key(key(KeyCode::Tab));
+        form_mut(&mut app).handle_key(key(KeyCode::Tab));
+        for _ in 0.."30m".len() {
+            form_mut(&mut app).handle_key(key(KeyCode::Backspace));
+        }
+        type_text(form_mut(&mut app), "never");
+        let actions = app.handle_key(ctrl('s'));
+        assert!(matches!(
+            &actions[..],
+            [Action::SetMachine { name, machine, idle_stop: Some(IdleStop::Never) }]
+                if name == "default"
+                    && *machine == MachineSize { vcpus: Some(8), memory_mib: None }
+        ));
+        // 何も変えなければ送らない。
+        app.apply(Outcome::Done {
+            message: "ok".into(),
+            reload: vec![],
+        });
+        app.handle_key(key(KeyCode::Char('m')));
+        assert!(app.handle_key(ctrl('s')).is_empty());
+        assert!(screen(&app).contains("change a value"));
+    }
+
+    #[test]
     fn creates_a_workspace_with_a_form() {
         let mut app = app();
         app.handle_key(key(KeyCode::Char('n')));
@@ -1522,8 +1674,11 @@ mod tests {
         let actions = app.handle_key(ctrl('s'));
         assert!(matches!(
             &actions[..],
-            [Action::CreateWorkspace { name, root: Some(RootMode::Ephemeral), disks }]
-                if name == "api" && *disks == DiskSizes::default()
+            [Action::CreateWorkspace { name, options }]
+                if name == "api" && *options == NewWorkspace {
+                    root: Some(RootMode::Ephemeral),
+                    ..Default::default()
+                }
         ));
         // 失敗すると、フォームに理由を出して開いたままにする。
         app.apply(Outcome::Failed("already exists: api".into()));
@@ -1603,6 +1758,8 @@ mod tests {
             name: name.into(),
             root_mode: RootMode::Ephemeral,
             disks: DiskSizes::default(),
+            machine: MachineSize::default(),
+            idle_stop: IdleStop::Default,
         }
     }
 

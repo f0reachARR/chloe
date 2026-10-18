@@ -183,6 +183,9 @@ mod tests {
             running,
             workspace_disk_gib: 20,
             docker_disk_gib: 40,
+            vcpus: 4,
+            memory_mib: 4096,
+            idle_timeout_secs: Some(1800),
         }
     }
 

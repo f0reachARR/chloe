@@ -4,8 +4,11 @@
 //! chloe whoami              (接続した利用者の GitHub のログイン名)
 //! chloe ws list
 //! chloe ws create NAME [--root persistent|ephemeral] [--workspace 50G] [--docker 80G]
+//!                       [--cpus 8] [--memory 16G] [--idle 2h|never]
 //! chloe ws root NAME persistent|ephemeral
 //! chloe ws disk NAME [--workspace 50G] [--docker 80G]   (大きくするだけ。次の起動から効く)
+//! chloe ws machine NAME [--cpus 8] [--memory 16G]   (次の起動から効く)
+//! chloe ws idle NAME [30m|2h|never|default]   (最後の接続が閉じてから止めるまで)
 //! chloe ws policy show|set|rm NAME        (ワークスペースの規則。set は TOML を標準入力から読む)
 //! chloe ws stop NAME
 //! chloe ws rm NAME [--disks]   (--disks ならランナーのホストのディスクも消す)
@@ -31,9 +34,9 @@
 
 use chloe_controller::catalog::{self, SecretInput};
 use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
-use chloe_controller::workspace::{DiskSizes, RootMode};
+use chloe_controller::workspace::{DiskSizes, IdleStop, MachineSize, RootMode};
 
-use crate::ops::{self, owner_arg, owner_or_personal};
+use crate::ops::{self, NewWorkspace, format_idle, format_mib, owner_arg, owner_or_personal};
 use crate::session::Shared;
 
 pub struct Output {
@@ -83,8 +86,8 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
     let result = match args.as_slice() {
         ["whoami"] => Ok(format!("{login}\n")),
         ["ws", "list"] => ws_list(shared, login).await,
-        ["ws", "create", name, options @ ..] => match parse_ws_options(options, true) {
-            Ok((root, disks)) => ws_create(shared, login, name, root, disks).await,
+        ["ws", "create", name, options @ ..] => match parse_ws_options(options, CREATE_OPTIONS) {
+            Ok(options) => ws_create(shared, login, name, options).await,
             Err(e) => Err(e),
         },
         ["ws", "root", name, mode] => match mode.parse() {
@@ -92,9 +95,19 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
             Err(e) => Err(e.to_string()),
         },
         ["ws", "disk", name] => ws_disk_show(shared, login, name).await,
-        ["ws", "disk", name, options @ ..] => match parse_ws_options(options, false) {
-            Ok((_, disks)) => ws_disk(shared, login, name, disks).await,
+        ["ws", "disk", name, options @ ..] => match parse_ws_options(options, DISK_OPTIONS) {
+            Ok(options) => ws_disk(shared, login, name, options.disks).await,
             Err(e) => Err(e),
+        },
+        ["ws", "machine", name] => ws_machine_show(shared, login, name).await,
+        ["ws", "machine", name, options @ ..] => match parse_ws_options(options, MACHINE_OPTIONS) {
+            Ok(options) => ws_machine(shared, login, name, options.machine).await,
+            Err(e) => Err(e),
+        },
+        ["ws", "idle", name] => ws_idle_show(shared, login, name).await,
+        ["ws", "idle", name, idle] => match ops::parse_idle_stop(idle) {
+            Ok(idle) => ws_idle(shared, login, name, idle).await,
+            Err(e) => Err(shown(e)),
         },
         ["ws", "policy", "show", name] => ws_policy_show(shared, login, name).await,
         ["ws", "policy", "set", name] => ws_policy_set(shared, login, name, stdin).await,
@@ -154,34 +167,53 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
 
-/// `ws create` と `ws disk` のオプション。`--root` は `allow_root` のときだけ受け付ける。
-fn parse_ws_options(
-    options: &[&str],
-    allow_root: bool,
-) -> Result<(Option<RootMode>, DiskSizes), String> {
-    let mut root = None;
-    let mut disks = DiskSizes::default();
+const DISK_OPTIONS: &[&str] = &["--workspace", "--docker"];
+const MACHINE_OPTIONS: &[&str] = &["--cpus", "--memory"];
+const CREATE_OPTIONS: &[&str] = &[
+    "--root",
+    "--workspace",
+    "--docker",
+    "--cpus",
+    "--memory",
+    "--idle",
+];
+
+/// `ws create`、`ws disk` と `ws machine` のオプション。`allowed` にあるものだけを受け付ける。
+fn parse_ws_options(options: &[&str], allowed: &[&str]) -> Result<NewWorkspace, String> {
+    let mut parsed = NewWorkspace::default();
     let mut options = options.iter();
     while let Some(option) = options.next() {
-        let mut value = || {
-            options
-                .next()
-                .copied()
-                .ok_or_else(|| format!("{option} needs a value"))
-        };
+        if !allowed.contains(option) {
+            return Err(format!("unknown option: {option}\n{}", help()));
+        }
+        let value = options
+            .next()
+            .copied()
+            .ok_or_else(|| format!("{option} needs a value"))?;
         match *option {
-            "--root" if allow_root => root = Some(value()?.parse().map_err(|e| format!("{e}"))?),
-            "--workspace" => disks.workspace_gib = Some(ops::parse_gib(value()?).map_err(shown)?),
-            "--docker" => disks.docker_gib = Some(ops::parse_gib(value()?).map_err(shown)?),
-            _ => return Err(format!("unknown option: {option}\n{}", help())),
+            "--root" => parsed.root = Some(value.parse().map_err(|e| format!("{e}"))?),
+            "--workspace" => {
+                parsed.disks.workspace_gib = Some(ops::parse_gib(value).map_err(shown)?)
+            }
+            "--docker" => parsed.disks.docker_gib = Some(ops::parse_gib(value).map_err(shown)?),
+            "--cpus" => {
+                parsed.machine.vcpus = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid number of vCPUs: {value}"))?,
+                )
+            }
+            "--memory" => parsed.machine.memory_mib = Some(ops::parse_mib(value).map_err(shown)?),
+            "--idle" => parsed.idle_stop = ops::parse_idle_stop(value).map_err(shown)?,
+            _ => unreachable!("{option} is allowed but not handled"),
         }
     }
-    Ok((root, disks))
+    Ok(parsed)
 }
 
 /// 操作の失敗をコマンドの表示にする。
@@ -201,11 +233,14 @@ async fn ws_list(shared: &Shared, login: &str) -> Result<String, String> {
         .map(|ws| {
             let state = if ws.running { "running" } else { "stopped" };
             format!(
-                "{}\t{}\t{state}\t{}G\t{}G\n",
+                "{}\t{}\t{state}\t{}G\t{}G\t{}cpu\t{}\t{}\n",
                 ws.name,
                 ws.root.as_str(),
                 ws.workspace_disk_gib,
-                ws.docker_disk_gib
+                ws.docker_disk_gib,
+                ws.vcpus,
+                format_mib(ws.memory_mib),
+                format_idle(ws.idle_timeout_secs)
             )
         })
         .collect())
@@ -215,10 +250,9 @@ async fn ws_create(
     shared: &Shared,
     login: &str,
     name: &str,
-    root: Option<RootMode>,
-    disks: DiskSizes,
+    options: NewWorkspace,
 ) -> Result<String, String> {
-    let ws = ops::create_workspace(shared, login, name, root, disks)
+    let ws = ops::create_workspace(shared, login, name, options)
         .await
         .map_err(shown)?;
     Ok(format!("created {}\n", ws.name))
@@ -268,6 +302,69 @@ async fn ws_disk(
         config.docker_gib(ws.disks),
         ws.display_name()
     ))
+}
+
+async fn ws_machine_show(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
+    let ws = ops::workspace_info(shared, login, name)
+        .await
+        .map_err(shown)?;
+    Ok(format!(
+        "cpus\t{}\nmemory\t{}\n",
+        ws.vcpus,
+        format_mib(ws.memory_mib)
+    ))
+}
+
+async fn ws_machine(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    machine: MachineSize,
+) -> Result<String, String> {
+    let ws = ops::set_machine(shared, login, name, machine)
+        .await
+        .map_err(shown)?;
+    let config = shared.controller.machine();
+    Ok(format!(
+        "{} will have {} vCPUs and {} of memory from the next start (run `chloe ws stop {}` to restart now)\n",
+        ws.display_name(),
+        config.vcpus(ws.machine),
+        format_mib(config.memory_mib(ws.machine)),
+        ws.display_name()
+    ))
+}
+
+async fn ws_idle_show(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
+    let ws = ops::workspace_info(shared, login, name)
+        .await
+        .map_err(shown)?;
+    Ok(format!("{}\n", format_idle(ws.idle_timeout_secs)))
+}
+
+async fn ws_idle(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    idle: IdleStop,
+) -> Result<String, String> {
+    let ws = ops::set_idle_stop(shared, login, name, idle)
+        .await
+        .map_err(shown)?;
+    let timeout = idle
+        .timeout(shared.controller.idle_timeout())
+        .map(|d| d.as_secs());
+    Ok(match timeout {
+        Some(_) => format!(
+            "{} will stop {} after the last connection closes\n",
+            ws.display_name(),
+            format_idle(timeout)
+        ),
+        None => format!(
+            "{} will keep running until you run `chloe ws stop {}`\n",
+            ws.display_name(),
+            ws.display_name()
+        ),
+    })
 }
 
 async fn ws_stop(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
@@ -582,14 +679,37 @@ mod tests {
 
     #[test]
     fn parses_workspace_options() {
-        let (root, disks) =
-            parse_ws_options(&["--workspace", "50G", "--root", "persistent"], true).unwrap();
-        assert_eq!(root, Some(RootMode::Persistent));
-        assert_eq!(disks.workspace_gib, Some(50));
-        assert_eq!(disks.docker_gib, None);
-        let (_, disks) = parse_ws_options(&["--docker", "80GiB"], false).unwrap();
-        assert_eq!(disks.docker_gib, Some(80));
-        assert!(parse_ws_options(&["--root", "persistent"], false).is_err());
-        assert!(parse_ws_options(&["--workspace"], true).is_err());
+        let options = parse_ws_options(
+            &["--workspace", "50G", "--root", "persistent"],
+            CREATE_OPTIONS,
+        )
+        .unwrap();
+        assert_eq!(options.root, Some(RootMode::Persistent));
+        assert_eq!(options.disks.workspace_gib, Some(50));
+        assert_eq!(options.disks.docker_gib, None);
+        let options = parse_ws_options(&["--docker", "80GiB"], DISK_OPTIONS).unwrap();
+        assert_eq!(options.disks.docker_gib, Some(80));
+        assert!(parse_ws_options(&["--root", "persistent"], DISK_OPTIONS).is_err());
+        assert!(parse_ws_options(&["--workspace"], CREATE_OPTIONS).is_err());
+
+        let options = parse_ws_options(
+            &["--cpus", "8", "--memory", "16G", "--idle", "never"],
+            CREATE_OPTIONS,
+        )
+        .unwrap();
+        assert_eq!(
+            options.machine,
+            MachineSize {
+                vcpus: Some(8),
+                memory_mib: Some(16384)
+            }
+        );
+        assert_eq!(options.idle_stop, IdleStop::Never);
+        assert_eq!(options.disks, DiskSizes::default());
+        let options = parse_ws_options(&["--memory", "512M"], MACHINE_OPTIONS).unwrap();
+        assert_eq!(options.machine.memory_mib, Some(512));
+        assert!(parse_ws_options(&["--cpus", "x"], MACHINE_OPTIONS).is_err());
+        assert!(parse_ws_options(&["--idle", "2h"], MACHINE_OPTIONS).is_err());
+        assert!(parse_ws_options(&["--cpus", "2"], DISK_OPTIONS).is_err());
     }
 }

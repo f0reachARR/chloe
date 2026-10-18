@@ -87,6 +87,10 @@ async fn main() -> Result<()> {
         .disks
         .check()
         .map_err(|e| anyhow::anyhow!("invalid [disks]: {e}"))?;
+    config
+        .machine
+        .check()
+        .map_err(|e| anyhow::anyhow!("invalid [machine]: {e}"))?;
     if let Some(Command::Node { command }) = cli.command {
         return node_command(&config, command).await;
     }
@@ -307,7 +311,8 @@ async fn build_controller(
         Duration::from_secs(config.activity_poll_secs.max(1)),
         Duration::from_secs(config.max_busy_wait_secs),
     )
-    .with_disks(config.disks);
+    .with_disks(config.disks)
+    .with_machine(config.machine);
     Ok((controller, secrets, cluster))
 }
 

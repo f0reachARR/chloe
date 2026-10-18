@@ -85,6 +85,11 @@ action = "passthrough"
 # hosts = ["api.ghe.example.com"]
 # header = "authorization"
 
+# ワークスペースの VM の vCPU の数とメモリ (MiB) の既定。利用者は chloe ws machine で変えられる。
+# [machine]
+# vcpus = 4
+# memory_mib = 4096
+
 # ワークスペースのディスクの大きさ (GiB) の既定と上限。利用者は chloe ws disk で上限まで大きくできる。
 # [disks]
 # workspace_gib = 20

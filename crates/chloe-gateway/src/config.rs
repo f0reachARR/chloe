@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use chloe_controller::local::RunnerConfig;
 use chloe_controller::runner::BasePolicy;
-use chloe_controller::workspace::DiskConfig;
+use chloe_controller::workspace::{DiskConfig, MachineConfig};
 use serde::Deserialize;
 
 use crate::ban::BanConfig;
@@ -32,7 +32,8 @@ pub struct Config {
     pub audit_log: Option<PathBuf>,
     /// シークレットのマスター鍵。なければ生成する。
     pub master_key: PathBuf,
-    /// 最後の接続が閉じてからランナーを止めるまでの秒数。
+    /// 最後の接続が閉じてからランナーを止めるまでの秒数。ワークスペースごとに
+    /// `chloe ws idle` で変えられる。
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
     /// エージェントが作業中のとき、止める前に作業中かを尋ね直す間隔の秒数。
@@ -70,6 +71,9 @@ pub struct Config {
     /// ワークスペースのディスクの大きさの既定と上限。
     #[serde(default)]
     pub disks: DiskConfig,
+    /// ワークスペースの VM の vCPU の数とメモリの既定。
+    #[serde(default)]
+    pub machine: MachineConfig,
     /// 同じホスト (Docker か systemd) にランナーを置くときの設定。`cluster` とどちらか一方を書く。
     #[serde(default)]
     pub runner: Option<RunnerConfig>,
@@ -175,6 +179,9 @@ mod tests {
             [disks]
             max_workspace_gib = 500
 
+            [machine]
+            memory_mib = 8192
+
             [runner]
             guest_dir = "build/guest"
             egress_bin = "target/debug/chloe-egress"
@@ -184,6 +191,8 @@ mod tests {
         .unwrap();
         assert_eq!(config.disks.workspace_gib, 20);
         assert_eq!(config.disks.max_workspace_gib, 500);
+        assert_eq!(config.machine.vcpus, 4);
+        assert_eq!(config.machine.memory_mib, 8192);
         assert_eq!(config.github_url, "https://github.com");
         assert_eq!(config.idle_timeout_secs, 1800);
         assert!(config.is_allowed("alice"));
@@ -262,6 +271,7 @@ mod tests {
             assert!(config.runner.is_some());
             config.policy.check().unwrap();
             config.disks.check().unwrap();
+            config.machine.check().unwrap();
         }
     }
 }

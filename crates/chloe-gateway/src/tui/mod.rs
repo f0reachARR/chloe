@@ -14,6 +14,7 @@ use std::io;
 use std::sync::Arc;
 
 use chloe_agent_proto::{ClientMessage, WindowSize};
+use chloe_controller::workspace::MachineSize;
 use chloe_secrets::Owner;
 use ratatui::layout::{Rect, Size};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -154,8 +155,8 @@ async fn perform(
             Action::LoadWorkspaces => {
                 Outcome::Workspaces(ops::list_workspaces(shared, login).await.map_err(shown)?)
             }
-            Action::CreateWorkspace { name, root, disks } => {
-                let ws = ops::create_workspace(shared, login, &name, root, disks)
+            Action::CreateWorkspace { name, options } => {
+                let ws = ops::create_workspace(shared, login, &name, options)
                     .await
                     .map_err(shown)?;
                 done(
@@ -187,6 +188,43 @@ async fn perform(
                         ws.display_name(),
                         config.workspace_gib(ws.disks),
                         config.docker_gib(ws.disks)
+                    ),
+                    vec![Action::LoadWorkspaces],
+                )
+            }
+            Action::SetMachine {
+                name,
+                machine,
+                idle_stop,
+            } => {
+                let mut ws = ops::find_workspace(shared, login, &name)
+                    .await
+                    .map_err(shown)?;
+                if machine != MachineSize::default() {
+                    ws = ops::set_machine(shared, login, &name, machine)
+                        .await
+                        .map_err(shown)?;
+                }
+                if let Some(idle_stop) = idle_stop {
+                    ws = ops::set_idle_stop(shared, login, &name, idle_stop)
+                        .await
+                        .map_err(shown)?;
+                }
+                let config = shared.controller.machine();
+                let idle = ws
+                    .idle_stop
+                    .timeout(shared.controller.idle_timeout())
+                    .map(|d| d.as_secs());
+                done(
+                    format!(
+                        "{} will have {} vCPUs and {} of memory from the next start, and stops {}",
+                        ws.display_name(),
+                        config.vcpus(ws.machine),
+                        ops::format_mib(config.memory_mib(ws.machine)),
+                        match idle {
+                            Some(_) => format!("{} after the last connection closes", ops::format_idle(idle)),
+                            None => "only when you stop it".into(),
+                        }
                     ),
                     vec![Action::LoadWorkspaces],
                 )
