@@ -8,6 +8,7 @@
 //! PUT    /v1/runners/{key}              動いているランナーの方針を入れ替える (本文は RunnerSpec)
 //! DELETE /v1/runners/{key}              ランナーを止める
 //! DELETE /v1/runners/{key}/state        止めたランナーの状態 (ディスクを含む) を消す
+//! GET    /v1/runners/{key}/requests     プロキシのログの末尾 (?lines=N)。止まっていても読める
 //! GET    /v1/runners/{key}/agent        guest-agent への接続 (Upgrade: chloe-agent)
 //! ```
 
@@ -50,6 +51,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/v1/runners", get(list).post(start))
         .route("/v1/runners/{key}", get(status).put(update).delete(stop))
         .route("/v1/runners/{key}/state", delete(remove_state))
+        .route("/v1/runners/{key}/requests", get(requests))
         .route("/v1/runners/{key}/agent", get(agent))
         .layer(middleware::from_fn(only_control_plane))
         .with_state(state)
@@ -168,6 +170,26 @@ async fn remove_state(State(state): State<Arc<NodeState>>, Path(key): Path<Strin
     }
     match state.backend.remove_state(&key).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct RequestsQuery {
+    lines: Option<usize>,
+}
+
+async fn requests(
+    State(state): State<Arc<NodeState>>,
+    Path(key): Path<String>,
+    Query(query): Query<RequestsQuery>,
+) -> Response {
+    if !valid_key(&key) {
+        return bad_key();
+    }
+    let lines = query.lines.unwrap_or(chloe_audit::DEFAULT_LINES);
+    match state.backend.tail_requests(&key, lines).await {
+        Ok(records) => Json(records).into_response(),
         Err(e) => failed(e),
     }
 }

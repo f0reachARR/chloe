@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+chloe-audit.workspace = true
 chloe-controller.workspace = true
 chloe-mtls.workspace = true
 
