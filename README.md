@@ -71,7 +71,7 @@ KVM が使える x86_64 の Linux で、リポジトリのルートで次のよ�
 ```sh
 images/guest/kernel/build.sh
 images/guest/rootfs/build.sh
-docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest/dev
+docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest
 cargo build -p chloe-egress -p chloe-gateway
 # allowed_users に自分の GitHub のログイン名を書いてから起動する。
 target/debug/chloe-gateway --config images/guest/dev/gateway.example.toml

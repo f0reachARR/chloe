@@ -20,6 +20,7 @@ RUN cd /tmp \
     && install -m 0755 "release-$FIRECRACKER_VERSION-x86_64/jailer-$FIRECRACKER_VERSION-x86_64" /usr/local/bin/jailer \
     && rm -rf /tmp/*
 
-COPY entrypoint.sh dns-update.sh /opt/chloe/
-COPY policy.dev.json /opt/chloe/
+# ビルドの文脈は images/guest (systemd で動かすランナーと同じスクリプトを使う)。
+COPY runner/chloe-runner-net runner/chloe-runner-start runner/chloe-dns-update /opt/chloe/
+COPY dev/entrypoint.sh dev/policy.dev.json /opt/chloe/
 ENTRYPOINT ["/opt/chloe/entrypoint.sh"]

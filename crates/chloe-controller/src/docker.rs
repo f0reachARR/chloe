@@ -200,7 +200,11 @@ impl RunnerBackend for DockerBackend {
             tokio::fs::write(&policy, json).await?;
             let output = Command::new("docker")
                 .args(["exec", &self.container(&spec.key)])
-                .args(["/opt/chloe/dns-update.sh", "/state/config/policy.json"])
+                .args([
+                    "/opt/chloe/chloe-dns-update",
+                    "/state",
+                    "/state/config/policy.json",
+                ])
                 .output()
                 .await?;
             if !output.status.success() {

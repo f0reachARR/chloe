@@ -2,7 +2,7 @@
 # ホストに配置して動かすときの例は deploy/gateway.toml にある。
 #
 #   images/guest/kernel/build.sh && images/guest/rootfs/build.sh
-#   docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest/dev
+#   docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest
 #   cargo build -p chloe-egress -p chloe-gateway
 #   target/debug/chloe-gateway --config images/guest/dev/gateway.example.toml
 #

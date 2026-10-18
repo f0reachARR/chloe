@@ -66,7 +66,7 @@ name_prefix = "$prefix"
 EOF
 
 cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-gateway -p chloe-egress -p chloe-runner
-docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
+docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here/.." >/dev/null
 start_gateway() {
     "$root/target/debug/chloe-gateway" --config "$work/gateway.toml" >> "$logs/gateway.log" 2>&1 &
     gateway_pid=$!

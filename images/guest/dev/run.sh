@@ -24,7 +24,7 @@ done
 # chloe-egress はホストでビルドしてコンテナに渡す (ホストの glibc はコンテナより古い)。
 cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-egress
 
-docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
+docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here/.." >/dev/null
 
 # CHLOE_DEV_DETACH=1 ならバックグラウンドで起動する (確認スクリプトはこちらを使う)。
 # そうでなければ、端末から起動したときだけ TTY を割り当ててシリアルコンソールにつなぐ。

@@ -1,0 +1,75 @@
+#!/bin/sh
+# ランナーのネットワーク namespace の中で、VM の通信の出口を用意する (root で実行する)。
+#
+#   chloe-runner-net <tap の持ち主の UID>
+#
+# tap0 を作り、持ち主を指定した利用者にする (その利用者の Firecracker が開けるように)。
+# 1024 未満のポートを root でなくても待ち受けられるようにする (dnsmasq の 53 番)。
+#
+# CHLOE_NET_MODE で出口の作り方を選ぶ。
+#   nat   : VM からの通信をそのまま NAT する (段階 1)。
+#   proxy : 80 番と 443 番を chloe-egress へ転送し、それ以外を遮断する。
+# どちらのモードでも、VM の DNS はランナーの dnsmasq (172.29.0.1) が答える。
+set -eu
+
+owner_uid="$1"
+CHLOE_NET_MODE="${CHLOE_NET_MODE:-nat}"
+http_port=8080 https_port=8443
+
+ip link set lo up
+ip tuntap add tap0 mode tap user "$owner_uid"
+ip addr add 172.29.0.1/30 dev tap0
+ip link set tap0 up
+echo 0 > /proc/sys/net/ipv4/ip_unprivileged_port_start
+
+case "$CHLOE_NET_MODE" in
+nat)
+    uplink="$(ip -o route show default | awk '{ print $5 }')"
+    nft -f - <<EOF
+table inet chloe {
+    chain prerouting {
+        type nat hook prerouting priority dstnat;
+        iifname "tap0" meta l4proto { tcp, udp } th dport 53 dnat ip to 172.29.0.1:53
+    }
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        iifname "tap0" oifname "$uplink" accept
+        iifname "$uplink" oifname "tap0" ct state established,related accept
+    }
+    chain postrouting {
+        type nat hook postrouting priority srcnat;
+        iifname "tap0" oifname "$uplink" masquerade
+    }
+}
+EOF
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    ;;
+proxy)
+    nft -f - <<EOF
+table inet chloe {
+    chain prerouting {
+        type nat hook prerouting priority dstnat;
+        iifname "tap0" meta l4proto { tcp, udp } th dport 53 dnat ip to 172.29.0.1:53
+        iifname "tap0" tcp dport 80 redirect to :$http_port
+        iifname "tap0" tcp dport 443 redirect to :$https_port
+    }
+    chain input {
+        type filter hook input priority 0; policy accept;
+        iifname "tap0" ct state established,related accept
+        iifname "tap0" meta l4proto { tcp, udp } th dport 53 accept
+        iifname "tap0" tcp dport { $http_port, $https_port } accept
+        iifname "tap0" counter drop
+    }
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        iifname "tap0" counter drop
+    }
+}
+EOF
+    echo 0 > /proc/sys/net/ipv4/ip_forward
+    ;;
+*)
+    echo "unknown CHLOE_NET_MODE: $CHLOE_NET_MODE" >&2
+    exit 1
+    ;;
+esac

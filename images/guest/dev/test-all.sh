@@ -19,7 +19,7 @@ selected() { local n; for n in "${names[@]}"; do [ "$n" = "$1" ] && return 0; do
 
 # 並べて実行するスクリプトが同時にビルドしないよう、先にビルドしておく。
 cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-gateway -p chloe-egress -p chloe-runner -p chloe-node
-docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
+docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here/.." >/dev/null
 
 run() {
     local name="$1" start code

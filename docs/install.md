@@ -40,7 +40,7 @@ images/guest/kernel/build.sh
 images/guest/rootfs/build.sh
 
 # ランナーのコンテナのイメージ (Firecracker と dnsmasq を含む)。
-docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest/dev
+docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest
 
 # ゲートウェイ、プロキシ、ホストの常駐プロセス。
 cargo build --release -p chloe-gateway -p chloe-egress -p chloe-node

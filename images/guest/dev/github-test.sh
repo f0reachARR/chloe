@@ -170,7 +170,7 @@ name_prefix = "$prefix"
 EOF
 
 cargo build --quiet --manifest-path "$root/Cargo.toml" -p chloe-gateway -p chloe-egress
-docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here" >/dev/null
+docker build -q -t chloe-dev-runner -f "$here/runner.Dockerfile" "$here/.." >/dev/null
 "$root/target/debug/chloe-gateway" --config "$work/gateway.toml" > "$logs/gateway.log" 2>&1 &
 gateway_pid=$!
 wait_until 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$ssh_port"
