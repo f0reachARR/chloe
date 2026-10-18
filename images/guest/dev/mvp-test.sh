@@ -97,6 +97,8 @@ alice_bg=$!
 ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 'sleep 300' &
 bob_bg=$!
 check alice-env "sk-ant-api03-chloe" as alice 'printenv ANTHROPIC_API_KEY'
+# ssh <ホスト> 'コマンド' もログインシェルで動き、mise で入れたツールの shims が PATH に入る。
+check login-shell-path ".local/share/mise/shims" as alice 'printenv PATH'
 check bob-env "sk-ant-api03-chloe" as bob 'printenv ANTHROPIC_API_KEY'
 alice_ph="$(as alice 'printenv ANTHROPIC_API_KEY')"
 bob_ph="$(as bob 'printenv ANTHROPIC_API_KEY')"
