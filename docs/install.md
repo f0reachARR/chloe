@@ -159,6 +159,101 @@ GitHub App を設定すると、Organization のメンバーがログインで�
 登録の手順は [GitHub App の準備](github-app.md) にある。
 アプリの設定と秘密鍵を `/etc/chloe/` に置き、ゲートウェイの設定の `github_app` にそのパスを書く。
 
+## ランナーを systemd で動かす
+
+設定の `[runner]` に `kind = "systemd"` と書くと、ランナーを Docker のコンテナではなく systemd の unit で動かす。
+root で動くのは、ワークスペースごとのネットワーク namespace、veth、nftables、tap を作る部分だけである。
+プロキシ、DNS、Firecracker は `chloe` の利用者で動く。
+`chloe` を `docker` のグループに入れる必要がなくなり、ランナーのコンテナのイメージも要らない。
+ゲストのイメージのビルドには、今までどおり Docker を使う。
+
+### 要るもの
+
+```sh
+sudo apt-get install dnsmasq-base e2fsprogs iproute2 jq nftables polkitd
+```
+
+Firecracker は Ubuntu のアーカイブにないので、[リリース](https://github.com/firecracker-microvm/firecracker/releases)のバイナリを置く。
+版はランナーのコンテナ（`images/guest/dev/runner.Dockerfile`）と合わせる。
+
+```sh
+v=v1.17.0
+curl -fsSLO "https://github.com/firecracker-microvm/firecracker/releases/download/$v/firecracker-$v-x86_64.tgz"
+curl -fsSLO "https://github.com/firecracker-microvm/firecracker/releases/download/$v/firecracker-$v-x86_64.tgz.sha256.txt"
+sha256sum -c "firecracker-$v-x86_64.tgz.sha256.txt"
+tar -xzf "firecracker-$v-x86_64.tgz"
+sudo install -m 755 "release-$v-x86_64/firecracker-$v-x86_64" /usr/local/bin/firecracker
+```
+
+### 置く
+
+「配置」の手順に加えて、ランナーのスクリプト、unit、polkit の規則、ランナーの設定を置く。
+
+```sh
+sudo install -D -m 755 -t /usr/local/lib/chloe/runner images/guest/runner/*
+sudo install -m 644 deploy/systemd/chloe-host-net.service 'deploy/systemd/chloe-netns@.service' \
+    'deploy/systemd/chloe-runner@.service' /etc/systemd/system/
+sudo install -m 644 deploy/polkit/50-chloe.rules /etc/polkit-1/rules.d/
+sudo install -m 644 deploy/runner.env /etc/chloe/runner.env
+sudo systemctl daemon-reload
+```
+
+利用者 `chloe` は、`docker` ではなく `kvm` のグループに入れる（Firecracker が `/dev/kvm` を開くため）。
+
+```sh
+sudo useradd --system --no-create-home --home-dir /var/lib/chloe --shell /usr/sbin/nologin --groups kvm chloe
+```
+
+`chloe-node` のホストでは、`/etc/chloe/runner.env` の `CHLOE_STATE_ROOT` を `/var/lib/chloe-node/workspaces` にする。
+項目は [設定](configuration.md#runner) にある。
+
+### 設定と起動
+
+ゲートウェイ（`chloe-node` のホストでは `chloe-node`）の設定の `[runner]` を、次のように書き換える。
+パスは `/etc/chloe/runner.env` から読むので、ここには書かない。
+
+```toml
+[runner]
+kind = "systemd"
+```
+
+ホスト側のネットワークの規則を置いてから、ゲートウェイを起動する。
+
+```sh
+sudo systemctl enable --now chloe-host-net
+sudo systemctl enable --now chloe-gateway
+```
+
+ランナーの unit は、ゲートウェイが `systemctl start chloe-runner@ws-<番号>` で起動する。
+polkit の規則は、`chloe` の利用者にこの unit の起動、停止、読み直しだけを許す。
+動いているランナーは `systemctl list-units 'chloe-runner@*'` で、ゲストのシリアルコンソールの出力は `journalctl -u chloe-runner@ws-<番号>` で見られる。
+プロキシと DNS のログは、Docker のときと同じく `state_root/<ws-番号>/logs/` にある。
+
+### ホストのネットワーク
+
+ランナーの namespace は、veth（ホスト側の名前は `cw<番号>`）でホストとつなぎ、ホストで masquerade して外へ出す。
+外へ出るのは namespace の中のプロキシと DNS だけで、VM の通信は namespace の中でプロキシと DNS に向けられる。
+`chloe-host-net` は、nftables の表 `inet chloe-host` に次の規則を置き、`net.ipv4.ip_forward` を 1 にする。
+
+- namespace からホストへの通信を落とす（コントロールプレーンの内部 API、sshd などを守る）。
+- namespace からプライベートアドレス（RFC1918 など）への転送を落とす。プロキシは宛先のアドレスを確かめないので、利用者の規則で内部のアドレスに解決される名前を許しても、ここで止まる。ただし DNS（53 番）は通す。上流の DNS サーバーが LAN の中にあることが多いためである。
+- namespace 同士の転送を落とす。
+
+DNS の上流は、systemd-resolved を使っていれば `/run/systemd/resolve/resolv.conf` に書かれたサーバーを使う（namespace の中からは `127.0.0.53` に届かないため）。
+systemd-resolved を使っていなければ `/etc/resolv.conf` を使う。
+
+次の点に気をつける。
+
+- `nftables.service` を使っているホストでは、その設定（`/etc/nftables.conf`）の `flush ruleset` で `inet chloe-host` も消える。`nftables.service` を読み直したら、`chloe-host-net` も起動し直す。
+- ほかの仕組み（Docker、ufw など）が転送を落とす規則を置いていると、`cw*` からの転送も落とされることがある。nftables では、同じ hook の規則はどの表でも受け入れられたときだけ通る。
+
+### Docker の実装から移る
+
+ワークスペースの状態のディレクトリの形は同じなので、ディスクとプロキシの CA はそのまま引き継げる。
+切り替える前に、すべてのワークスペースを止める（`docker ps --filter name=chloe-` で、ランナーのコンテナが残っていないことを確かめる）。
+止めずに切り替えると、新しい実装は動いている Docker のコンテナを自分のランナーとして見つけられない。
+状態のディレクトリに root のファイルが残っていれば、`sudo chown -R chloe:chloe /var/lib/chloe/workspaces` で持ち主を直す。
+
 ## 状態の置き場所とバックアップ
 
 例の配置での場所を括弧に書く。

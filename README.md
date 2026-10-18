@@ -12,7 +12,8 @@ user@chloe:/workspace$ claude
 ## 状態
 
 開発中である。
-ランナー（ワークスペースの VM とプロキシ）は、特権コンテナの中で Firecracker を動かす開発用の実装だけがある。
+ランナー（ワークスペースの VM とプロキシ）は、特権コンテナの中で Firecracker を動かす開発用の実装と、systemd の unit で動かす実装がある。
+systemd の実装では、root で動くのはネットワークの準備だけで、Firecracker とプロキシは専用の利用者で動く。
 jailer による Firecracker の隔離と Kubernetes への配置はまだない。
 ホストに配置するための設定の例と systemd の unit は `deploy/` にあるが、まだ実際のホストで確かめていない。
 実装の順序と各段階の結果は [実装手順](docs/implementation-steps.md) にある。
@@ -51,7 +52,7 @@ jailer による Firecracker の隔離と Kubernetes への配置はまだない
 
 ## 分かっている制限
 
-- ランナーは開発用の実装（特権コンテナの中の Firecracker）だけで、jailer による隔離はない。
+- Firecracker に jailer による隔離（chroot、namespace、cgroup）をかけていない。systemd の実装でも、Firecracker は専用の利用者の権限で動くだけである。
 - 共有ワークスペースのメンバーは、VM の中では互いに root と同じことができる。
 - プロキシの本文の検査（プレースホルダーが別の宛先に送られていないかの確認）は、圧縮した本文、チャンクで送る本文、1MiB を超える本文、WebSocket の中身を見ない。
 - 中継のみの規則（`action = "passthrough"`）の宛先には、ほかの規則も差し替えも効かない（ほかの規則と宛先が重なる設定は受け付けない）。
@@ -114,8 +115,9 @@ crates/
 images/guest/
   kernel/            ゲストのカーネルのビルド
   rootfs/            ゲストのルートファイルシステムのビルド
+  runner/            ランナーの起動のスクリプト (開発用のコンテナと systemd の unit で共通)
   dev/               開発用のランナーのコンテナ、開発用の設定の例、VM を使う確認
-deploy/              ホストに配置するための設定の例と systemd の unit
+deploy/              ホストに配置するための設定の例、systemd の unit、polkit の規則
 migrations/          データベースのマイグレーション
 docs/                文書
 ```

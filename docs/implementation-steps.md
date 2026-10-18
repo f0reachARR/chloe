@@ -563,9 +563,9 @@ Docker の実装は、開発機での確認（`images/guest/dev/*-test.sh`）の
 ### 決めたこと（2026-10-18）
 
 - **権限の分け方**：root で動かすのは、ネットワーク namespace、veth、nftables、tap を作る部分だけにする。egress、dnsmasq、firecracker は `chloe` の利用者で動かす。firecracker は `kvm` のグループで `/dev/kvm` を開き、tap は持ち主を `chloe` にして作っておけば開ける。ディスクの作成と拡大（`truncate`、`mkfs.ext4`、`e2fsck`、`resize2fs`）も `chloe` で行う。root の側が `chloe` の書けるディレクトリのファイルを扱うと、ディスクのイメージをホストのデバイスへのシンボリックリンクにすり替えられ、VM にホストのディスクを渡すおそれがあるからである。
-- **ゲートウェイの利用者**：ゲートウェイと `chloe-node` は `chloe` のまま動かす。SSH を外に開くプロセスを root にしないためである。ランナーの unit の操作は、polkit の規則で `chloe` に許す。許すのは `chloe-runner@ws-<番号>.service` の `start`、`stop`、`reload` に限る（`reset-failed` がどの操作として問い合わせられるかは、実装のときに確かめる）。
+- **ゲートウェイの利用者**：ゲートウェイと `chloe-node` は `chloe` のまま動かす。SSH を外に開くプロセスを root にしないためである。ランナーの unit の操作は、polkit の規則で `chloe` に許す。許すのは `chloe-runner@ws-<番号>.service` の `start`、`stop`、`reload` に限る。
 - **unit の形**：パッケージに入れるテンプレートの unit を使う。パスをすべて引数で渡す transient の unit（`systemd-run`）は、polkit で許す範囲を unit の名前で絞りにくいので使わない。
-  - `chloe-runner-net.service`（root、oneshot、起動のとき）：ホスト側の nftables の表を置く。veth の名前のワイルドカード（`cw*`）で書き、ワークスペースごとには変えない。
+  - `chloe-host-net.service`（root、oneshot、起動のとき）：ホスト側の nftables の表を置く。veth の名前のワイルドカード（`cw*`）で書き、ワークスペースごとには変えない。
   - `chloe-netns@.service`（root、oneshot、`RemainAfterExit`、`StopWhenUnneeded`）：インスタンス名（`ws-3` など）だけを受け取り、ネットワーク namespace、veth、namespace の中の nftables（今の entrypoint.sh の tap0 の規則）、tap0、namespace の中の sysctl（`net.ipv4.ip_unprivileged_port_start=0`。dnsmasq が root でなくても 53 番で待ち受けられる）を作る。止まるときに片づける。
   - `chloe-runner@.service`（`chloe`、追加のグループ `kvm`）：`chloe-netns@` を `Requires=` と `After=` で引き込み、`NetworkNamespacePath=` でその namespace に入る。ディスクの作成と拡大、設定用のドライブ、egress、dnsmasq、firecracker を受け持つ。`Restart=no` にし、止まったランナーの片づけは今と同じく reconcile に任せる。
 - **設定の置き場所**：パス（`STATE_ROOT`、`GUEST_DIR`、`EGRESS_BIN`）とアドレスのプールは、root だけが書ける `/etc/chloe/runner.env` に書く。unit は `EnvironmentFile=` で、ゲートウェイと `chloe-node` は起動のときに、同じファイルを読む。パスを書く場所を一つにするためで、一つのホストに置けるランナーの設定は一組になる。ワークスペースごとの値（方針、ゲストの環境変数、ディスクの大きさ、ルートの扱い）は、今と同じく状態のディレクトリの `config/` に書く。
@@ -586,7 +586,7 @@ socket の unit に `NetworkNamespacePath=` を付ければ、待ち受けのソ
 2. **11b unit と権限**：三つの unit、polkit の規則、`runner.env` の例、ホスト側の nftables の表を `deploy/` に置く。
 3. **11c `SystemdBackend`**：`crates/chloe-controller/src/systemd.rs` に実装し、`[runner]` の `kind`、ゲートウェイの `Backend` の選択肢、`chloe-node` の対応を足す。`chloe-node` は今 `DockerBackend` を直接持ち、問い合わせ用ソケットのパスを具体的な型で引くので、両方の実装を包む型に置き換える。各操作は次のとおり。
    - `start`：`config/` に書いてから `systemctl start chloe-runner@<key>`。
-   - `stop`：`systemctl stop` のあと `reset-failed`。失敗した unit が一覧に残らないようにする。
+   - `stop`：`systemctl stop`。失敗した unit が一覧に残らないよう、unit に `CollectMode=inactive-or-failed` を付ける（`reset-failed` を polkit で許さずに済む）。
    - `is_running`：`systemctl is-active`。
    - `list`：`systemctl list-units --state=active 'chloe-runner@*'`。
    - `update`：`egress.sock` に送り、`systemctl reload`。
@@ -594,11 +594,24 @@ socket の unit に `NetworkNamespacePath=` を付ければ、待ち受けのソ
 4. **11d 確認**：入れ子の KVM を許した root の使える VM で、ランナーの起動と停止、ゲートウェイの再起動での引き取り、方針の入れ替え（DNS の許可リストを含む）、reconcile、VM からホストと内部のアドレスに届かないことを確かめる。開発機では今までどおり Docker の実装で確かめる。
 5. **11e 文書**：インストールと設定の文書に、`kind = "systemd"` での配置と、Docker の実装から移るときの手順を書く。状態のディレクトリの形は変わらないので、ディスクと CA はそのまま引き継げる。ただし、切り替える前にすべてのワークスペースを止める。止めずに切り替えると、動いている Docker のコンテナを、新しい実装が自分のランナーとして見つけられないからである。
 
-### 確かめること
+### 結果（2026-10-18）
 
-- Docker が入っているホストでは、Docker が iptables の FORWARD を DROP にするので、veth からの転送も落とされる。`DOCKER-USER` に通す規則が要るか、ufw と共存できるかを確かめる。
-- veth と NAT のために、ホスト全体の `ip_forward` を 1 にする。
-- dnsmasq を root でない利用者で動かせるか（namespace の中の sysctl で 53 番を開けたうえで）を確かめる。
+VM を使う確認は 9 つ、398 項目がすべて通った（並べて 80 秒）。
+
+- **11a**：`images/guest/runner/` に、namespace の中の準備（`chloe-runner-net`、root）、プロキシと DNS と Firecracker の起動（`chloe-runner-start`）、DNS の許可リストの作り直し（`chloe-dns-update`）を置いた。開発用のコンテナも同じスクリプトを使い、プロキシ、dnsmasq、Firecracker を状態のディレクトリの持ち主で動かす。dnsmasq は、namespace の中の `net.ipv4.ip_unprivileged_port_start=0` で、root でなくても 53 番で待ち受けられた。Firecracker は、`kvm` のグループと、持ち主を指定して作った tap0 で、root でなくても動いた。
+- **11b**：ホスト側のスクリプト（`chloe-host-net`、`chloe-netns-up`、`chloe-netns-down`）、三つの unit、polkit の規則、`runner.env` の例を置いた。Firecracker が終わったあとに残ったプロキシが終了処理を待ち、unit が止まりきるまで数秒かかったので、`KillSignal=SIGKILL` にした（Docker の `docker rm -f` と同じ）。
+- **11c**：`local` に Docker と systemd の実装の選択（`RunnerConfig`、`LocalBackend`）と共通の処理（方針とゲストの環境変数の書き込み、プロキシへの方針の送信、guest-agent への接続、状態の削除）をまとめ、`systemd` に `SystemdBackend` を置いた。ゲートウェイと `chloe-node` は `LocalBackend` を使う。ゲートウェイと `chloe-node` の unit は、Docker を必須にしない（`Requires=` を `Wants=` にした）。
+- **11d 確認**：開発機には root の権限がないので、systemd を PID 1 にした Docker の特権コンテナ（Ubuntu 24.04、Docker なし）をホストの代わりにし、`deploy/` の unit、polkit の規則、ホストの規則をそのまま使う確認（`images/guest/dev/systemd-test.sh`）を足した。プロセスの利用者、外への通信と DNS、namespace からホストとプライベートアドレスへの遮断、方針の入れ替えでの DNS の許可リストの作り直し、二つのランナーの veth の割り当て、ゲートウェイの再起動での引き取り、polkit が許さない操作、止めたあとの namespace と veth の片づけと枠の再利用を確かめた。
+- **実際のホストでの確認**：Docker、tailscale、systemd-resolved が動いている Ubuntu 24.04 のホストに手で置き、同じ項目を確かめた。DNS の上流は `/run/systemd/resolve/resolv.conf` の 1.1.1.1 になった。このホストでは Docker が FORWARD の既定を ACCEPT のままにしていたので、Docker の規則との衝突は起きなかった（Docker が FORWARD を DROP にしているホストは確かめていない）。
+
+残したもの：
+
+- Docker が FORWARD の既定を DROP にしているホストと、ufw を有効にしたホストでの確認。
+- ホスト全体の `net.ipv4.ip_forward` を 1 にする。外への経路を namespace に持たせない形（「決めたこと」の最後）にすれば要らなくなる。
+- DNS の 53 番は、プライベートアドレスにも通す。外へ出られるのは namespace の中のプロキシと dnsmasq だけで、dnsmasq は許可リストの名前だけを上流に問い合わせるが、上流が変わったときに上流だけに絞り直す仕組みはない。
+- `nftables.service` を読み直すと、ホスト側の規則が消える（`chloe-host-net` を起動し直す必要がある）。
+- jailer。Firecracker は `chloe` の利用者の権限で動くだけで、chroot、namespace、cgroup の制限はかけていない（seccomp は Firecracker の既定のもの）。
+- deb のパッケージ。ランナーの unit とスクリプトの置き場所（今は `/usr/local/lib/chloe/runner`）は、パッケージにするときに `/usr/libexec/chloe` などへ移す。
 
 ## 段階 12 以降の進め方
 

@@ -24,6 +24,7 @@ cargo test --workspace
 ## VM を使う確認
 
 KVM と Docker が要る。
+`systemd` の確認も Docker の特権コンテナで行うので、root の権限は要らない。
 先にゲストのイメージをビルドしておく（[インストール](install.md#ビルド)）。
 本物の API キーは使わず、偽の値をシークレットに登録して、差し替えた要求が宛先で 401 になることで確かめる。
 
@@ -42,6 +43,7 @@ images/guest/dev/test-all.sh mvp node   # 名前を指定して実行する
 | `github` | GitHub App（GitHub のふりをするサーバー）、Device Flow を必須にしたログイン、共通のユーザー名と鍵の結び付け、二つの Organization、設定とシークレットの権限、管理の TUI |
 | `lifecycle` | 作業中のエージェントを待つ停止、ゲートウェイの再起動、ポート転送、監査ログ |
 | `node` | 二つの `chloe-node`、参加、ディスクを広げること、相互 TLS、つながらないホスト |
+| `systemd` | systemd で動かすランナー（`kind = "systemd"`）。systemd を PID 1 にした特権コンテナをホストの代わりにし、`deploy/` の unit、polkit の規則、ホストのネットワークの規則で、起動、利用者、外への通信と DNS、ホストとプライベートアドレスへの遮断、方針の入れ替え、ゲートウェイの再起動、停止と片づけを確かめる |
 
 どの確認も VM の名前、状態のディレクトリ、ポートが別なので、並べて実行できる（2026-10-17 の時点で 320 項目が 79 秒）。
 各スクリプトの出力は `build/dev/test-logs/<名前>.log` に出る。
