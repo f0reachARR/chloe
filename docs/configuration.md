@@ -27,12 +27,13 @@ systemd で動かすときは、すべて絶対パスで書く。
 | `allowed_users` | `[]` | ログインを許す GitHub のログイン名。GitHub App の Organization のメンバーに加えて許す |
 | `admins` | `[]` | サーバーの運用者。どの Organization と team の設定とシークレットも変えられる |
 | `memberships` | `{}` | 共有ワークスペースに入れる利用者を、GitHub の所属に加えて書く（開発用） |
-| `idle_timeout_secs` | `1800` | 最後の接続が切れてから VM を止めるまでの秒数 |
+| `idle_timeout_secs` | `1800` | 最後の接続が切れてから VM を止めるまでの秒数。利用者は `chloe ws idle` でワークスペースごとに変えられる |
 | `activity_poll_secs` | `60` | エージェントが作業中のとき、作業中かを尋ね直す間隔の秒数 |
 | `max_busy_wait_secs` | `43200` | エージェントが作業中でも、この秒数が経ったら止める |
 | `reconcile_interval_secs` | `60` | 動いているランナーと記録を突き合わせる間隔の秒数 |
 | `[github_token]` | github.com 向け | GitHub のトークンを VM に渡す定義（下を参照） |
 | `[policy]` | 空 | すべてのワークスペースに共通の許可リストと規則 |
+| `[machine]` | 下を参照 | ワークスペースの VM の vCPU の数とメモリの既定 |
 | `[disks]` | 下を参照 | ワークスペースのディスクの大きさの既定と上限 |
 | `[runner]` | — | 同じホストの Docker にランナーを置く。`[cluster]` とどちらか一方を書く |
 | `[cluster]` | — | 複数のホスト（`chloe-node`）にランナーを置く |
@@ -174,8 +175,21 @@ VM の DNS は、`allow` と `passthrough` の規則にある名前だけを引�
 
 一つのホストに置けるランナーの設定は一組である（unit がこのファイルを読むため）。
 
-VM の CPU とメモリは固定である（4 vCPU、メモリ 4GiB）。
-ディスクの大きさは `[disks]` で決める。
+VM の vCPU の数とメモリの既定は `[machine]`、ディスクの大きさは `[disks]` で決める。
+ゲートウェイはワークスペースごとの値をランナーの設定に書くので、`runner.env` に `VCPUS` や `MEM_MIB` を書いても効かない。
+
+### `[machine]`
+
+ワークスペースの VM の大きさの既定。
+利用者は `chloe ws create` と `chloe ws machine` で、ワークスペースごとに変えられる。
+
+| 項目 | 既定 | 内容 |
+| --- | --- | --- |
+| `vcpus` | `4` | vCPU の数（1 から 32） |
+| `memory_mib` | `4096` | メモリ（MiB、512 以上） |
+
+上限は置かない。
+Firecracker はホストの CPU とメモリを超えて VM に割り当てられるので、大きな VM がいくつも動くと、ホストのメモリが足りなくなる可能性がある。
 
 ### `[disks]`
 

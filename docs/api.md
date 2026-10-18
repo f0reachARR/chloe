@@ -49,7 +49,7 @@ API の呼び出しは、利用者、トークンの ID、メソッド、パス�
 | `GET /v1/workspaces` | 入れるワークスペースの一覧 |
 | `POST /v1/workspaces` | ワークスペースを作る |
 | `GET /v1/workspaces/{name}` | ワークスペース |
-| `PATCH /v1/workspaces/{name}` | ルートの扱いやディスクの大きさを変える、止める |
+| `PATCH /v1/workspaces/{name}` | ルートの扱い、ディスクや VM の大きさ、止めるまでの時間を変える、止める |
 | `DELETE /v1/workspaces/{name}[?disks=true]` | ワークスペースを消す（`disks=true` でなければディスクは残る） |
 | `GET /v1/secrets[?owner=]` | シークレットの名前の一覧 |
 | `PUT /v1/secrets/{kind}[?owner=]` | シークレットを登録する |
@@ -76,13 +76,15 @@ api() { curl -s -H "Authorization: Bearer $CHLOE_TOKEN" -H 'content-type: applic
 
 ```sh
 api /v1/workspaces
-# [{"name":"default","root":"ephemeral","running":true,"workspace_disk_gib":20,"docker_disk_gib":40}, ...]
+# [{"name":"default","root":"ephemeral","running":true,"workspace_disk_gib":20,"docker_disk_gib":40,"vcpus":4,"memory_mib":4096,"idle_timeout_secs":1800}, ...]
 
 api /v1/workspaces -X POST -d '{"name": "acme/web", "root": "persistent", "workspace_disk_gib": 50}'
-# {"name":"acme/web","root":"persistent","running":false,"workspace_disk_gib":50,"docker_disk_gib":40}   (201)
+# {"name":"acme/web","root":"persistent","running":false,"workspace_disk_gib":50,"docker_disk_gib":40,"vcpus":4,"memory_mib":4096,"idle_timeout_secs":1800}   (201)
 
 api /v1/workspaces/acme/web -X PATCH -d '{"root": "ephemeral"}'
 api /v1/workspaces/acme/web -X PATCH -d '{"docker_disk_gib": 80}'   # 次の起動から
+api /v1/workspaces/acme/web -X PATCH -d '{"vcpus": 8, "memory_mib": 16384}'   # 次の起動から
+api /v1/workspaces/acme/web -X PATCH -d '{"idle_timeout": "never"}'
 api /v1/workspaces/acme/web -X PATCH -d '{"running": false}'    # 止める
 api /v1/workspaces/acme/web -X DELETE                             # 204
 ```
@@ -91,6 +93,8 @@ api /v1/workspaces/acme/web -X DELETE                             # 204
 `workspace_disk_gib` と `docker_disk_gib` は GiB で、省くとゲートウェイの設定の既定を使う。
 変えるときは大きくするだけで、今より小さい値と上限を超える値は 400 を返す。
 新しい大きさは、次にワークスペースを起動したときに効く。
+`vcpus`（1 から 32）と `memory_mib`（MiB、512 以上）も、省くとゲートウェイの設定の既定を使い、次の起動から効く。
+`idle_timeout` は `chloe ws idle` と同じ書き方（`30m`、`2h`、`never`、`default`）で、返す `idle_timeout_secs` は既定を当てはめた秒数（止めないなら `null`）。
 `"running": true` は受け付けない（ワークスペースは SSH でつないだときに起動する）。
 
 ### シークレット

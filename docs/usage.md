@@ -88,14 +88,41 @@ mise で入れれば、そのまま作業中のあいだは VM を止めない�
 
 ## VM が止まるとき
 
-最後の接続が切れてから一定の時間（既定は 30 分）が経つと、VM を止める。
+最後の接続が切れてから一定の時間（既定は 30 分。ゲートウェイの設定で変わる）が経つと、VM を止める。
 Claude Code や Codex が作業中のあいだは止めず、作業が終わってから止める（既定では最長 12 時間待つ）。
 ポート転送をしている SSH の接続があるあいだも止めない。
 
 VM を止めると、VM の中で動かしていたプロセス（開発用のサーバー、tmux のセッション）は終わる。
 ファイルは「VM の中」で書いたとおりに残る。
 
-すぐに止めたいときや、ルートの扱いやディスクの大きさを変えたあとで起動し直したいときは、`chloe ws stop <名前>` で止める。
+すぐに止めたいときや、ルートの扱い、ディスクや VM の大きさを変えたあとで起動し直したいときは、`chloe ws stop <名前>` で止める。
+
+止めるまでの時間は、`chloe ws idle` でワークスペースごとに変えられる。
+`30m`、`2h`、`1d` のように書き、`never` なら接続がなくても止めず、`default` ならゲートウェイの設定の時間に戻す。
+
+```sh
+ssh chloe@chloe.example.com chloe ws idle api 2h
+ssh chloe@chloe.example.com chloe ws idle api never   # chloe ws stop で止めるまで動かし続ける
+ssh chloe@chloe.example.com chloe ws idle api         # 今の時間を出す
+```
+
+VM が動いていて接続がなければ、変えたときから数え直す。
+
+## VM の大きさを変える
+
+`chloe ws machine` で、VM の vCPU の数とメモリを変える。
+vCPU は 1 から 32、メモリは `8G` や `512M` のように書く（512M 以上）。
+書かなかったほうは変えない。
+既定は 4 vCPU とメモリ 4GiB である（ゲートウェイの設定で変わる）。
+
+```sh
+ssh chloe@chloe.example.com chloe ws machine api --cpus 8 --memory 16G
+ssh chloe@chloe.example.com chloe ws machine api     # 今の大きさを出す
+```
+
+ディスクと同じく、新しい大きさは次に VM を起動したときに効く。
+すぐに変えたいときは、`chloe ws stop <名前>` で止めてからつなぎ直す。
+作るときに決めるなら、`chloe ws create <名前> --cpus 8 --memory 16G --idle 2h` のように書く。
 
 ## ディスクを大きくする
 
@@ -359,6 +386,7 @@ ssh -t chloe@chloe.example.com chloe
 シークレットは、`deploy/secrets/` の例を雛形にして作れる。
 登録したシークレットの定義を変えるとき、値の欄を空のままにすると今の値を使い続ける。
 ワークスペースのタブでは、`g` でディスクの大きさを変える（`chloe ws disk` と同じく、次の起動から効く）。
+`m` で、VM の vCPU の数とメモリ（次の起動から効く）と、止めるまでの時間を変える。
 `u` で、選んだワークスペースを Rules タブで開く。
 
 Rules タブでは、左の一覧でスコープ（ゲートウェイ、個人、Organization、team、ワークスペース）を選ぶ。
@@ -398,8 +426,11 @@ Host chloe-admin
 chloe whoami                                    接続した利用者の GitHub のログイン名
 chloe ws list                                   ワークスペースの一覧
 chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]
+                     [--cpus N] [--memory MEM] [--idle TIME]
 chloe ws root NAME persistent|ephemeral          ルートの扱い (次の起動から)
 chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   ディスクを大きくする (次の起動から)
+chloe ws machine NAME [--cpus N] [--memory MEM]  VM の大きさを変える (次の起動から)
+chloe ws idle NAME [TIME]                        最後の接続が切れてから止めるまで
 chloe ws policy show NAME                        ワークスペースの規則
 chloe ws policy set NAME                         TOML を標準入力から読む
 chloe ws policy rm NAME
@@ -423,7 +454,8 @@ NAME は SSH のユーザー名の `+` のあとと同じ書き方、OWNER は O
 `secret` と `policy` は、OWNER を省くと自分の個人のものを扱う。
 `--root` を省くと、持ち主（個人、Organization と team）の設定の既定を使う（設定がなければ `ephemeral`）。
 SIZE は GiB で書く（`50G`）。省いたディスクは、ゲートウェイの設定の既定の大きさで作る。
-`chloe ws list` は、名前、ルートの扱い、動いているか、ワークスペースと Docker のディスクの大きさを、タブで区切って出す。
+MEM は `8G` か `512M` のように、TIME は `30m`、`2h`、`1d`、`never`、`default` のように書く。省くとゲートウェイの設定の既定を使う。
+`chloe ws list` は、名前、ルートの扱い、動いているか、ワークスペースと Docker のディスクの大きさ、vCPU の数、メモリ、止めるまでの時間を、タブで区切って出す。
 `chloe ws rm` は、`--disks` を付けなければワークスペースのディスク（`/workspace`、ホームディレクトリ、Docker のデータ）をランナーのホストに残す。
 管理の画面で消すときは、ディスクを残す（`k`）か一緒に消す（`d`）かを選ぶ。
 同じ操作を HTTP(S) で行う方法は [管理 API](api.md) にある。
