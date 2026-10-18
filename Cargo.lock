@@ -790,6 +790,8 @@ dependencies = [
  "chloe-agent-proto",
  "pty-process",
  "rustix",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tokio-vsock",
  "tracing",

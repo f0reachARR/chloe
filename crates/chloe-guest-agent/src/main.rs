@@ -9,7 +9,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, bail};
 use chloe_agent_proto::{
     AGENT_PORT, AgentMessage, ClientMessage, ConnectRequest, Connection, ExecRequest, ExitStatus,
-    PROTOCOL_VERSION, Receiver, Sender, TtyRequest,
+    GuestFile, PROTOCOL_VERSION, Receiver, Sender, TtyRequest,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
@@ -20,6 +20,13 @@ use tracing::{info, warn};
 const DEFAULT_USER: &str = "user";
 /// ランナーが渡した環境変数 (プレースホルダーなど)。chloe-load-config が置く。
 const RUNNER_ENV: &str = "/run/chloe/env";
+/// 起動したときにランナーが渡したファイル ([`GuestFile`] の JSON)。chloe-load-config が置く。
+const RUNNER_FILES: &str = "/run/chloe/files.json";
+/// 置いたファイルの一覧。ランナーが渡さなくなったファイルを消すのに使う。ルートの層と一緒に
+/// 残るよう、/run ではなくここに置く。
+const FILES_MANIFEST: &str = "/var/lib/chloe/files";
+/// ランナーのファイルを置かない場所。
+const RESERVED_DIRS: &[&str] = &["/run/chloe", "/proc", "/sys", "/dev"];
 /// OS の信頼ストアを読まないツールのために、chloe の CA を含む信頼ストアを指す。
 const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// エージェントの作業中の印 (chloe-activity が置く)。
@@ -43,6 +50,16 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    // 起動したときのファイルを置く。置けなくても、シェルは使えるようにする。
+    match std::fs::read(RUNNER_FILES) {
+        Ok(json) => match serde_json::from_slice::<Vec<GuestFile>>(&json) {
+            Ok(files) => update_files(&files),
+            Err(error) => warn!("invalid {RUNNER_FILES}: {error}"),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => warn!("failed to read {RUNNER_FILES}: {error}"),
+    }
 
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, AGENT_PORT))
         .context("failed to listen on vsock")?;
@@ -85,7 +102,20 @@ async fn handle(stream: VsockStream) -> Result<()> {
             }
             return Ok(());
         }
-        _ => bail!("the first message must be Exec, Activity, Connect or SetEnv"),
+        Some(ClientMessage::SetFiles(files)) => {
+            match apply_files(&files, std::path::Path::new(FILES_MANIFEST), lookup_user) {
+                Ok(()) => {
+                    info!(count = files.len(), "runner files updated");
+                    conn.send(&AgentMessage::FilesUpdated).await?;
+                }
+                Err(error) => {
+                    conn.send(&AgentMessage::Error(format!("{error:#}")))
+                        .await?
+                }
+            }
+            return Ok(());
+        }
+        _ => bail!("the first message must be Exec, Activity, Connect, SetEnv or SetFiles"),
     };
     let (mut tx, rx) = conn.split();
     if request.version != PROTOCOL_VERSION {
@@ -259,6 +289,116 @@ fn parse_env_file(content: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// 起動したときに、ランナーのファイルを置く。失敗はログに残すだけにする。
+fn update_files(files: &[GuestFile]) {
+    match apply_files(files, std::path::Path::new(FILES_MANIFEST), lookup_user) {
+        Ok(()) => info!(count = files.len(), "runner files placed"),
+        Err(error) => warn!("failed to place the runner files: {error:#}"),
+    }
+}
+
+/// ランナーのファイルを置き、前に置いて今回にないファイルを消す。置いたファイルの一覧を
+/// `manifest` に残す。パスか持ち主がおかしいファイルが一つでもあれば、何も変えない。
+fn apply_files(
+    files: &[GuestFile],
+    manifest: &std::path::Path,
+    lookup: impl Fn(&str) -> Option<(u32, u32)>,
+) -> Result<()> {
+    let mut owners = Vec::with_capacity(files.len());
+    for file in files {
+        check_file_path(&file.path)?;
+        if file.mode > 0o777 {
+            bail!("invalid mode {:o} for {}", file.mode, file.path);
+        }
+        let owner = lookup(&file.owner)
+            .with_context(|| format!("no such user {} for {}", file.owner, file.path))?;
+        owners.push(owner);
+    }
+    let previous = std::fs::read_to_string(manifest).unwrap_or_default();
+    let mut failed = Vec::new();
+    for (file, (uid, gid)) in files.iter().zip(owners) {
+        if let Err(error) = write_file(file, uid, gid) {
+            warn!(path = %file.path, "failed to place a runner file: {error:#}");
+            failed.push(file.path.as_str());
+        }
+    }
+    for old in previous.lines().filter(|line| !line.is_empty()) {
+        if files.iter().any(|file| file.path == old) {
+            continue;
+        }
+        match std::fs::remove_file(old) {
+            Ok(()) => info!(path = old, "removed a runner file"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(path = old, "failed to remove a runner file: {error}"),
+        }
+    }
+    // 置けなかったファイルも一覧に入れ、あとで渡さなくなったら消す。
+    let list: String = files
+        .iter()
+        .map(|file| format!("{}\n", file.path))
+        .collect();
+    if let Some(dir) = manifest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = manifest.with_extension("tmp");
+    std::fs::write(&tmp, list).context("write the list of runner files")?;
+    std::fs::rename(&tmp, manifest).context("replace the list of runner files")?;
+    if !failed.is_empty() {
+        bail!("failed to place {}", failed.join(", "));
+    }
+    Ok(())
+}
+
+/// 絶対パスで、`.` と `..` を含まず、ランナーのファイルを置かない場所の外にあるか。
+fn check_file_path(path: &str) -> Result<()> {
+    use std::path::{Component, Path};
+    let p = Path::new(path);
+    let mut components = p.components();
+    let valid = components.next() == Some(Component::RootDir)
+        && p.file_name().is_some()
+        && components.all(|c| matches!(c, Component::Normal(_)))
+        && !path.chars().any(char::is_control);
+    if !valid {
+        bail!("invalid path {path:?}");
+    }
+    if RESERVED_DIRS.iter().any(|dir| p.starts_with(dir)) {
+        bail!("path {path} is reserved");
+    }
+    Ok(())
+}
+
+/// 一時的なファイルに書いてから置き換える。足りないディレクトリは作り、持ち主をそろえる。
+fn write_file(file: &GuestFile, uid: u32, gid: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::path::Path::new(&file.path);
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        bail!("invalid path {}", file.path);
+    };
+    let missing: Vec<&std::path::Path> = dir.ancestors().take_while(|d| !d.exists()).collect();
+    for new in missing.into_iter().rev() {
+        std::fs::create_dir(new).with_context(|| format!("create {}", new.display()))?;
+        std::os::unix::fs::chown(new, Some(uid), Some(gid))?;
+    }
+    let tmp = dir.join(format!(".{}.chloe-tmp", name.to_string_lossy()));
+    std::fs::write(&tmp, &file.content).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(file.mode))?;
+    std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replace {}", file.path))?;
+    Ok(())
+}
+
+/// 利用者の UID と GID を /etc/passwd から引く。
+fn lookup_user(name: &str) -> Option<(u32, u32)> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let mut parts = line.split(':');
+        (parts.next()? == name).then_some(())?;
+        let uid = parts.nth(1)?.parse().ok()?;
+        let gid = parts.next()?.parse().ok()?;
+        Some((uid, gid))
+    })
+}
+
 fn working_dir(request: &ExecRequest) -> String {
     match (&request.cwd, request.user.as_deref()) {
         (Some(cwd), _) => cwd.clone(),
@@ -303,7 +443,7 @@ async fn run_with_tty(
                 }
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::CloseStdin) => {}
-                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_) | ClientMessage::SetEnv(_)) => bail!("unexpected message"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_) | ClientMessage::SetEnv(_) | ClientMessage::SetFiles(_)) => bail!("unexpected message"),
                 // ホストが切断した。端末を閉じてプロセスに SIGHUP を届ける。
                 None => {
                     drop(input);
@@ -364,7 +504,7 @@ async fn run_with_pipes(
                 Some(ClientMessage::CloseStdin) => stdin = None,
                 Some(ClientMessage::Signal(signal)) => send_signal(&child, signal),
                 Some(ClientMessage::Resize(_)) => {}
-                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_) | ClientMessage::SetEnv(_)) => bail!("unexpected message"),
+                Some(ClientMessage::Exec(_) | ClientMessage::Activity | ClientMessage::Connect(_) | ClientMessage::SetEnv(_) | ClientMessage::SetFiles(_)) => bail!("unexpected message"),
                 None => {
                     client_open = false;
                     let _ = child.start_kill();
@@ -498,6 +638,75 @@ mod tests {
                 ("B".to_string(), "x=y".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn places_and_removes_runner_files() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("state/files");
+        let me = || {
+            let meta = std::fs::metadata(dir.path()).unwrap();
+            Some((meta.uid(), meta.gid()))
+        };
+        let lookup = |name: &str| (name == "user").then(me).flatten();
+        let file = |name: &str, content: &str| GuestFile {
+            path: dir.path().join(name).to_string_lossy().into_owned(),
+            content: content.into(),
+            mode: 0o600,
+            owner: "user".into(),
+        };
+        let apt = file(
+            "etc/apt/auth.conf.d/chloe.conf",
+            "machine a login u password p\n",
+        );
+        let netrc = file("home/.netrc", "machine b\n");
+        apply_files(&[apt.clone(), netrc.clone()], &manifest, lookup).unwrap();
+        assert_eq!(std::fs::read_to_string(&apt.path).unwrap(), apt.content);
+        let mode = std::fs::metadata(&apt.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // 渡さなくなったファイルは消し、渡したものは書き換える。
+        let apt2 = GuestFile {
+            content: "changed\n".into(),
+            ..apt.clone()
+        };
+        apply_files(std::slice::from_ref(&apt2), &manifest, lookup).unwrap();
+        assert_eq!(std::fs::read_to_string(&apt.path).unwrap(), "changed\n");
+        assert!(!std::path::Path::new(&netrc.path).exists());
+
+        // おかしいものが一つでもあれば何も変えない。
+        for bad in [
+            GuestFile {
+                path: "relative/x".into(),
+                ..apt.clone()
+            },
+            GuestFile {
+                path: format!("{}/../x", dir.path().display()),
+                ..apt.clone()
+            },
+            GuestFile {
+                path: "/run/chloe/env".into(),
+                ..apt.clone()
+            },
+            GuestFile {
+                mode: 0o4755,
+                ..apt.clone()
+            },
+            GuestFile {
+                owner: "nobody-here".into(),
+                ..apt.clone()
+            },
+        ] {
+            assert!(
+                apply_files(std::slice::from_ref(&bad), &manifest, lookup).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&apt.path).unwrap(), "changed\n");
+
+        apply_files(&[], &manifest, lookup).unwrap();
+        assert!(!std::path::Path::new(&apt.path).exists());
     }
 
     #[test]

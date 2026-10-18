@@ -985,7 +985,7 @@ async fn relay_inner(
                 None => return Ok(None),
             },
             message = rx.recv::<AgentMessage>() => match message? {
-                Some(AgentMessage::Started { .. } | AgentMessage::Activity { .. } | AgentMessage::Connected | AgentMessage::EnvUpdated) => {}
+                Some(AgentMessage::Started { .. } | AgentMessage::Activity { .. } | AgentMessage::Connected | AgentMessage::EnvUpdated | AgentMessage::FilesUpdated) => {}
                 Some(AgentMessage::Stdout(data)) => {
                     if handle.data(channel, data).await.is_err() {
                         return Ok(None);

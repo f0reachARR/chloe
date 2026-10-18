@@ -48,6 +48,10 @@ pub enum ClientMessage {
     /// ログインシェルに入る。[`ClientMessage::Exec`] の代わりに接続して最初に送り、
     /// [`AgentMessage::EnvUpdated`] を受け取ったら接続を閉じる。
     SetEnv(Vec<(String, String)>),
+    /// ランナーが置くファイル (プレースホルダーを入れた設定ファイルなど) を入れ替える。前に置いて
+    /// 今回にないファイルは消す。[`ClientMessage::Exec`] の代わりに接続して最初に送り、
+    /// [`AgentMessage::FilesUpdated`] を受け取ったら接続を閉じる。
+    SetFiles(Vec<GuestFile>),
 }
 
 /// guest-agent からホストへのメッセージ。
@@ -70,6 +74,20 @@ pub enum AgentMessage {
     Connected,
     /// [`ClientMessage::SetEnv`] の環境変数を入れ替えた。
     EnvUpdated,
+    /// [`ClientMessage::SetFiles`] のファイルを入れ替えた。
+    FilesUpdated,
+}
+
+/// ランナーが VM に置くファイル。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestFile {
+    /// 絶対パス。
+    pub path: String,
+    pub content: String,
+    /// パーミッション (`0o644` など)。
+    pub mode: u32,
+    /// 持ち主の利用者 (`root` か `user`)。
+    pub owner: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
