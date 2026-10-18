@@ -6,6 +6,7 @@
 //! chloe ws create NAME [--root persistent|ephemeral] [--workspace 50G] [--docker 80G]
 //! chloe ws root NAME persistent|ephemeral
 //! chloe ws disk NAME [--workspace 50G] [--docker 80G]   (大きくするだけ。次の起動から効く)
+//! chloe ws policy show|set|rm NAME        (ワークスペースの規則。set は TOML を標準入力から読む)
 //! chloe ws stop NAME
 //! chloe ws rm NAME [--disks]   (--disks ならランナーのホストのディスクも消す)
 //! chloe secret list [--owner OWNER]
@@ -29,7 +30,7 @@
 //! 接続した利用者の個人のものを扱う。
 
 use chloe_controller::catalog::{self, SecretInput};
-use chloe_controller::runner::PolicyLayer;
+use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
 use chloe_controller::workspace::{DiskSizes, RootMode};
 
 use crate::ops::{self, owner_arg, owner_or_personal};
@@ -70,7 +71,11 @@ pub fn parse(command: &str) -> Option<Vec<String>> {
 
 /// 標準入力を最後まで読んでから実行するコマンドか。
 pub fn needs_stdin(args: &[String]) -> bool {
-    matches!(args, [a, b, ..] if (a == "secret" || a == "policy") && b == "set")
+    match args {
+        [a, b, ..] if (a == "secret" || a == "policy") && b == "set" => true,
+        [a, b, c, ..] => a == "ws" && b == "policy" && c == "set",
+        _ => false,
+    }
 }
 
 pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) -> Output {
@@ -91,6 +96,9 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
             Ok((_, disks)) => ws_disk(shared, login, name, disks).await,
             Err(e) => Err(e),
         },
+        ["ws", "policy", "show", name] => ws_policy_show(shared, login, name).await,
+        ["ws", "policy", "set", name] => ws_policy_set(shared, login, name, stdin).await,
+        ["ws", "policy", "rm", name] => ws_policy_rm(shared, login, name).await,
         ["ws", "stop", name] => ws_stop(shared, login, name).await,
         ["ws", "rm", name] => ws_rm(shared, login, name, false).await,
         ["ws", "rm", name, "--disks"] => ws_rm(shared, login, name, true).await,
@@ -146,7 +154,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50).\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -387,6 +395,54 @@ async fn secret_rm(
     Ok(format!("removed {name} from {}\n", owner_arg(&owner)))
 }
 
+async fn ws_policy_show(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
+    match ops::show_workspace_policy(shared, login, name)
+        .await
+        .map_err(shown)?
+    {
+        (_, Some(policy)) => toml::to_string(&policy).map_err(|e| e.to_string()),
+        (ws, None) => Ok(format!("# no rules for {}\n", ws.display_name())),
+    }
+}
+
+async fn ws_policy_set(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    stdin: &[u8],
+) -> Result<String, String> {
+    let ws = ops::find_workspace(shared, login, name)
+        .await
+        .map_err(shown)?;
+    let text = std::str::from_utf8(stdin).map_err(|_| "the rules must be UTF-8".to_string())?;
+    // 権限のない利用者には、書き方の誤りより先に権限がないことを伝える。
+    ops::check_workspace_policy_admin(shared, login, &ws)
+        .await
+        .map_err(shown)?;
+    let policy: WorkspacePolicy =
+        toml::from_str(text).map_err(|e| format!("invalid rules: {e}"))?;
+    let refreshed = ops::set_workspace_policy(shared, login, &ws, &policy)
+        .await
+        .map_err(shown)?;
+    Ok(format!(
+        "saved the rules of {} ({refreshed} running workspace(s) updated)\n",
+        ws.display_name()
+    ))
+}
+
+async fn ws_policy_rm(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
+    let ws = ops::find_workspace(shared, login, name)
+        .await
+        .map_err(shown)?;
+    let refreshed = ops::remove_workspace_policy(shared, login, &ws)
+        .await
+        .map_err(shown)?;
+    Ok(format!(
+        "removed the rules of {} ({refreshed} running workspace(s) updated)\n",
+        ws.display_name()
+    ))
+}
+
 async fn policy_show(shared: &Shared, login: &str, owner: Option<&str>) -> Result<String, String> {
     let owner = owner_or_personal(login, owner).map_err(shown)?;
     match ops::show_policy(shared, login, &owner)
@@ -513,6 +569,14 @@ mod tests {
         assert_eq!(parse("ls"), None);
         assert!(needs_stdin(&["secret".into(), "set".into(), "x".into()]));
         assert!(needs_stdin(&["policy".into(), "set".into(), "acme".into()]));
+        assert!(needs_stdin(&["policy".into(), "set".into()]));
+        assert!(needs_stdin(&[
+            "ws".into(),
+            "policy".into(),
+            "set".into(),
+            "acme/web".into()
+        ]));
+        assert!(!needs_stdin(&["ws".into(), "policy".into(), "show".into()]));
         assert!(!needs_stdin(&["ws".into(), "list".into()]));
     }
 

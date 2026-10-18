@@ -4,7 +4,7 @@
 //! 使う。権限の確認はここで行い、結果は型のある値で返す (表示は呼ぶ側が決める)。
 
 use chloe_controller::catalog::{self, SecretInput, SecretSpec};
-use chloe_controller::runner::{PolicyLayer, most_specific};
+use chloe_controller::runner::{PolicyLayer, WorkspacePolicy, most_specific};
 use chloe_controller::store::{ApiToken, SshKey};
 use chloe_controller::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
 use chloe_secrets::{ExposeSecret, Owner};
@@ -496,6 +496,73 @@ pub async fn remove_policy(shared: &Shared, login: &str, owner: &Owner) -> Resul
         )));
     }
     Ok(shared.refresh_running_under(owner).await)
+}
+
+pub async fn check_workspace_policy_admin(
+    shared: &Shared,
+    login: &str,
+    workspace: &Workspace,
+) -> Result<()> {
+    if shared.can_manage_workspace_policy(login, workspace).await? {
+        return Ok(());
+    }
+    Err(Error::Forbidden(match workspace.owner {
+        Owner::User(_) => "personal settings are disabled on this gateway".to_string(),
+        _ => format!(
+            "only the administrators of the organization (or the team's maintainers) can change the rules of {}",
+            workspace.display_name()
+        ),
+    }))
+}
+
+/// ワークスペースの設定を読む。ワークスペースに入れる人は見られる。
+pub async fn show_workspace_policy(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+) -> Result<(Workspace, Option<WorkspacePolicy>)> {
+    let ws = find_workspace(shared, login, name).await?;
+    let policy = shared.controller.store().workspace_policy(ws.id).await?;
+    Ok((ws, policy))
+}
+
+/// ワークスペースの設定を置き換え、動いていればランナーに送る。送ったランナーの数を返す。
+pub async fn set_workspace_policy(
+    shared: &Shared,
+    login: &str,
+    workspace: &Workspace,
+    policy: &WorkspacePolicy,
+) -> Result<usize> {
+    check_workspace_policy_admin(shared, login, workspace).await?;
+    policy
+        .check(shared.controller.base_policy())
+        .map_err(Error::Invalid)?;
+    shared
+        .controller
+        .store()
+        .set_workspace_policy(workspace.id, policy, login)
+        .await?;
+    Ok(shared.refresh_workspace(workspace).await? as usize)
+}
+
+pub async fn remove_workspace_policy(
+    shared: &Shared,
+    login: &str,
+    workspace: &Workspace,
+) -> Result<usize> {
+    check_workspace_policy_admin(shared, login, workspace).await?;
+    if !shared
+        .controller
+        .store()
+        .delete_workspace_policy(workspace.id)
+        .await?
+    {
+        return Err(Error::NotFound(format!(
+            "no rules for {}",
+            workspace.display_name()
+        )));
+    }
+    Ok(shared.refresh_workspace(workspace).await? as usize)
 }
 
 /// ディスクの大きさ (`50G`、`50GiB`、`50`。単位は GiB)。

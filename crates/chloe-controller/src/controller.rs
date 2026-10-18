@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chloe_agent_proto::{AgentMessage, ClientMessage, Connection, ExecRequest, PROTOCOL_VERSION};
+use chloe_policy::PathRuleConfig;
 use chloe_secrets::{Owner, SecretDb, SecretString};
 use futures::future::BoxFuture;
 use tokio::task::JoinHandle;
@@ -16,7 +17,10 @@ use tracing::{info, warn};
 
 use crate::Error;
 use crate::catalog::{self, SecretSpec};
-use crate::runner::{AgentStream, BasePolicy, PolicyLayer, RunnerBackend, RunnerSpec, build_spec};
+use crate::runner::{
+    AgentStream, BasePolicy, PolicyLayer, RuleOrigin, RunnerBackend, RunnerSpec, build_spec,
+    label_rules,
+};
 use crate::store::Store;
 use crate::workspace::{DiskConfig, Workspace};
 
@@ -55,6 +59,11 @@ pub fn secret_owners(owner: &Owner) -> Vec<Owner> {
         Owner::Team { org, .. } => vec![owner.clone(), Owner::Org(org.clone())],
         _ => vec![owner.clone()],
     }
+}
+
+/// 出どころを除いた層。
+fn strip(chain: Vec<(RuleOrigin, PolicyLayer)>) -> Vec<PolicyLayer> {
+    chain.into_iter().map(|(_, layer)| layer).collect()
 }
 
 impl Resolver {
@@ -313,19 +322,70 @@ impl<B: RunnerBackend> Controller<B> {
     /// 持ち主に重ねる設定の層 (上の層から順)。個人の層は、ゲートウェイの `[policy]` で
     /// 許したときだけ重ねる。
     pub async fn owner_layers(&self, owner: &Owner) -> Result<Vec<PolicyLayer>, Error> {
-        if matches!(owner, Owner::User(_)) && !self.inner.base.allow_personal_rules {
-            return Ok(vec![]);
-        }
-        self.inner.store.policy_layers(owner).await
+        Ok(strip(self.owner_chain(owner).await?))
     }
 
     /// ワークスペースに重ねる設定の層 (上の層から順)。持ち主の層のあとに、ワークスペースの層を置く。
     pub async fn workspace_layers(&self, workspace: &Workspace) -> Result<Vec<PolicyLayer>, Error> {
-        let mut layers = self.owner_layers(&workspace.owner).await?;
-        if let Some(policy) = self.inner.store.workspace_policy(workspace.id).await? {
-            layers.push(policy.layer());
+        Ok(strip(self.workspace_chain(workspace).await?))
+    }
+
+    /// [`Controller::owner_layers`] を、それぞれの層の出どころと一緒に返す。
+    pub async fn owner_chain(
+        &self,
+        owner: &Owner,
+    ) -> Result<Vec<(RuleOrigin, PolicyLayer)>, Error> {
+        if !self.personal_rules_apply(owner) {
+            return Ok(vec![]);
         }
-        Ok(layers)
+        let chain = self.inner.store.policy_chain(owner).await?;
+        Ok(chain
+            .into_iter()
+            .map(|(owner, layer)| (RuleOrigin::Owner(owner), layer))
+            .collect())
+    }
+
+    /// [`Controller::workspace_layers`] を、それぞれの層の出どころと一緒に返す。個人の
+    /// ワークスペースの層は、個人の層と同じく `[policy]` で許したときだけ重ねる。
+    pub async fn workspace_chain(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Vec<(RuleOrigin, PolicyLayer)>, Error> {
+        let mut chain = self.owner_chain(&workspace.owner).await?;
+        if self.personal_rules_apply(&workspace.owner)
+            && let Some(policy) = self.inner.store.workspace_policy(workspace.id).await?
+        {
+            chain.push((RuleOrigin::Workspace, policy.layer()));
+        }
+        Ok(chain)
+    }
+
+    fn personal_rules_apply(&self, owner: &Owner) -> bool {
+        !matches!(owner, Owner::User(_)) || self.inner.base.allow_personal_rules
+    }
+
+    /// 持ち主のワークスペースに効く規則を、評価する順に出どころと一緒に返す。シークレットの
+    /// 宛先はワークスペースごとに決まるので含めない。
+    pub async fn owner_rules(
+        &self,
+        owner: &Owner,
+    ) -> Result<Vec<(RuleOrigin, PathRuleConfig)>, Error> {
+        Ok(label_rules(
+            &self.inner.base,
+            &self.owner_chain(owner).await?,
+            &[],
+        ))
+    }
+
+    /// ワークスペースのランナーに渡す規則を、評価する順に出どころと一緒に返す。シークレットの
+    /// 宛先として足す規則も含める。
+    pub async fn workspace_rules(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Vec<(RuleOrigin, PathRuleConfig)>, Error> {
+        let chain = self.workspace_chain(workspace).await?;
+        let spec = self.spec_for(workspace, &strip(chain.clone())).await?;
+        Ok(label_rules(&self.inner.base, &chain, &spec.policy.rules))
     }
 
     /// ディスクの大きさの既定と上限 (ゲートウェイの `[disks]`)。
@@ -477,24 +537,32 @@ impl<B: RunnerBackend> Controller<B> {
     }
 
     async fn build(&self, workspace: &Workspace) -> Result<RunnerSpec, Error> {
+        let layers = self.workspace_layers(workspace).await?;
+        let spec = self.spec_for(workspace, &layers).await?;
+        // 全体の設定をあとから変えて、保存してある層と重なることがある。そのまま起動すると
+        // 層の規則が黙って効かなくなるので、起動しない。
+        chloe_policy::check_rules(&spec.policy.rules).map_err(Error::Invalid)?;
+        Ok(spec)
+    }
+
+    async fn spec_for(
+        &self,
+        workspace: &Workspace,
+        layers: &[PolicyLayer],
+    ) -> Result<RunnerSpec, Error> {
         let specs = self.inner.resolver.specs(workspace).await?;
         let placeholders = self
             .inner
             .store
             .ensure_placeholders(workspace.id, &specs)
             .await?;
-        let layers = self.workspace_layers(workspace).await?;
-        let spec = build_spec(
+        Ok(build_spec(
             workspace,
-            &self.inner.base.with_layers(&layers),
+            &self.inner.base.with_layers(layers),
             &self.inner.disks,
             &placeholders,
             &specs,
-        );
-        // 全体の設定をあとから変えて、保存してある層と重なることがある。そのまま起動すると
-        // 層の規則が黙って効かなくなるので、起動しない。
-        chloe_policy::check_rules(&spec.policy.rules).map_err(Error::Invalid)?;
-        Ok(spec)
+        ))
     }
 
     fn close(&self, workspace_id: i64) {
@@ -1411,6 +1479,46 @@ mod tests {
             .map(|r| r.name.clone().unwrap())
             .collect();
         assert_eq!(names, ["org", "ws", "ws"]);
+
+        // 表示用の規則には出どころが付き、シークレットのための規則は最後に並ぶ。
+        let origins: Vec<_> = controller
+            .workspace_rules(&ws)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(origin, _)| origin)
+            .collect();
+        assert_eq!(
+            origins[..3],
+            [
+                RuleOrigin::Owner(Owner::Org("acme".into())),
+                RuleOrigin::Workspace,
+                RuleOrigin::Workspace,
+            ]
+        );
+        assert!(origins[3..].iter().all(|o| *o == RuleOrigin::Secret));
+        assert_eq!(
+            controller
+                .owner_rules(&Owner::Org("acme".into()))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 個人のワークスペースの層は、個人の層を許したときだけ重ねる。
+        let mine = workspace(&controller, "mine", "alice").await;
+        store
+            .set_workspace_policy(
+                mine.id,
+                &crate::runner::WorkspacePolicy {
+                    rules: vec![rule("ws", "y.example", chloe_policy::Action::Allow)],
+                },
+                "alice",
+            )
+            .await
+            .unwrap();
+        assert!(controller.workspace_layers(&mine).await.unwrap().is_empty());
     }
 
     #[tokio::test]

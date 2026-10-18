@@ -264,15 +264,20 @@ impl Store {
     /// ワークスペースの持ち主に重ねる設定の層 (上の層から順)。個人の層を重ねてよいかは
     /// 呼び出し側が決める ([`crate::Controller::owner_layers`])。
     pub async fn policy_layers(&self, owner: &Owner) -> Result<Vec<PolicyLayer>, Error> {
+        let chain = self.policy_chain(owner).await?;
+        Ok(chain.into_iter().map(|(_, layer)| layer).collect())
+    }
+
+    /// [`Store::policy_layers`] を、それぞれの層の持ち主と一緒に返す。
+    pub async fn policy_chain(&self, owner: &Owner) -> Result<Vec<(Owner, PolicyLayer)>, Error> {
         let chain = match owner {
-            Owner::User(_) => vec![owner.clone()],
-            Owner::Org(_) => vec![owner.clone()],
+            Owner::User(_) | Owner::Org(_) => vec![owner.clone()],
             Owner::Team { org, .. } => vec![Owner::Org(org.clone()), owner.clone()],
         };
         let mut layers = Vec::new();
         for owner in chain {
             if let Some(layer) = self.policy(&owner).await? {
-                layers.push(layer);
+                layers.push((owner, layer));
             }
         }
         Ok(layers)

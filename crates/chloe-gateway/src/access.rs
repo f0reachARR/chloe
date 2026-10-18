@@ -98,6 +98,21 @@ impl Shared {
         }
     }
 
+    /// ワークスペースの規則を変えられるか。シークレットと同じ人が変えられる。ただし個人の
+    /// ワークスペースは、個人の設定と同じくゲートウェイの `[policy]` で許したときだけ変えられる。
+    pub async fn can_manage_workspace_policy(
+        &self,
+        login: &str,
+        workspace: &Workspace,
+    ) -> Result<bool> {
+        if matches!(workspace.owner, Owner::User(_))
+            && !self.controller.base_policy().allow_personal_rules
+        {
+            return Ok(false);
+        }
+        self.can_manage_secrets(login, &workspace.owner).await
+    }
+
     /// 持ち主のシークレットを登録、変更、削除できるか。個人のものは本人が、Organization の
     /// ものは管理者が、team のものは Organization の管理者と team の maintainer ができる。
     pub async fn can_manage_secrets(&self, login: &str, owner: &Owner) -> Result<bool> {

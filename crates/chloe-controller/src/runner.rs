@@ -170,6 +170,44 @@ impl PolicyLayer {
     }
 }
 
+/// 規則の出どころ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleOrigin {
+    /// ゲートウェイの `[policy]`。
+    Gateway,
+    /// 持ち主 (個人、Organization か team) の設定。
+    Owner(chloe_secrets::Owner),
+    /// ワークスペースの設定。
+    Workspace,
+    /// シークレットの差し替えと署名の宛先として足した規則。
+    Secret,
+}
+
+/// 重ねた規則 (`base`、`chain` の順) に出どころを添える。`built` が `base` と `chain` より
+/// 長ければ、残りは [`build_spec`] がシークレットのために足した規則として扱う。
+pub fn label_rules(
+    base: &BasePolicy,
+    chain: &[(RuleOrigin, PolicyLayer)],
+    built: &[PathRuleConfig],
+) -> Vec<(RuleOrigin, PathRuleConfig)> {
+    let mut rules: Vec<(RuleOrigin, PathRuleConfig)> = base
+        .rules
+        .iter()
+        .map(|rule| (RuleOrigin::Gateway, rule.clone()))
+        .collect();
+    for (origin, layer) in chain {
+        rules.extend(
+            layer
+                .rules
+                .iter()
+                .map(|rule| (origin.clone(), rule.clone())),
+        );
+    }
+    let added = built.iter().skip(rules.len()).cloned().collect::<Vec<_>>();
+    rules.extend(added.into_iter().map(|rule| (RuleOrigin::Secret, rule)));
+    rules
+}
+
 /// 層を重ねたときに、もっとも下の層で決めた値。
 pub fn most_specific<T: Clone>(
     layers: &[PolicyLayer],

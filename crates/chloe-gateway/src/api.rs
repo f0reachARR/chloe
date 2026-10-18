@@ -15,6 +15,7 @@
 //! GET    /v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
 //! PUT    /v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
 //! DELETE /v1/secrets/{name}[?owner=..]
+//! GET    /v1/workspace-policies/{name}  ワークスペースの規則 (PUT、DELETE も同じ形)
 //! GET    /v1/policy                     個人の設定 (PUT、DELETE も /v1/policies と同じ)
 //! GET    /v1/policies/{owner}           Organization か team の設定
 //! PUT    /v1/policies/{owner}           設定 (JSON)
@@ -33,7 +34,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Extension, Json, Router};
 use chloe_controller::catalog::SecretInput;
-use chloe_controller::runner::PolicyLayer;
+use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
 use chloe_controller::workspace::{DiskSizes, RootMode};
 use chloe_secrets::Owner;
 use serde::Deserialize;
@@ -67,6 +68,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/secrets/{name}",
             get(show_secret).put(set_secret).delete(remove_secret),
+        )
+        .route(
+            "/v1/workspace-policies/{*name}",
+            get(show_workspace_policy)
+                .put(set_workspace_policy)
+                .delete(remove_workspace_policy),
         )
         .route(
             "/v1/policy",
@@ -345,6 +352,45 @@ async fn remove_policy(
     Path(owner): Path<String>,
 ) -> Result<Response, ops::Error> {
     drop_policy(&shared, &caller, parse_owner(&owner)?).await
+}
+
+async fn show_workspace_policy(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Response, ops::Error> {
+    match ops::show_workspace_policy(&shared, &caller.login, &name).await? {
+        (_, Some(policy)) => Ok(Json(policy).into_response()),
+        (ws, None) => Err(ops::Error::NotFound(format!(
+            "no rules for {}",
+            ws.display_name()
+        ))),
+    }
+}
+
+async fn set_workspace_policy(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, ops::Error> {
+    let ws = ops::find_workspace(&shared, &caller.login, &name).await?;
+    // 権限のない利用者には、書き方の誤りより先に権限がないことを伝える。
+    ops::check_workspace_policy_admin(&shared, &caller.login, &ws).await?;
+    let policy: WorkspacePolicy = serde_json::from_slice(&body)
+        .map_err(|e| ops::Error::Invalid(format!("invalid rules: {e}")))?;
+    let updated = ops::set_workspace_policy(&shared, &caller.login, &ws, &policy).await?;
+    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
+}
+
+async fn remove_workspace_policy(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Response, ops::Error> {
+    let ws = ops::find_workspace(&shared, &caller.login, &name).await?;
+    let updated = ops::remove_workspace_policy(&shared, &caller.login, &ws).await?;
+    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
 }
 
 async fn show_own_policy(

@@ -308,6 +308,19 @@ check personal-no-github "cannot have github" sh -c 'printf "[github]\nrepositor
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set
 check personal-policy-rm "removed the settings of alice" as alice chloe policy rm
 
+section "workspace rules"
+check ws-policy-member-not-admin "only the administrators" sh -c 'printf "[[rules]]\nhosts = [\"example.net\"]\naction = \"allow\"\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe ws policy set acme/proj
+check ws-blocked-before "000" as alice+acme/dev/tools "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
+check ws-policy-maintainer "saved the rules of acme/dev/tools" sh -c 'printf "[[rules]]\nhosts = [\"example.net\"]\naction = \"allow\"\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe ws policy set acme/dev/tools
+check ws-policy-show "example.net" as alice chloe ws policy show acme/dev/tools
+check ws-allowed-after "200" as alice+acme/dev/tools "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
+check ws-other-unaffected "000" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
+check ws-policy-no-root "invalid rules" sh -c 'printf "root = \"persistent\"\n" | "$@"' _ \
+    ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe ws policy set acme/proj
+check ws-policy-rm "removed the rules of acme/dev/tools" as erin chloe ws policy rm acme/dev/tools
+
 section "installation token scope"
 check scope-set "saved the settings of acme/dev" sh -c 'printf "root = \"persistent\"\n[github]\nrepositories = [\"tools\"]\npermissions = { contents = \"read\" }\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme/dev
