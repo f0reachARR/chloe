@@ -388,7 +388,7 @@ Docker から systemd の動かし方に移るときは、すべてのワーク�
 
 ## 困ったとき
 
-- **ログ**：ゲートウェイと `chloe-node` は標準エラーにログを出す（`journalctl -u chloe-gateway` で読める。`RUST_LOG` で詳しさを変えられる）。ワークスペースごとのプロキシのログ（`egress.log`）、HTTP のログ（`requests.jsonl`）、DNS のログ（`dnsmasq.log`）は `/var/lib/chloe/workspaces/<ws-番号>/logs/` にある。
+- **ログ**：ゲートウェイと `chloe-node` は標準エラーにログを出す（`journalctl -u chloe-gateway` で読める。`RUST_LOG` で詳しさを変えられる）。ワークスペースごとのプロキシのログ（`egress.log`）、HTTP のログ（`requests.jsonl`）、DNS のログ（`dnsmasq.log`）は `/var/lib/chloe/workspaces/<ws-番号>/logs/` にある。HTTP のログは、利用者も `chloe ws log` と管理の画面で見られる。これらのログはローテーションせず、ワークスペースのディスクと一緒に消すまで大きくなり続ける。
 - **VM が起動しない**：`journalctl -u chloe-runner@ws-<番号> -u chloe-netns@ws-<番号>` に、ネットワークの準備、Firecracker、ゲストのシリアルコンソールの出力が出る。`/dev/kvm` を `kvm` のグループで開けるかを確かめる。ランナーを Docker で動かしているときは、`docker logs chloe-ws-<番号>` に出る。
 - **ゲートウェイがランナーを起動できない**：`systemctl start chloe-runner@...` が `Interactive authentication required` で失敗するなら、polkit の規則（`/usr/share/polkit-1/rules.d/50-chloe.rules`）が読まれているか、polkit が動いているか（`systemctl status polkit`）を確かめる。
 - **VM から外につながらない**：許可リストにない宛先は、名前の解決からできない。`requests.jsonl` と `dnsmasq.log` で、遮断した宛先がわかる。許可した宛先にもつながらないなら、`sudo nft list table inet chloe-host` でホスト側の規則が置かれているか（`nftables.service` に消されていないか）を確かめる。
