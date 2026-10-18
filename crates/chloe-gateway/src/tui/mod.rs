@@ -453,7 +453,7 @@ async fn github_status(shared: &Shared, login: &str) -> Result<String, String> {
             "Signed in to GitHub as {login}. The token is refreshed automatically{}.\n\nPersonal workspaces use it for git and GH_TOKEN.",
             token
                 .refresh_expires_at
-                .map(|at| format!(" until {}", app::format_time(at as i64)))
+                .map(|at| format!(" until {}", ops::format_time(at as i64)))
                 .unwrap_or_default()
         ),
         Some(_) => "The GitHub token expired. Press l to sign in again.".into(),

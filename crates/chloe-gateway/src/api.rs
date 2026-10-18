@@ -17,6 +17,7 @@
 //! PUT    /v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
 //! DELETE /v1/secrets/{name}[?owner=..]
 //! GET    /v1/workspace-policies/{name}  ワークスペースの規則 (PUT、DELETE も同じ形)
+//! GET    /v1/workspace-requests/{name}[?lines=200]   HTTP の要求のログの末尾 (古い順)
 //! GET    /v1/policy                     個人の設定 (PUT、DELETE も /v1/policies と同じ)
 //! GET    /v1/policies/{owner}           Organization か team の設定
 //! PUT    /v1/policies/{owner}           設定 (JSON)
@@ -76,6 +77,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
                 .put(set_workspace_policy)
                 .delete(remove_workspace_policy),
         )
+        .route("/v1/workspace-requests/{*name}", get(workspace_requests))
         .route(
             "/v1/policy",
             get(show_own_policy)
@@ -395,6 +397,21 @@ async fn remove_policy(
     Path(owner): Path<String>,
 ) -> Result<Response, ops::Error> {
     drop_policy(&shared, &caller, parse_owner(&owner)?).await
+}
+
+#[derive(Deserialize)]
+struct RequestsQuery {
+    lines: Option<usize>,
+}
+
+async fn workspace_requests(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+    Query(query): Query<RequestsQuery>,
+) -> Result<Response, ops::Error> {
+    let records = ops::tail_requests(&shared, &caller.login, &name, query.lines).await?;
+    Ok(Json(records).into_response())
 }
 
 async fn show_workspace_policy(

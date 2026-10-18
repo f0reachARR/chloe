@@ -10,6 +10,7 @@
 //! chloe ws machine NAME [--cpus 8] [--memory 16G]   (次の起動から効く)
 //! chloe ws idle NAME [30m|2h|never|default]   (最後の接続が閉じてから止めるまで)
 //! chloe ws policy show|set|rm NAME        (ワークスペースの規則。set は TOML を標準入力から読む)
+//! chloe ws log NAME [--lines 200] [--blocked]   (HTTP の要求のログの末尾)
 //! chloe ws stop NAME
 //! chloe ws rm NAME [--disks]   (--disks ならランナーのホストのディスクも消す)
 //! chloe secret list [--owner OWNER]
@@ -32,11 +33,15 @@
 //! OWNER は Organization (`org`) か team (`org/team`)。シークレットと設定は、OWNER を省くと
 //! 接続した利用者の個人のものを扱う。
 
+use chloe_audit::{Event, Record};
 use chloe_controller::catalog::{self, SecretInput};
 use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
 use chloe_controller::workspace::{DiskSizes, IdleStop, MachineSize, RootMode};
 
-use crate::ops::{self, NewWorkspace, format_idle, format_mib, owner_arg, owner_or_personal};
+use crate::ops::{
+    self, NewWorkspace, format_bytes, format_idle, format_mib, format_time_secs, owner_arg,
+    owner_or_personal,
+};
 use crate::session::Shared;
 
 pub struct Output {
@@ -112,6 +117,10 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
         ["ws", "policy", "show", name] => ws_policy_show(shared, login, name).await,
         ["ws", "policy", "set", name] => ws_policy_set(shared, login, name, stdin).await,
         ["ws", "policy", "rm", name] => ws_policy_rm(shared, login, name).await,
+        ["ws", "log", name, options @ ..] => match parse_log_options(options) {
+            Ok((lines, blocked)) => ws_log(shared, login, name, lines, blocked).await,
+            Err(e) => Err(e),
+        },
         ["ws", "stop", name] => ws_stop(shared, login, name).await,
         ["ws", "rm", name] => ws_rm(shared, login, name, false).await,
         ["ws", "rm", name, "--disks"] => ws_rm(shared, login, name, true).await,
@@ -167,7 +176,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws log NAME [--lines N] [--blocked]   (shows the end of the HTTP request log)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -214,6 +223,27 @@ fn parse_ws_options(options: &[&str], allowed: &[&str]) -> Result<NewWorkspace, 
         }
     }
     Ok(parsed)
+}
+
+/// `ws log` のオプション。読む行数と、遮断した要求だけにするか。
+fn parse_log_options(options: &[&str]) -> Result<(Option<usize>, bool), String> {
+    let (mut lines, mut blocked) = (None, false);
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        match *option {
+            "--blocked" => blocked = true,
+            "--lines" => {
+                let value = options.next().ok_or("--lines needs a value")?;
+                lines = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid number of lines: {value}"))?,
+                );
+            }
+            _ => return Err(format!("unknown option: {option}\n{}", help())),
+        }
+    }
+    Ok((lines, blocked))
 }
 
 /// 操作の失敗をコマンドの表示にする。
@@ -365,6 +395,56 @@ async fn ws_idle(
             ws.display_name()
         ),
     })
+}
+
+async fn ws_log(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    lines: Option<usize>,
+    blocked: bool,
+) -> Result<String, String> {
+    let records = ops::tail_requests(shared, login, name, lines)
+        .await
+        .map_err(shown)?;
+    Ok(records
+        .iter()
+        .filter(|r| !blocked || matches!(&r.event, Event::Request(req) if req.blocked()))
+        .map(request_line)
+        .collect())
+}
+
+/// ログの一件を、タブで区切った一行にする。時刻、判定、ステータス、メソッド、ホスト、パス、
+/// 応答の大きさ、かかった時間、差し替えた規則か遮断した規則、誤り。ないものは `-`。
+fn request_line(record: &Record) -> String {
+    let time = format_time_secs(record.ts as i64);
+    let req = match &record.event {
+        Event::Passthrough { host } => {
+            return format!("{time}\tpassthrough\t-\t-\t{host}\t-\t-\t-\t-\t-\n");
+        }
+        Event::Request(req) => req,
+    };
+    let or_dash = |value: Option<String>| value.unwrap_or_else(|| "-".into());
+    let rules = if req.injected.is_empty() {
+        or_dash(req.rule.clone())
+    } else {
+        req.injected.join(",")
+    };
+    let mut path = req.path.clone();
+    if !req.query_keys.is_empty() {
+        path.push('?');
+        path.push_str(&req.query_keys.join("&"));
+    }
+    format!(
+        "{time}\t{}\t{}\t{}\t{}\t{path}\t{}\t{}\t{rules}\t{}\n",
+        req.decision,
+        or_dash(req.status.map(|s| s.to_string())),
+        req.method,
+        req.host,
+        or_dash(req.response_bytes.map(format_bytes)),
+        or_dash(req.duration_ms.map(|ms| format!("{ms}ms"))),
+        or_dash(req.error.clone()),
+    )
 }
 
 async fn ws_stop(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
@@ -675,6 +755,48 @@ mod tests {
         ]));
         assert!(!needs_stdin(&["ws".into(), "policy".into(), "show".into()]));
         assert!(!needs_stdin(&["ws".into(), "list".into()]));
+    }
+
+    #[test]
+    fn parses_log_options() {
+        assert_eq!(parse_log_options(&[]).unwrap(), (None, false));
+        assert_eq!(
+            parse_log_options(&["--blocked", "--lines", "50"]).unwrap(),
+            (Some(50), true)
+        );
+        assert!(parse_log_options(&["--lines"]).is_err());
+        assert!(parse_log_options(&["--lines", "x"]).is_err());
+        assert!(parse_log_options(&["--all"]).is_err());
+    }
+
+    #[test]
+    fn formats_request_lines() {
+        let record = Record {
+            ts: 1_792_152_059.5,
+            event: Event::Request(Box::new(chloe_audit::Request {
+                host: "api.example.com".into(),
+                method: "POST".into(),
+                path: "/v1/messages".into(),
+                query_keys: vec!["beta".into()],
+                status: Some(200),
+                decision: "allowed".into(),
+                injected: vec!["anthropic_api_key-0".into()],
+                response_bytes: Some(2048),
+                duration_ms: Some(350),
+                ..Default::default()
+            })),
+        };
+        assert_eq!(
+            request_line(&record),
+            "2026-10-16 12:00:59\tallowed\t200\tPOST\tapi.example.com\t/v1/messages?beta\t2.0K\t350ms\tanthropic_api_key-0\t-\n"
+        );
+        let record = Record {
+            ts: 0.0,
+            event: Event::Passthrough {
+                host: "a.example".into(),
+            },
+        };
+        assert!(request_line(&record).contains("\tpassthrough\t"));
     }
 
     #[test]

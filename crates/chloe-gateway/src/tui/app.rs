@@ -20,7 +20,7 @@ use super::form::{Field, Form, FormEvent, RowKind};
 use super::{policy_form, secret_form};
 use crate::ops::{
     NewWorkspace, RuleScope, RulesView, ScopeEntry, SecretView, WorkspaceInfo, format_idle,
-    format_mib, owner_arg,
+    format_mib, format_time, owner_arg,
 };
 
 /// ゲートウェイに頼む操作。シークレットの値を含むので、Debug で書き出さない。
@@ -1518,27 +1518,6 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-/// UNIX 時刻の秒を `YYYY-MM-DD HH:MM` (UTC) にする。
-pub fn format_time(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rest = secs.rem_euclid(86_400);
-    // 1970-01-01 からの日数を、グレゴリオ暦の日付にする。
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
-        rest / 3600,
-        rest % 3600 / 60
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::form::tests::{ctrl, key, type_text};
@@ -1871,12 +1850,6 @@ mod tests {
             own: vec![],
         }));
         assert!(!screen(&app).contains("github.com"));
-    }
-
-    #[test]
-    fn formats_times() {
-        assert_eq!(format_time(0), "1970-01-01 00:00");
-        assert_eq!(format_time(1_792_152_000), "2026-10-16 12:00");
     }
 
     fn form_mut(app: &mut App) -> &mut Form {

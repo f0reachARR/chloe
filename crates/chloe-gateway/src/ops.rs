@@ -276,6 +276,25 @@ pub async fn remove_workspace(
     Ok(ws)
 }
 
+/// ワークスペースのランナーのプロキシのログ (HTTP の要求) の末尾から、`lines` 件を古い順に
+/// 読む。省けば [`chloe_audit::DEFAULT_LINES`] 件。ランナーが止まっていても読める。
+pub async fn tail_requests(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    lines: Option<usize>,
+) -> Result<Vec<chloe_audit::Record>> {
+    let lines = lines.unwrap_or(chloe_audit::DEFAULT_LINES);
+    if lines == 0 || lines > chloe_audit::MAX_LINES {
+        return Err(Error::Invalid(format!(
+            "the number of lines must be between 1 and {}",
+            chloe_audit::MAX_LINES
+        )));
+    }
+    let ws = find_workspace(shared, login, name).await?;
+    Ok(shared.controller.tail_requests(&ws, lines).await?)
+}
+
 /// Organization (`org`) か team (`org/team`)。
 pub fn parse_owner(arg: &str) -> Result<Owner> {
     let text = match arg.split_once('/') {
@@ -886,6 +905,51 @@ pub fn format_idle(secs: Option<u64>) -> String {
     format!("{secs}s")
 }
 
+/// UNIX 時刻の秒を `YYYY-MM-DD HH:MM` (UTC) にする。
+pub fn format_time(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rest = secs.rem_euclid(86_400);
+    // 1970-01-01 からの日数を、グレゴリオ暦の日付にする。
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        rest / 3600,
+        rest % 3600 / 60
+    )
+}
+
+/// UNIX 時刻の秒を `YYYY-MM-DD HH:MM:SS` (UTC) にする。
+pub fn format_time_secs(secs: i64) -> String {
+    format!("{}:{:02}", format_time(secs), secs.rem_euclid(60))
+}
+
+/// バイト数を `512B`、`1.5K`、`12M` の形で表す。
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["K", "M", "G", "T"];
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value < 10.0 {
+        format!("{value:.1}{}", UNITS[unit])
+    } else {
+        format!("{value:.0}{}", UNITS[unit])
+    }
+}
+
 /// `30d`、`12h` のような期間を秒にする。
 pub fn parse_duration(text: &str) -> Result<i64> {
     let invalid = || Error::Invalid(format!("invalid duration: {text} (use e.g. 30d or 12h)"));
@@ -972,6 +1036,16 @@ mod tests {
         assert!(parse_owner("../x").is_err());
         assert!(parse_owner("a/b/c").is_err());
         assert_eq!(owner_arg(&parse_owner("acme/dev").unwrap()), "acme/dev");
+    }
+
+    #[test]
+    fn formats_times_and_sizes() {
+        assert_eq!(format_time(0), "1970-01-01 00:00");
+        assert_eq!(format_time(1_792_152_000), "2026-10-16 12:00");
+        assert_eq!(format_time_secs(1_792_152_059), "2026-10-16 12:00:59");
+        assert_eq!(format_bytes(512), "512B");
+        assert_eq!(format_bytes(1536), "1.5K");
+        assert_eq!(format_bytes(12 * 1024 * 1024), "12M");
     }
 
     #[test]
