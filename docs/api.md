@@ -87,7 +87,7 @@ api /v1/workspaces/acme/web -X PATCH -d '{"running": false}'    # 止める
 api /v1/workspaces/acme/web -X DELETE                             # 204
 ```
 
-`root` を省いて作ると、Organization と team の設定の既定を使う。
+`root` を省いて作ると、持ち主（個人、Organization と team）の設定の既定を使う。
 `workspace_disk_gib` と `docker_disk_gib` は GiB で、省くとゲートウェイの設定の既定を使う。
 変えるときは大きくするだけで、今より小さい値と上限を超える値は 400 を返す。
 新しい大きさは、次にワークスペースを起動したときに効く。
@@ -115,9 +115,10 @@ api /v1/secrets/hf_token -X DELETE
 
 値はシェルの履歴に残らないよう、ファイルや標準入力から渡す（`-d @value.json`）。
 
-### Organization と team の設定
+### 個人、Organization、team の設定
 
-設定の項目は [設定](configuration.md#organization-と-team-の設定) と同じで、JSON で書く。
+設定の項目は [設定](configuration.md#個人organizationteam-の設定) と同じで、JSON で書く。
+自分の個人の設定は `/v1/policy` で読み書きする（ゲートウェイで `allow_personal_rules` を有効にしたときだけ変えられる）。
 
 ```sh
 api /v1/policies/acme -X PUT \
@@ -129,6 +130,21 @@ api /v1/policies/acme
 
 api /v1/policies/acme/dev -X PUT \
   -d '{"github": {"repositories": ["web"], "permissions": {"contents": "read"}}}'
+
+api /v1/policy -X PUT -d '{"rules": [{"hosts": ["example.com"], "action": "allow"}]}'
+```
+
+### ワークスペースの規則
+
+規則だけを JSON で書く（[設定](configuration.md#ワークスペースの規則)）。
+
+```sh
+api /v1/workspace-policies/acme/web -X PUT \
+  -d '{"rules": [{"hosts": ["staging.example.com"], "action": "allow"}]}'
+# {"updated_runners":1}
+
+api /v1/workspace-policies/acme/web
+api /v1/workspace-policies/acme/web -X DELETE
 ```
 
 ### トークン

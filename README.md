@@ -23,7 +23,7 @@ jailer による Firecracker の隔離と Kubernetes への配置はまだない
 - **ワークスペース**：利用者ごとの個人ワークスペースと、Organization や team の共有ワークスペース。VM の中では Docker も使える。最後の接続が切れてしばらくすると VM を止め、次の接続で起動し直す。エージェントが作業中のあいだは止めない。
 - **シークレットの差し替え**：VM の中にはプレースホルダーだけを置く。VM からの HTTPS は透過プロキシで復号し、宛先とヘッダーの規則に合うときだけ、プレースホルダーを本物の値に差し替える。
 - **通信の制限**：許可リストにない宛先への通信と名前の解決を遮断する。宛先、メソッド、パスの規則で、API の使い方も絞れる。
-- **管理**：SSH の `chloe` コマンド、`ssh -t <host> chloe` で開く管理の画面（TUI）、HTTP(S) の API で、ワークスペース、シークレット、Organization と team の設定を扱う。
+- **管理**：SSH の `chloe` コマンド、`ssh -t <host> chloe` で開く管理の画面（TUI）、HTTP(S) の API で、ワークスペース、シークレット、外への通信の規則（個人、Organization、team、ワークスペースごと）を扱う。
 - **複数のホスト**：ランナーを複数の物理サーバーに置ける（`chloe-node`）。コントロールプレーンとホストのあいだは相互 TLS でつなぐ。
 - **監査**：ログイン、セッション、ポート転送、管理の操作、シークレットの問い合わせを JSON Lines で記録する。HTTP の通信は、ワークスペースごとにメタデータだけを記録する。
 
@@ -89,7 +89,7 @@ ssh -p 2222 <GitHub のログイン名>@127.0.0.1
 | --- | --- |
 | [インストール](docs/install.md) | 必要なもの、ビルド、一台での起動、複数のホスト、更新、バックアップ |
 | [使い方](docs/usage.md) | 接続、ワークスペース、シークレット、ポート転送、`chloe` コマンド |
-| [設定](docs/configuration.md) | ゲートウェイ、`chloe-node`、GitHub App、Organization と team の設定の書き方 |
+| [設定](docs/configuration.md) | ゲートウェイ、`chloe-node`、GitHub App、個人と Organization と team の設定、ワークスペースの規則の書き方 |
 | [管理 API](docs/api.md) | HTTP(S) の API とトークン |
 | [GitHub App の準備](docs/github-app.md) | アプリの登録と権限 |
 | [開発](docs/development.md) | クレートの構成と確認の回し方 |

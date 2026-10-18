@@ -10,7 +10,7 @@ systemd で動かすときは、すべて絶対パスで書く。
 | ゲートウェイの設定 | `chloe-gateway --config` | `deploy/gateway.toml`（開発用は `images/guest/dev/gateway.example.toml`） |
 | `chloe-node` の設定 | `chloe-node run --config` | `deploy/node.toml` |
 | GitHub App の設定 | ゲートウェイの設定の `github_app` | [GitHub App の準備](github-app.md) |
-| Organization と team の設定 | `chloe policy set`、管理 API | 下の「Organization と team の設定」 |
+| 個人、Organization、team の設定とワークスペースの規則 | `chloe policy set`、`chloe ws policy set`、管理 API、管理の画面 | 下の「個人、Organization、team の設定」と「ワークスペースの規則」 |
 
 ## ゲートウェイ
 
@@ -75,7 +75,13 @@ GitHub App の設定の `api_url` と `web_url` も、同じホストに合わ�
 ### `[policy]`
 
 すべてのワークスペースに共通の、VM から外への通信の決まりである。
-宛先、メソッド、パスの規則（`[[policy.rules]]`）だけで書く。
+宛先、メソッド、パスの規則（`[[policy.rules]]`）で書く。
+
+| 項目 | 既定 | 内容 |
+| --- | --- | --- |
+| `allow_personal_rules` | `false` | 利用者が、自分の個人の設定と個人のワークスペースの規則を変えられるようにする（[設定の重ね方](#設定の重ね方)） |
+
+規則の項目は次のとおりである。
 
 | 項目 | 既定 | 内容 |
 | --- | --- | --- |
@@ -228,17 +234,23 @@ ban したことは監査ログに残る。ban の状態はメモリにだけ置
 アプリを Any account で公開すると、だれでも自分の Organization にアプリをインストールでき、そのメンバーが chloe にログインできるようになる。
 そのときは `organizations` で、使ってよい Organization に限る。
 
-## Organization と team の設定
+## 個人、Organization、team の設定
 
 `chloe policy set acme`（Organization）か `chloe policy set acme/dev`（team）で、TOML を標準入力から渡す。
+`chloe policy set` のように持ち主を省くと、自分の個人の設定になる。
 管理 API では、同じ項目を JSON で渡す。
-変えられるのは、GitHub でその Organization の管理者である利用者と、ゲートウェイの設定の `admins` である。
+管理の画面では、規則は Rules タブで、そのほかは Settings タブで編集する。
+
+| 持ち主 | 変えられる人 |
+| --- | --- |
+| Organization、team | GitHub でその Organization の管理者である利用者と、ゲートウェイの設定の `admins` |
+| 個人 | 本人。ゲートウェイの `[policy]` で `allow_personal_rules = true` にしたときだけ |
 
 | 項目 | 内容 |
 | --- | --- |
 | `rules` | 足す規則（書き方はゲートウェイの `[[policy.rules]]` と同じ。`passthrough` は書けない） |
 | `root` | 新しく作るワークスペースのルートの扱いの既定（`ephemeral` か `persistent`） |
-| `[github]` | 共有ワークスペースに渡す GitHub のインストールトークンの範囲 |
+| `[github]` | 共有ワークスペースに渡す GitHub のインストールトークンの範囲（個人の設定には書けない） |
 
 ```toml
 root = "persistent"
@@ -257,14 +269,60 @@ repositories = ["web", "api"]                  # 省くとインストールの�
 permissions = { contents = "write", pull_requests = "write" }   # 省くとインストールの権限すべて
 ```
 
-ワークスペースの方針は、ゲートウェイの `[policy]`、Organization の設定、team の設定の順に重ねて作る。
+個人の設定は、その人が持ち主のワークスペース（個人のワークスペース）にだけ重ねる。
+その人が入る Organization や team のワークスペースには重ねない。
+共有のランナーの規則が、入った人によって変わらないようにするためである。
+個人のワークスペースは利用者自身の GitHub のトークンを使うので、`[github]` は書けない。
+
+## ワークスペースの規則
+
+`chloe ws policy set acme/web` で、規則だけを TOML で標準入力から渡す。
+管理 API では `/v1/workspace-policies/{name}` に JSON で渡す。
+管理の画面では、Rules タブでワークスペースを選んで編集する。
+
+```toml
+[[rules]]
+hosts = ["staging.example.com"]
+action = "allow"
+```
+
+書けるのは `rules` だけである。
+`root` はワークスペースそのものが持つので、`chloe ws root` で変える。
+`[github]` は下の層ほど優先されるので、ワークスペースで書けると、持ち主の設定で絞った範囲を広げられてしまう。
+ワークスペースを消すと、その規則も消える。
+
+変えられる人は、そのワークスペースの持ち主のシークレットを変えられる人と同じである。
+
+| ワークスペース | 変えられる人 |
+| --- | --- |
+| 個人 | 本人。ゲートウェイの `[policy]` で `allow_personal_rules = true` にしたときだけ |
+| Organization | Organization の管理者と、ゲートウェイの設定の `admins` |
+| team | Organization の管理者、team の maintainer、ゲートウェイの設定の `admins` |
+
+## 設定の重ね方
+
+ワークスペースの方針は、次の順に層を重ねて作る。
+
+| ワークスペース | 層の順 |
+| --- | --- |
+| 個人 | ゲートウェイの `[policy]`、個人の設定、ワークスペースの規則 |
+| Organization | ゲートウェイの `[policy]`、Organization の設定、ワークスペースの規則 |
+| team | ゲートウェイの `[policy]`、Organization の設定、team の設定、ワークスペースの規則 |
 
 - **規則**：上の層のものを先に並べる。最初に一致した規則で決まるので、下の層は上の層の規則を覆せない（サーバーの運用者の規則を、Organization の設定で覆すことはできない）。
-- **`root` と `[github]`**：もっとも下の層で書いた値を使う。
+- **`root` と `[github]`**：もっとも下の層で書いた値を使う（ワークスペースの規則は、どちらも持たない）。
 
-`passthrough` の規則は、Organization と team の設定には書けない。
+そのため、下の層でできるのは、上の層のどの規則にも一致しない宛先を許すか拒否することだけである。
+上の層が許した宛先を、下の層の `deny` で塞ぐことはできない。
+
+`allow_personal_rules` を有効にしていないときは、個人の設定と個人のワークスペースの規則を重ねない（保存してあっても効かない）。
+
+`passthrough` の規則は、ゲートウェイの `[policy]` のほかには書けない。
 復号しない宛先には規則が効かないので、書けると、上の層の規則を素通りする宛先を作れてしまうためである。
 ゲートウェイの `passthrough` の規則と宛先が重なる規則も、書けない（理由は [`[policy]`](#policy) と同じ）。
 ゲートウェイの設定をあとから変えて、保存してある設定と重なったときは、そのワークスペースのランナーを起動しない。
 
-個人のワークスペースには、ゲートウェイの `[policy]` だけを使う（どの Organization の設定を重ねるかが決まらないので）。
+シークレットの宛先は、どの層の規則にもない宛先だけを一番後ろに足す（[`[policy]`](#policy) を参照）。
+そのため、ある層で `api.anthropic.com` を `deny` にすると、その層を重ねるワークスペースでは、そのシークレットの差し替えも効かなくなる。
+
+管理の画面の Rules タブでは、選んだスコープで効く規則を、評価する順に層の名前と一緒に出す。

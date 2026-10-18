@@ -165,6 +165,9 @@ mod tests {
             [memberships]
             "org:fortefibre" = ["alice"]
 
+            [policy]
+            allow_personal_rules = true
+
             [[policy.rules]]
             hosts = ["httpbin.org"]
             action = "allow"
@@ -187,6 +190,8 @@ mod tests {
         assert!(!config.is_allowed("bob"));
         assert_eq!(config.runner.unwrap().image, "chloe-dev-runner");
         assert_eq!(config.ban.max_failures, 10);
+        assert!(config.policy.allow_personal_rules);
+        assert_eq!(config.policy.rules.len(), 1);
     }
 
     #[test]

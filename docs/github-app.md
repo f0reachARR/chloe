@@ -117,7 +117,7 @@ chmod 600 ~/.config/chloe/github-app.pem
 - `ssh_user`（既定は `chloe`）と GitHub に存在しない名前のユーザー名では、Device Flow で承認したアカウントを利用者にし、そのとき使った公開鍵を結び付ける。次からはその鍵で入れる。
 - 個人のワークスペースには、Device Flow で得たユーザートークンを使う。トークンを取り直すときは `ssh <host> chloe github login` を実行する。トークンは chloe のデータベースに暗号化して置き、ランナーのプロキシが差し替えのたびに問い合わせたとき、失効まで 5 分を切っていれば更新してから答える。VM にはプレースホルダーだけを入れる。
 - team と Organization のワークスペースには、その Organization へのインストールのトークンを渡す。範囲は Organization と team の設定（`chloe policy set`）の `[github]` で絞れる。
-- GitHub で Organization の管理者（`admin` の役割）である利用者は、その Organization と team の設定とシークレットを変えられる。team の maintainer は、その team のシークレットを変えられる。
+- GitHub で Organization の管理者（`admin` の役割）である利用者は、その Organization と team の設定とシークレット、ワークスペースの規則を変えられる。team の maintainer は、その team のシークレットとワークスペースの規則を変えられる。
 
 VM の中の `git` は、GitHub に HTTPS でつなぎ、認証ヘルパーがプレースホルダーを返す（SSH のリモートも HTTPS に読み替える）。
 

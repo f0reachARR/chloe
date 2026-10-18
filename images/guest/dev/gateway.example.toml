@@ -22,7 +22,7 @@ idle_timeout_secs = 1800
 
 # ログインを許す GitHub のログイン名 (GitHub App の Organization のメンバーに加えて許す)。
 allowed_users = ["your-github-login"]
-# サーバーの運用者。どの Organization と team の設定 (chloe policy) とシークレットも変えられる。
+# サーバーの運用者。どの Organization と team の設定 (chloe policy)、ワークスペースの規則とシークレットも変えられる。
 # GitHub で Organization の管理者である利用者は、ここに書かなくてもその Organization のものを変えられる。
 admins = ["your-github-login"]
 
@@ -30,6 +30,11 @@ admins = ["your-github-login"]
 [memberships]
 # "org:your-org" = ["your-github-login"]
 # "team:your-org/your-team" = ["your-github-login"]
+
+[policy]
+# 利用者が、自分の個人のワークスペースに規則を足せるようにする (chloe policy set、
+# chloe ws policy set)。足せるのは、下の規則にない宛先だけ。
+# allow_personal_rules = true
 
 # すべてのワークスペースに共通の、外への通信の規則。宛先、メソッド、パスで、上から順に評価し、
 # 最初に一致した規則で決める。どれにも一致しなければ遮断する。パスの * は一つの階層の中、

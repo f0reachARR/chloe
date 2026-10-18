@@ -240,7 +240,10 @@ GitHub App がなければ、個人のアクセストークンを `github_token`
 
 VM から外へは、規則で許した宛先にだけつなげる。
 規則で許していない名前は、名前の解決からできない（`Could not resolve host` になる）。
-宛先を足したいときは、サーバーの運用者か、Organization の管理者に頼む（Organization と team の設定は `chloe policy` で変える）。
+宛先を足したいときは、サーバーの運用者か、Organization の管理者に頼む（Organization と team の設定は `chloe policy` で、ワークスペースの規則は `chloe ws policy` で変える）。
+team の maintainer は、その team のワークスペースの規則を変えられる。
+サーバーで有効にしていれば、自分の個人のワークスペースの宛先は自分で足せる（`chloe policy set` で個人の設定を、`chloe ws policy set NAME` でワークスペースの規則を変える）。
+足せるのは、上の層（ゲートウェイや Organization）の規則にない宛先だけである（[設定の重ね方](configuration.md#設定の重ね方)）。
 
 HTTPS の通信はプロキシで復号するので、VM の中には chloe の CA の証明書が入っている。
 通信の内容（本文）は記録しない。
@@ -267,15 +270,22 @@ ssh -N -L 8080:127.0.0.1:3000 chloe@chloe.example.com
 ssh -t chloe@chloe.example.com chloe
 ```
 
-ワークスペース、シークレット、Organization と team の設定、管理 API のトークン、結び付けた SSH の鍵、GitHub のサインインを、タブごとに扱える。
+ワークスペース、シークレット、規則、個人と Organization と team の設定、管理 API のトークン、結び付けた SSH の鍵、GitHub のサインインを、タブごとに扱える。
 シークレットと設定は、TOML を書かずに欄ごとのフォームで編集する。
 シークレットは、`deploy/secrets/` の例を雛形にして作れる。
 登録したシークレットの定義を変えるとき、値の欄を空のままにすると今の値を使い続ける。
 ワークスペースのタブでは、`g` でディスクの大きさを変える（`chloe ws disk` と同じく、次の起動から効く）。
+`u` で、選んだワークスペースを Rules タブで開く。
+
+Rules タブでは、左の一覧でスコープ（ゲートウェイ、個人、Organization、team、ワークスペース）を選ぶ。
+右には、そのスコープで効く規則を評価する順に、層の名前と一緒に出す（`▶` がそのスコープ自身の規則）。
+`Enter` でそのスコープ自身の規則を編集し、`d` で消す。
+一覧の `view` のスコープは、見るだけで変えられない。
+Settings タブでは、規則のほか（ルートの扱いの既定とトークンの範囲）を編集する。
 
 | キー | 操作 |
 | --- | --- |
-| `←` `→`、`1`〜`6` | タブを切り替える |
+| `←` `→`、`1`〜`7` | タブを切り替える |
 | `↑` `↓` | 一覧で選ぶ |
 | `n`、`Enter`、`d` | 作る、編集する、消す（タブの下に、そのタブで使えるキーが出る） |
 | `Tab`、`↑` `↓` | フォームの欄を移る |
@@ -306,14 +316,17 @@ chloe ws list                                   ワークスペースの一覧
 chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE]
 chloe ws root NAME persistent|ephemeral          ルートの扱い (次の起動から)
 chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   ディスクを大きくする (次の起動から)
+chloe ws policy show NAME                        ワークスペースの規則
+chloe ws policy set NAME                         TOML を標準入力から読む
+chloe ws policy rm NAME
 chloe ws stop NAME
 chloe ws rm NAME [--disks]                      --disks ならディスクも消す
 chloe secret list [--owner OWNER]
 chloe secret set [--owner OWNER] KIND            値は標準入力から読む
 chloe secret rm [--owner OWNER] KIND
-chloe policy show OWNER                          Organization か team の設定
-chloe policy set OWNER                           TOML を標準入力から読む
-chloe policy rm OWNER
+chloe policy show [OWNER]                        個人、Organization か team の設定
+chloe policy set [OWNER]                         TOML を標準入力から読む
+chloe policy rm [OWNER]
 chloe token create NAME [--expires 30d]          管理 API のトークン
 chloe token list
 chloe token revoke ID
@@ -323,7 +336,8 @@ chloe github login|status|logout
 ```
 
 NAME は SSH のユーザー名の `+` のあとと同じ書き方、OWNER は Organization（`acme`）か team（`acme/dev`）。
-`--root` を省くと、Organization と team の設定の既定を使う（設定がなければ `ephemeral`）。
+`secret` と `policy` は、OWNER を省くと自分の個人のものを扱う。
+`--root` を省くと、持ち主（個人、Organization と team）の設定の既定を使う（設定がなければ `ephemeral`）。
 SIZE は GiB で書く（`50G`）。省いたディスクは、ゲートウェイの設定の既定の大きさで作る。
 `chloe ws list` は、名前、ルートの扱い、動いているか、ワークスペースと Docker のディスクの大きさを、タブで区切って出す。
 `chloe ws rm` は、`--disks` を付けなければワークスペースのディスク（`/workspace`、ホームディレクトリ、Docker のデータ）をランナーのホストに残す。
