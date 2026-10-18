@@ -753,10 +753,11 @@ impl russh::server::Handler for Connection {
             }
             return Ok(());
         }
-        // OpenSSH と同じく、コマンドは利用者のシェルに渡す。
+        // OpenSSH と同じく、コマンドは利用者のシェルに渡す。OpenSSH と違ってログインシェルにし、
+        // /etc/profile.d (mise で入れたツールの PATH など) を、端末を開いたときと同じく読ませる。
         self.start(
             channel,
-            vec!["/bin/bash".into(), "-c".into(), command],
+            vec!["/bin/bash".into(), "-l".into(), "-c".into(), command],
             session,
         )
     }
