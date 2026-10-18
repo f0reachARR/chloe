@@ -121,6 +121,32 @@ pub struct PolicyLayer {
     pub github: Option<GitHubScope>,
 }
 
+/// ワークスペースの設定 (データベースの `workspace_policies`)。持ち主の層のあとに重ねる。
+///
+/// 規則だけを持つ。ルートの扱いはワークスペースそのものにあり、インストールトークンの範囲は
+/// 下の層ほど優先するので、ここで書けると持ち主の層で絞った範囲を広げられてしまう。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspacePolicy {
+    #[serde(default)]
+    pub rules: Vec<PathRuleConfig>,
+}
+
+impl WorkspacePolicy {
+    /// 層として重ねる形。
+    pub fn layer(&self) -> PolicyLayer {
+        PolicyLayer {
+            rules: self.rules.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// `base` に重ねられるかを確かめる ([`PolicyLayer::check`])。
+    pub fn check(&self, base: &BasePolicy) -> Result<(), String> {
+        self.layer().check(base)
+    }
+}
+
 /// インストールトークンの範囲。書かなかった項目は、インストールのすべてになる。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -328,6 +354,12 @@ mod tests {
             ..Default::default()
         };
         fine.check(&base).unwrap();
+        let workspace = WorkspacePolicy {
+            rules: vec![rule("ws", "x.example", Action::Passthrough)],
+        };
+        assert!(workspace.check(&base).is_err());
+        // ワークスペースの設定には、ルートの扱いとトークンの範囲を書けない。
+        assert!(serde_json::from_str::<WorkspacePolicy>(r#"{"root": "persistent"}"#).is_err());
         // 古い書き方 (allow、passthrough) は受け付けない。
         assert!(serde_json::from_str::<PolicyLayer>(r#"{"allow": ["x.example"]}"#).is_err());
         assert!(toml::from_str::<BasePolicy>(r#"allow = ["x.example"]"#).is_err());

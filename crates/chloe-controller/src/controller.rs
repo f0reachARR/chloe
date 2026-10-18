@@ -319,6 +319,15 @@ impl<B: RunnerBackend> Controller<B> {
         self.inner.store.policy_layers(owner).await
     }
 
+    /// ワークスペースに重ねる設定の層 (上の層から順)。持ち主の層のあとに、ワークスペースの層を置く。
+    pub async fn workspace_layers(&self, workspace: &Workspace) -> Result<Vec<PolicyLayer>, Error> {
+        let mut layers = self.owner_layers(&workspace.owner).await?;
+        if let Some(policy) = self.inner.store.workspace_policy(workspace.id).await? {
+            layers.push(policy.layer());
+        }
+        Ok(layers)
+    }
+
     /// ディスクの大きさの既定と上限 (ゲートウェイの `[disks]`)。
     pub fn disks(&self) -> &DiskConfig {
         &self.inner.disks
@@ -474,7 +483,7 @@ impl<B: RunnerBackend> Controller<B> {
             .store
             .ensure_placeholders(workspace.id, &specs)
             .await?;
-        let layers = self.owner_layers(&workspace.owner).await?;
+        let layers = self.workspace_layers(workspace).await?;
         let spec = build_spec(
             workspace,
             &self.inner.base.with_layers(&layers),
@@ -1350,6 +1359,58 @@ mod tests {
             // 個人の層は、その人が入る Organization のワークスペースには重ならない。
             assert!(!allow(&shared).contains(&"alice.example".to_string()));
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_policy_follows_its_owner_layers() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let rule = |name: &str, host: &str, action| chloe_policy::PathRuleConfig {
+            name: Some(name.into()),
+            hosts: vec![host.into()],
+            methods: vec![],
+            paths: vec![],
+            action,
+        };
+        let store = controller.store();
+        store
+            .set_policy(
+                &Owner::Org("acme".into()),
+                &crate::runner::PolicyLayer {
+                    rules: vec![rule("org", "x.example", chloe_policy::Action::Deny)],
+                    ..Default::default()
+                },
+                "alice",
+            )
+            .await
+            .unwrap();
+        let ws = workspace(&controller, "acme/web", "alice").await;
+        let other = workspace(&controller, "acme/api", "alice").await;
+        store
+            .set_workspace_policy(
+                ws.id,
+                &crate::runner::WorkspacePolicy {
+                    rules: vec![
+                        rule("ws", "x.example", chloe_policy::Action::Allow),
+                        rule("ws", "y.example", chloe_policy::Action::Allow),
+                    ],
+                },
+                "alice",
+            )
+            .await
+            .unwrap();
+        let _a = controller.open(&ws).await.unwrap();
+        let _b = controller.open(&other).await.unwrap();
+        let allow = |ws: &Workspace| backend.allow.lock().unwrap()[&ws.key()].clone();
+        assert!(allow(&ws).contains(&"y.example".to_string()));
+        assert!(!allow(&other).contains(&"y.example".to_string()));
+        // 持ち主の層の規則が先に並ぶので、ワークスペースの層では覆せない。
+        let layers = controller.workspace_layers(&ws).await.unwrap();
+        let names: Vec<_> = layers
+            .iter()
+            .flat_map(|l| &l.rules)
+            .map(|r| r.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["org", "ws", "ws"]);
     }
 
     #[tokio::test]

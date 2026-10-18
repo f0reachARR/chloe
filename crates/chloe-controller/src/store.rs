@@ -10,7 +10,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::Error;
 use crate::catalog::{self, SecretSpec};
-use crate::runner::PolicyLayer;
+use crate::runner::{PolicyLayer, WorkspacePolicy};
 use crate::workspace::{DiskSizes, RootMode, Workspace, WorkspaceRef};
 
 #[derive(Clone)]
@@ -213,6 +213,49 @@ impl Store {
     pub async fn delete_policy(&self, owner: &Owner) -> Result<bool, Error> {
         let result = sqlx::query("DELETE FROM policies WHERE owner = ?1")
             .bind(owner.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// ワークスペースの設定。
+    pub async fn workspace_policy(&self, id: i64) -> Result<Option<WorkspacePolicy>, Error> {
+        let row = sqlx::query("SELECT config FROM workspace_policies WHERE workspace_id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            let config: String = row.try_get("config")?;
+            serde_json::from_str(&config).map_err(|e| Error::Invalid(e.to_string()))
+        })
+        .transpose()
+    }
+
+    pub async fn set_workspace_policy(
+        &self,
+        id: i64,
+        policy: &WorkspacePolicy,
+        updated_by: &str,
+    ) -> Result<(), Error> {
+        let config = serde_json::to_string(policy).map_err(|e| Error::Invalid(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO workspace_policies (workspace_id, config, updated_by, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (workspace_id) DO UPDATE SET config = excluded.config,
+                 updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+        )
+        .bind(id)
+        .bind(config)
+        .bind(updated_by)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// ワークスペースの設定を消す。消したら `true`。
+    pub async fn delete_workspace_policy(&self, id: i64) -> Result<bool, Error> {
+        let result = sqlx::query("DELETE FROM workspace_policies WHERE workspace_id = ?1")
+            .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
@@ -908,6 +951,57 @@ pub(crate) mod tests {
             hosts(store.policy_layers(&team).await.unwrap()),
             ["team2.example"]
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_policies_go_with_their_workspace() {
+        let store = Store::new(pool().await);
+        let target = WorkspaceRef::parse("acme/web", "alice").unwrap();
+        let ws = store
+            .create(&target, RootMode::Ephemeral, DiskSizes::default(), "alice")
+            .await
+            .unwrap();
+        let policy = |host: &str| WorkspacePolicy {
+            rules: vec![chloe_policy::PathRuleConfig {
+                name: None,
+                hosts: vec![host.into()],
+                methods: vec![],
+                paths: vec![],
+                action: chloe_policy::Action::Allow,
+            }],
+        };
+        assert_eq!(store.workspace_policy(ws.id).await.unwrap(), None);
+        store
+            .set_workspace_policy(ws.id, &policy("a.example"), "alice")
+            .await
+            .unwrap();
+        store
+            .set_workspace_policy(ws.id, &policy("b.example"), "alice")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.workspace_policy(ws.id).await.unwrap(),
+            Some(policy("b.example"))
+        );
+        assert!(store.delete_workspace_policy(ws.id).await.unwrap());
+        assert!(!store.delete_workspace_policy(ws.id).await.unwrap());
+
+        // ワークスペースを消すと、その設定も消える。同じ名前で作り直しても引き継がない。
+        store
+            .set_workspace_policy(ws.id, &policy("a.example"), "alice")
+            .await
+            .unwrap();
+        store.delete(ws.id).await.unwrap();
+        let again = store
+            .create(&target, RootMode::Ephemeral, DiskSizes::default(), "alice")
+            .await
+            .unwrap();
+        assert_eq!(store.workspace_policy(again.id).await.unwrap(), None);
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_policies")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[tokio::test]
