@@ -172,7 +172,7 @@ ssh chloe@chloe.example.com chloe secret set anthropic_api_key --spec < anthropi
 
 - **名前**：英小文字で始め、英小文字、数字、`_` で書く（`_` は続けず、末尾にも置かない）。
 - **placeholder**：`{id}` を一つだけ含める。ほかに使える文字は英数字と `-_.~+/=:`。省くと `{id}` だけになる。ツールが手元で形式を調べることがあるので、本物の値の接頭辞に合わせるとよい。
-- **inject**：`hosts` への要求で、`header` の中のプレースホルダーを本物に置き換える。`hosts` は `*.example.com` の形でサブドメインを指定できる。
+- **inject**：`hosts` への要求で、`header` の中のプレースホルダーを本物に置き換える。`hosts` は `*.example.com` の形でサブドメインを指定できる。`format = "basic-password"` では、Basic 認証のユーザー名も欄にして差し替えられる（[ユーザー名も差し替える](#ユーザー名も差し替える)）。
 - 規則の宛先は、そのシークレットを使うワークスペースで自動で許す。ただし、ゲートウェイや Organization の規則にすでに書いた宛先と重なる宛先は、その規則で決まる。
 - 規則の宛先以外へプレースホルダーを送ると、プロキシが要求を遮断する。ヘッダーと URL のほか、本文も 1 MiB までなら調べる。
 
@@ -255,6 +255,34 @@ content = "machine apt.example.com login deploy password {value}\n"
 
 apt のリポジトリは、`sources.list` で `https://` で書く。
 `http://` だと、プロキシから先へ本物のパスワードが平文で流れる（`http://` の宛先で差し替えるときは、どのシークレットでも同じである）。
+
+### ユーザー名も差し替える
+
+`basic-password` は、ふつうはパスワードだけを差し替え、ユーザー名は VM の中のツールが送ったまま残す。
+ユーザー名も VM に見せたくないときや、パスワードと一緒に変えたいときは、ユーザー名の欄を作り、規則の `username_field` にその欄の名前を書く。
+`field` にはパスワードの欄を書く。
+
+```toml
+[fields.username]
+env = ["REPO_USER"]
+placeholder = "user-{id}"
+value = "deploy"
+
+[fields.password]
+env = ["REPO_PASSWORD"]
+value = "..."
+
+[[inject]]
+field = "password"
+username_field = "username"
+hosts = ["repo.example.com"]
+header = "authorization"
+format = "basic-password"
+```
+
+VM の中では、ユーザー名にもプレースホルダーが入る（`curl --user "$REPO_USER:$REPO_PASSWORD"` や、ファイルの `{username}`）。
+プロキシは、Basic 認証のユーザー名とパスワードのうち、プレースホルダーになっているほうを本物に置き換える。
+ユーザー名のプレースホルダーも、規則の宛先以外へ送ると遮断する。
 
 ### 認証情報の置き場所
 
