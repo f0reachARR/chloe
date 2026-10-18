@@ -1,0 +1,16 @@
+Package: chloe-gateway
+Version: @VERSION@
+Architecture: amd64
+Maintainer: @MAINTAINER@
+Installed-Size: @SIZE@
+Depends: @SHLIBS@, chloe-common (= @VERSION@)
+Section: net
+Priority: optional
+Homepage: https://github.com/ForteFibre/chloe
+Description: chloe SSH gateway and control plane
+ An SSH server that runs coding agents in disposable per-user microVMs.
+ Users log in with their GitHub account; API keys and tokens stay outside
+ the VM and are substituted by the runner's proxy per destination.
+ .
+ This package contains chloe-gateway (authentication, workspaces, secrets,
+ management commands and API) and its systemd unit.

@@ -26,3 +26,4 @@ CollectMode=inactive-or-failed
 # controller は VM の中を止めてからランナーを止める。残ったプロセス (Firecracker が終わったあとの
 # プロキシと DNS) は待たずに終わらせる (Docker の docker rm -f と同じ)。
 KillSignal=SIGKILL
+SuccessExitStatus=SIGKILL

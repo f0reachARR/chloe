@@ -9,6 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=/etc/chloe/runner.env
 ExecStart=/usr/local/lib/chloe/runner/chloe-host-net up
+ExecReload=/usr/local/lib/chloe/runner/chloe-host-net up
 ExecStop=/usr/local/lib/chloe/runner/chloe-host-net down
 
 [Install]

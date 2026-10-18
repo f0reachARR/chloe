@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+# 消すときだけ、ホスト側の規則を外す。ランナーの unit は chloe-host-net を Requires= で
+# たどるので、動いているランナーも止まる (更新では止めない)。
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    deb-systemd-invoke stop chloe-host-net.service || true
+    deb-systemd-helper disable chloe-host-net.service || true
+fi

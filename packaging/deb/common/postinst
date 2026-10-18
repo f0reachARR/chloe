@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    systemd-sysusers chloe.conf
+    systemd-tmpfiles --create chloe.conf
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        # 同じ apt の実行で polkitd を新しく入れたとき、D-Bus は利用者 polkitd を作る前の設定の
+        # ままで、polkitd が名前を取れずに終わる。設定を読み直させ、polkitd を起動し直させる。
+        deb-systemd-invoke reload dbus.service || true
+        deb-systemd-invoke try-restart polkit.service || true
+        # 動いていれば、ホスト側の規則を置き直す。restart にすると、chloe-host-net を
+        # Requires= でたどるランナーまで止まるので、reload だけを使う。
+        deb-systemd-invoke try-reload-or-restart chloe-host-net.service || true
+    fi
+fi

@@ -17,8 +17,10 @@ pool="${CHLOE_NET_POOL:-10.250.0.0/16}"
 
 case "${1:-}" in
 up)
-    nft delete table inet chloe-host 2> /dev/null || true
+    # 表を消して置き直すのを一つのトランザクションで行う (置き直すあいだに規則のない時間を作らない)。
     nft -f - <<EOF
+table inet chloe-host
+delete table inet chloe-host
 table inet chloe-host {
     chain input {
         type filter hook input priority filter; policy accept;

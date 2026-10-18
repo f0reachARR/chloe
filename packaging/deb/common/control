@@ -1,0 +1,15 @@
+Package: chloe-common
+Version: @VERSION@
+Architecture: amd64
+Maintainer: @MAINTAINER@
+Installed-Size: @SIZE@
+Depends: @SHLIBS@, dnsmasq-base, e2fsprogs, iproute2, jq, nftables, polkitd, systemd (>= 242)
+Suggests: chloe-guest
+Section: net
+Priority: optional
+Homepage: https://github.com/ForteFibre/chloe
+Description: chloe runner components
+ Shared parts of chloe: the transparent proxy (chloe-egress), Firecracker,
+ the scripts and systemd units that run a workspace runner (microVM, proxy
+ and DNS) in its own network namespace, the polkit rule that lets the chloe
+ user manage runner units, and the chloe system user.

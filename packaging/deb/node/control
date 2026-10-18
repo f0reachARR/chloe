@@ -1,0 +1,13 @@
+Package: chloe-node
+Version: @VERSION@
+Architecture: amd64
+Maintainer: @MAINTAINER@
+Installed-Size: @SIZE@
+Depends: @SHLIBS@, chloe-common (= @VERSION@)
+Section: net
+Priority: optional
+Homepage: https://github.com/ForteFibre/chloe
+Description: chloe runner host daemon
+ Runs chloe workspace runners on a host on behalf of a chloe control plane,
+ over mutual TLS. Install it on each runner host when the gateway uses
+ [cluster].

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+# インストールしただけでは有効にも起動もしない (設定を書いてから systemctl enable --now chloe-node)。
+# 更新では、動いていれば起動し直す。動いているワークスペースは止まらない。
+if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    if [ -n "$2" ]; then
+        deb-systemd-invoke try-restart chloe-node.service || true
+    fi
+fi

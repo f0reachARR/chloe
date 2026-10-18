@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+# 状態 (/var/lib/chloe) と利用者 chloe は消さない。マスター鍵を失うと、保存したシークレットを読めなくなる。
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
