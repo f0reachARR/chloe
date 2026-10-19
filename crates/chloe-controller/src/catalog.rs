@@ -535,7 +535,9 @@ fn check_hosts(hosts: &[String]) -> Result<(), String> {
         if !valid {
             return Err(format!("invalid host {host:?}"));
         }
-        if name.eq_ignore_ascii_case(chloe_policy::CA_HOST) {
+        if name.eq_ignore_ascii_case(chloe_policy::CA_HOST)
+            || name.eq_ignore_ascii_case(chloe_policy::ASK_HOST)
+        {
             return Err(format!("host {host} is reserved"));
         }
     }

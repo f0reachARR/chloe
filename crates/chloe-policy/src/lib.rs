@@ -26,6 +26,9 @@ use serde::{Deserialize, Serialize};
 
 /// CA 証明書を返すホスト名。外部には存在しない。
 pub const CA_HOST: &str = "ca.chloe.internal";
+/// VM の中のエージェントが人への依頼を出すホスト名。プロキシがコントロールプレーンへ送る。
+/// 外部には存在しない。
+pub const ASK_HOST: &str = "ask.chloe.internal";
 
 /// 方針の設定ファイルの形。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -270,6 +273,8 @@ pub struct Request<'a> {
 pub enum Decision {
     /// CA 証明書を返す。
     Ca,
+    /// 人への依頼として、コントロールプレーンへ送る。
+    Ask,
     /// 上流へ送る。`injected` は差し替える規則の名前。
     Allowed { injected: Vec<String> },
     Blocked {
@@ -494,6 +499,9 @@ impl Policy {
         let host = normalize_host(request.host);
         if host == CA_HOST {
             return Err(Decision::Ca);
+        }
+        if host == ASK_HOST {
+            return Err(Decision::Ask);
         }
         if request.tls {
             match request.sni.map(normalize_host) {
@@ -888,6 +896,11 @@ mod tests {
         let mut req = Req::https(CA_HOST);
         req.sni = None;
         assert_eq!(req.eval(&policy()), Decision::Ca);
+        // 許可リストになくても、平文でも TLS でも受ける。
+        assert_eq!(Req::https(ASK_HOST).eval(&policy()), Decision::Ask);
+        let mut plain = Req::https("Ask.Chloe.Internal");
+        plain.sni = None;
+        assert_eq!(plain.eval(&policy()), Decision::Ask);
     }
 
     #[test]
