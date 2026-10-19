@@ -56,6 +56,7 @@ Matchlock が最も近い。
 ただし README 上の位置づけは「Experimental」であり、ログや監査の機能は記載がない。
 microsandbox は Rust で書かれ、SDK として組み込む想定の設計である（常駐デーモンを持たない）。
 一覧は [awesome-agent-sandbox](https://github.com/fishman/awesome-agent-sandbox) が網羅的である。
+NVIDIA の OpenShell は、この調査の後（2026-10-19）に別に調べた（[OpenShell の調査](research-openshell.md)）。
 
 README を確認した Matchlock と microsandbox は、いずれも「手元の 1 台で 1 人が使う」ことを想定している（他は一覧の説明を読んだ範囲での判断である）。
 複数の利用者が SSH で入ってきて、利用者ごとに認証と秘密情報を切り替える構成は、調べた範囲では見当たらなかった。
