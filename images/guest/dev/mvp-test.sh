@@ -300,6 +300,8 @@ ask_wait=$!
 check ask-allow "ask $ask_id is allowed" as alice chloe inbox allow "$ask_id"
 wait "$ask_wait" || true
 check ask-waited "allowed by alice" cat "$work/ask-wait.out"
+# musl の chloe-ask も、名前でつなげる (AAAA に NXDOMAIN を返さない)。
+check ask-by-name "allowed by alice" as alice+acme/proj "CHLOE_ASK_ADDR=ask.chloe.internal:80 chloe-ask wait $ask_id"
 check ask-reachable "200" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' https://example.com/"
 check ask-rule "ask-$ask_id" as alice chloe ws policy show acme/proj
 check ask-answered-once "already allowed" as alice chloe inbox allow "$ask_id"
