@@ -283,13 +283,13 @@ check policy-not-admin "only the administrators" sh -c 'printf "[[rules]]\nhosts
     ssh "${ssh_opts[@]}" -i "$work/dave" dave@127.0.0.1 chloe policy set beta
 check policy-maintainer-not-admin "only the administrators" sh -c 'printf "root = \"persistent\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe policy set acme/dev
-check org-blocked-before "000" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
+check org-blocked-before "403" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
 check policy-set "saved the settings of acme" sh -c 'printf "[[rules]]\nhosts = [\"example.org\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
 check policy-show "example.org" as erin chloe policy show acme
 check org-allowed-after "200" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
 check team-inherits "200" as alice+acme/dev/tools "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
-check other-org-unaffected "000" as dave+beta/app "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
+check other-org-unaffected "403" as dave+beta/app "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.org/"
 check team-root-default "saved the settings of acme/dev" sh -c 'printf "root = \"persistent\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme/dev
 as alice chloe ws create acme/dev/new >/dev/null
@@ -298,12 +298,12 @@ check policy-invalid "invalid settings" sh -c 'printf "rules = 1\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set acme
 
 section "personal settings"
-check personal-blocked-before "000" as alice "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
+check personal-blocked-before "403" as alice "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
 check personal-policy-set "saved the settings of alice" sh -c 'printf "[[rules]]\nhosts = [\"example.com\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set
 check personal-policy-show "example.com" as alice chloe policy show
 check personal-allowed-after "200" as alice "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
-check personal-not-in-org-policy "000" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
+check personal-not-in-org-policy "403" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/"
 check personal-no-github "cannot have github" sh -c 'printf "[github]\nrepositories = [\"x\"]\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe policy set
 check personal-policy-rm "removed the settings of alice" as alice chloe policy rm
@@ -311,12 +311,12 @@ check personal-policy-rm "removed the settings of alice" as alice chloe policy r
 section "workspace rules"
 check ws-policy-member-not-admin "only the administrators" sh -c 'printf "[[rules]]\nhosts = [\"example.net\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe ws policy set acme/proj
-check ws-blocked-before "000" as alice+acme/dev/tools "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
+check ws-blocked-before "403" as alice+acme/dev/tools "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
 check ws-policy-maintainer "saved the rules of acme/dev/tools" sh -c 'printf "[[rules]]\nhosts = [\"example.net\"]\naction = \"allow\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/erin" erin@127.0.0.1 chloe ws policy set acme/dev/tools
 check ws-policy-show "example.net" as alice chloe ws policy show acme/dev/tools
 check ws-allowed-after "200" as alice+acme/dev/tools "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
-check ws-other-unaffected "000" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
+check ws-other-unaffected "403" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.net/"
 check ws-policy-no-root "invalid rules" sh -c 'printf "root = \"persistent\"\n" | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/alice" alice@127.0.0.1 chloe ws policy set acme/proj
 check ws-policy-rm "removed the rules of acme/dev/tools" as erin chloe ws policy rm acme/dev/tools

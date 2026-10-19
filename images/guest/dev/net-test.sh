@@ -20,9 +20,15 @@ check ca-publish sh -c 'curl -fsS http://ca.chloe.internal/ca.pem -o /usr/local/
 
 # 許可と遮断
 check allowed sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' https://httpbin.org/get)\" = 200 ] && echo 200"
-# 許可していない名前は DNS で解決できない。DNS を迂回しても、プロキシが 403 で遮断する。
-check_fails dns-not-allowed getent hosts example.com
+# 許可していない名前は、上流に問い合わせずにプロキシのアドレスに引ける。プロキシが 403 で
+# 遮断し、許可の頼み方を書く。本物のアドレスへ送っても、プロキシが 403 で遮断する。
+check dns-not-allowed sh -c "getent hosts example.com | grep -o '^172\.29\.0\.1'"
 check dns-allowed getent hosts httpbin.org
+check not-allowed-hint sh -c "curl -sS https://example.com/ | grep -o 'chloe-ask network example.com'"
+# 一語だけの名前と、外にない名前の決まりの名前は引けない。
+check_fails dns-single-label getent hosts db
+check_fails dns-local getent hosts printer.local
+check_fails dns-internal getent hosts foo.internal
 check not-allowed sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' --resolve example.com:443:1.1.1.1 https://example.com/)\" = 403 ] && echo 403"
 check http2 curl -sS -o /dev/null -w '%{http_version}' --http2 https://httpbin.org/get
 check plain-http sh -c "curl -fsS http://httpbin.org/get | grep -o '\"url\": \"[^\"]*\"'"
@@ -48,8 +54,10 @@ check path-other-unaffected sh -c "$(declare -f status); [ \"\$(status https://h
 # SNI と Host の食い違い (ドメインフロンティング)
 check sni-mismatch sh -c "[ \"\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: example.com' https://httpbin.org/get)\" = 403 ] && echo 403"
 
-# 80 番と 443 番以外への通信、プロキシを経由しない通信は届かない
+# 80 番と 443 番以外への通信、プロキシを経由しない通信は届かない。捨てずに断るので、すぐに失敗する
 check_fails other-port curl -sS --max-time 5 http://portquiz.net:8080/
+check other-port-refused sh -c 'timeout 5 bash -c "exec 3<>/dev/tcp/example.com/22" 2>&1 | grep -o "Connection refused"'
+check other-port-refused-real sh -c 'timeout 5 bash -c "exec 3<>/dev/tcp/httpbin.org/22" 2>&1 | grep -o "Connection refused"'
 # 接続先は SNI から決めるので、ゲストが別の IP アドレスへ接続しても SNI のホストに届く
 check ignores-original-ip curl -fsS -o /dev/null -w '%{http_code}' --resolve httpbin.org:443:1.1.1.1 https://httpbin.org/get
 
@@ -59,6 +67,10 @@ check docker-pull sh -c 'docker pull -q curlimages/curl'
 # CA を入れていないコンテナからの復号対象の宛先は証明書の検証で失敗し、CA を渡せば通る
 check_fails container-no-ca docker run --rm curlimages/curl -sS --max-time 20 https://httpbin.org/get
 check container-with-ca docker run --rm --entrypoint sh curlimages/curl -c 'curl -fsS http://ca.chloe.internal/ca.pem -o /tmp/ca.pem && curl -fsS -o /dev/null -w "%{http_code}" --cacert /tmp/ca.pem https://httpbin.org/get'
+# dnsmasq は、プロキシのアドレスを答える名前の AAAA に REFUSED を返す。musl (コンテナの中の curl) と
+# Go (dockerd) の名前の解決も、A を使ってプロキシに届く。
+check container-musl-hint docker run --rm --entrypoint sh curlimages/curl -c 'curl -sk https://example.com/ | grep -o "chloe-ask network example.com"'
+check go-resolver sh -c 'out="$(timeout 60 docker pull -q quay.io/prometheus/busybox 2>&1)"; echo "$out"; ! echo "$out" | grep -qiE "no such host|misbehaving|lookup "'
 
 # mise: プロキシを通して (chloe の CA を信頼して) 版の一覧を引き、ツールを入れて、ログインシェルで使える
 check mise-install sudo -iu user sh -c 'timeout 120 mise use -g -y jq@1.7.1 2>&1 | tail -1'

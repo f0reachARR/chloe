@@ -119,9 +119,10 @@ check veth "cw0" in_host ip -o link show cw0
 
 section "egress and DNS"
 check allowed-host "200" as alice "curl -s -o /dev/null -w '%{http_code}' https://httpbin.org/get"
-check blocked-host "blocked" as alice "curl -s --max-time 10 https://example.com >/dev/null && echo reached || echo blocked"
+check blocked-host "403" as alice "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com"
 check dns-allowed "httpbin.org" as alice 'getent hosts httpbin.org'
-check dns-blocked "nxdomain" as alice 'getent hosts example.com || echo nxdomain'
+# 許可していない名前は、プロキシのアドレスに引ける。
+check dns-proxied "172.29.0.1" as alice 'getent hosts example.com'
 check requests-logged '"host":"httpbin.org"' in_host cat "/var/lib/chloe/workspaces/$alice_key/logs/requests.jsonl"
 
 section "host network rules"
@@ -134,11 +135,11 @@ check netns-to-internet "reached" in_host sh -c "ip netns exec chloe-$alice_key 
 
 section "updating a running runner"
 # シークレットを登録すると、差し替え先 (api.openai.com) が方針に加わり、VM の DNS の許可リストも変わる。
-check dns-before-update "nxdomain" as alice 'getent hosts api.openai.com || echo nxdomain'
+check dns-before-update "172.29.0.1" as alice 'getent hosts api.openai.com'
 check secret-set "saved openai_api_key" sh -c 'printf "%s\n" "$0" | "$@"' "$(example_secret openai_api_key real-secret-O)" \
     ssh "${ssh_opts[@]}" -i "$work/alice" "alice@$host_ip" chloe secret set openai_api_key --spec
 check egress-updated "policy updated" in_host cat "/var/lib/chloe/workspaces/$alice_key/logs/egress.log"
-check dns-after-update "api.openai.com" as alice 'getent hosts api.openai.com'
+check dns-after-update "api.openai.com" as alice 'getent hosts api.openai.com | grep -v "^172\.29\.0\.1 "'
 
 section "two runners"
 check bob-shell "hello" as bob 'echo hello'

@@ -289,8 +289,7 @@ check not-admin-org-secret "cannot change the secrets of acme" sh -c 'echo x | "
 
 section "asks from agents"
 # 遮断の応答に、許可の頼み方が書いてある。
-# 許可リストにない名前は引けないので、プロキシに直接送って確かめる。
-check ask-hint "chloe-ask network example.com" as alice+acme/proj 'curl -s --resolve example.com:443:172.29.0.1 https://example.com/'
+check ask-hint "chloe-ask network example.com" as alice+acme/proj 'curl -s https://example.com/'
 ask_id="$(as alice+acme/proj 'chloe-ask network example.com --reason "read the docs" --no-wait')"
 check ask-inbox "$ask_id	acme/proj	network	pending" as alice chloe inbox
 check ask-not-member "no such ask: $ask_id" as bob chloe inbox show "$ask_id"
