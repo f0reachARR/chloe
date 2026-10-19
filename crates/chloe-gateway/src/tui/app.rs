@@ -4,7 +4,6 @@
 //! [`Outcome`] として受け取る。操作そのものは [`super::perform`] が行う。
 
 use chloe_audit::Record;
-use chloe_controller::asks::{AskBody, AskStatus};
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::{PolicyLayer, RuleOrigin};
 use chloe_controller::store::{ApiToken, SshKey};
@@ -20,10 +19,10 @@ use terminput::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::form::{Field, Form, FormEvent, RowKind};
 use super::requests::{self, RequestFilter};
-use super::{policy_form, secret_form};
+use super::{inbox, policy_form, secret_form};
 use crate::ops::{
     AskInfo, NewWorkspace, Reply, RuleScope, RulesView, ScopeEntry, SecretView, WorkspaceInfo,
-    format_idle, format_mib, format_time, format_time_secs, owner_arg,
+    format_idle, format_mib, format_time, owner_arg,
 };
 
 /// ゲートウェイに頼む操作。シークレットの値を含むので、Debug で書き出さない。
@@ -316,9 +315,9 @@ pub(super) enum Modal {
 
 pub struct App {
     login: String,
-    tab: usize,
+    pub(super) tab: usize,
     pub quit: bool,
-    status: Option<(String, bool)>,
+    pub(super) status: Option<(String, bool)>,
     /// 結果を待っている操作の数。
     busy: usize,
     workspaces: Vec<WorkspaceInfo>,
@@ -332,12 +331,12 @@ pub struct App {
     keys: Vec<SshKey>,
     github: String,
     /// エージェントからの依頼と、答えたものも出しているか。
-    asks: Vec<AskInfo>,
-    all_asks: bool,
+    pub(super) asks: Vec<AskInfo>,
+    pub(super) all_asks: bool,
     /// 依頼を一度でも読んだか (始めに読んだ依頼は、新しく来たとは知らせない)。
-    asks_loaded: bool,
+    pub(super) asks_loaded: bool,
     /// タブごとの一覧で選んでいる行。
-    selected: [usize; TABS.len()],
+    pub(super) selected: [usize; TABS.len()],
     pub(super) modals: Vec<Modal>,
 }
 
@@ -379,19 +378,7 @@ impl App {
         ])
     }
 
-    /// 依頼が出たか答えられた。依頼の一覧を読み直す。
-    pub fn ask_changed(&mut self) -> Vec<Action> {
-        self.track(vec![Action::LoadAsks { all: self.all_asks }])
-    }
-
-    /// 答えを待つ依頼の数。
-    fn pending_asks(&self) -> usize {
-        self.asks
-            .iter()
-            .filter(|info| info.ask.status == AskStatus::Pending)
-            .count()
-    }
-    fn track(&mut self, actions: Vec<Action>) -> Vec<Action> {
+    pub(super) fn track(&mut self, actions: Vec<Action>) -> Vec<Action> {
         self.busy += actions.len();
         actions
     }
@@ -400,7 +387,7 @@ impl App {
         TABS[self.tab]
     }
 
-    fn selection(&self) -> usize {
+    pub(super) fn selection(&self) -> usize {
         self.selected[self.tab]
     }
 
@@ -446,7 +433,7 @@ impl App {
         self.owners.get(self.secret_owner)
     }
 
-    fn reload(&self) -> Vec<Action> {
+    pub(super) fn reload(&self) -> Vec<Action> {
         match self.current() {
             Tab::Workspaces => vec![Action::LoadWorkspaces],
             Tab::Secrets => match self.secret_owner() {
@@ -768,93 +755,7 @@ impl App {
                     });
                 }
             }
-            (Tab::Inbox, KeyCode::Enter) => {
-                if let Some(info) = self.asks.get(selected) {
-                    self.modals.push(Modal::Message {
-                        title: format!("Ask {}", info.ask.id),
-                        lines: describe_ask(info),
-                    });
-                }
-            }
-            (Tab::Inbox, KeyCode::Char('f')) => {
-                self.all_asks = !self.all_asks;
-                self.selected[self.tab] = 0;
-                return self.reload();
-            }
-            (Tab::Inbox, KeyCode::Char('a')) => {
-                let Some(info) = self.asks.get(selected) else {
-                    return vec![];
-                };
-                let ask = &info.ask;
-                if ask.status != AskStatus::Pending {
-                    self.status = Some((format!("ask {} is already {}", ask.id, ask.status), true));
-                    return vec![];
-                }
-                match &ask.body {
-                    AskBody::Network { .. } if !info.can_allow => {
-                        self.status = Some((
-                            format!(
-                                "you cannot change the rules of {}; deny it or ask someone who can",
-                                info.workspace
-                            ),
-                            true,
-                        ));
-                    }
-                    AskBody::Network { .. } => self.modals.push(Modal::Confirm {
-                        message: format!(
-                            "Allow {} for {}? The rule ask-{} is added to the workspace's rules.",
-                            ask.body.summary(),
-                            info.workspace,
-                            ask.id
-                        ),
-                        action: Action::AnswerAsk {
-                            id: ask.id,
-                            reply: Reply::Allow,
-                        },
-                    }),
-                    AskBody::Question { question, options } => {
-                        let mut fields = vec![Field::note("Question", question.clone())];
-                        if !options.is_empty() {
-                            let mut choices: Vec<&str> =
-                                options.iter().map(String::as_str).collect();
-                            choices.push(OTHER_ANSWER);
-                            fields.push(Field::choice("option", "Answer", &choices, choices[0]));
-                            fields.push(
-                                Field::text("text", "Text", "")
-                                    .shown_when("option", OTHER_ANSWER),
-                            );
-                        } else {
-                            fields.push(Field::text("text", "Answer", ""));
-                        }
-                        self.modals.push(Modal::Form {
-                            form: Form::new(format!("Answer ask {} ({})", ask.id, info.workspace), fields),
-                            purpose: Purpose::AnswerAsk {
-                                id: ask.id,
-                                options: !options.is_empty(),
-                            },
-                            saving: false,
-                        });
-                    }
-                }
-            }
-            (Tab::Inbox, KeyCode::Char('d')) => {
-                if let Some(info) = self.asks.get(selected)
-                    && info.ask.status == AskStatus::Pending
-                {
-                    self.modals.push(Modal::Form {
-                        form: Form::new(
-                            format!("Deny ask {} ({})", info.ask.id, info.workspace),
-                            vec![
-                                Field::note("Ask", info.ask.body.summary()),
-                                Field::text("message", "Message", "")
-                                    .help("Optional. The agent receives it with the denial."),
-                            ],
-                        ),
-                        purpose: Purpose::DenyAsk(info.ask.id),
-                        saving: false,
-                    });
-                }
-            }
+            (Tab::Inbox, _) => return self.handle_inbox_key(key),
             (Tab::GitHub, KeyCode::Char('l')) => return vec![Action::GitHubLogin],
             (Tab::GitHub, KeyCode::Char('o')) => self.modals.push(Modal::Confirm {
                 message: "Sign out of GitHub? You need the Device Flow again on the next connection."
@@ -1116,33 +1017,7 @@ impl App {
             }
             Outcome::Keys(keys) => self.keys = keys,
             Outcome::GitHub(status) => self.github = status,
-            Outcome::Asks { all, asks } => {
-                // 切り替える前に頼んだ一覧は捨てる。
-                if all == self.all_asks {
-                    let new: Vec<&AskInfo> = asks
-                        .iter()
-                        .filter(|info| {
-                            info.ask.status == AskStatus::Pending
-                                && !self.asks.iter().any(|old| old.ask.id == info.ask.id)
-                        })
-                        .collect();
-                    if self.asks_loaded
-                        && let Some(info) = new.first()
-                    {
-                        self.status = Some((
-                            format!(
-                                "new ask {} from {}: {} (Inbox)",
-                                info.ask.id,
-                                info.workspace,
-                                info.ask.body.summary()
-                            ),
-                            false,
-                        ));
-                    }
-                    self.asks = asks;
-                    self.asks_loaded = true;
-                }
-            }
+            Outcome::Asks { all, asks } => self.apply_asks(all, asks),
             Outcome::DeviceCode { uri, code } => self.modals.push(Modal::Message {
                 title: "Sign in to GitHub".into(),
                 lines: vec![
@@ -1328,21 +1203,7 @@ impl App {
                 return;
             }
             Tab::Inbox => {
-                let [head_area, list_area] =
-                    Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
-                let showing = if self.all_asks {
-                    "all asks"
-                } else {
-                    "asks waiting for an answer"
-                };
-                frame.render_widget(
-                    Paragraph::new(format!(
-                        "Showing {showing} from the agents in your workspaces  (f: switch)"
-                    )),
-                    head_area,
-                );
-                let items: Vec<ListItem> = self.asks.iter().map(ask_item).collect();
-                render_list(frame, list_area, items, self.selection());
+                self.render_inbox(frame, inner);
                 return;
             }
         };
@@ -1613,26 +1474,8 @@ fn submit(form: &Form, purpose: &Purpose) -> Result<Action, String> {
             let expires = Some(form.text("expires")).filter(|e| !e.is_empty());
             Ok(Action::CreateToken { name, expires })
         }
-        Purpose::AnswerAsk { id, options } => {
-            let answer = match form.choice("option") {
-                choice if *options && choice != OTHER_ANSWER => choice,
-                _ => form.text("text"),
-            };
-            if answer.trim().is_empty() {
-                return Err("enter an answer".into());
-            }
-            Ok(Action::AnswerAsk {
-                id: *id,
-                reply: Reply::Answer(answer),
-            })
-        }
-        Purpose::DenyAsk(id) => {
-            let message = Some(form.text("message")).filter(|m| !m.trim().is_empty());
-            Ok(Action::AnswerAsk {
-                id: *id,
-                reply: Reply::Deny(message),
-            })
-        }
+        Purpose::AnswerAsk { id, options } => inbox::answer(form, *id, *options),
+        Purpose::DenyAsk(id) => Ok(inbox::deny(form, *id)),
         Purpose::Row(_) => Err("not a top-level form".into()),
     }
 }
@@ -1748,77 +1591,6 @@ fn render_modal(frame: &mut Frame, modal: &Modal) {
     }
 }
 
-/// 質問の選択肢のほかに、自由に書いて答えるときの選択肢。
-const OTHER_ANSWER: &str = "(write an answer)";
-
-/// 依頼を一覧の一行にする。答えを待つものは黄色、断ったものと期限切れは灰色。
-fn ask_item(info: &AskInfo) -> ListItem<'static> {
-    let ask = &info.ask;
-    let time = format_time_secs(ask.created_at)[5..].to_string();
-    let line = format!(
-        "{:<5} {time} {:<24} {:<8} {:<9} {}",
-        ask.id,
-        info.workspace,
-        ask.body.kind(),
-        ask.status.as_str(),
-        ask.body.summary()
-    );
-    match ask.status {
-        AskStatus::Pending => ListItem::new(line.yellow()),
-        AskStatus::Allowed | AskStatus::Answered => ListItem::new(line),
-        _ => ListItem::new(line.dark_gray()),
-    }
-}
-
-/// 依頼の欄をすべて出す。
-fn describe_ask(info: &AskInfo) -> Vec<String> {
-    let ask = &info.ask;
-    let mut lines = vec![
-        format!("workspace   {}", info.workspace),
-        format!("kind        {}", ask.body.kind()),
-        format!("status      {}", ask.status),
-        format!("asked       {} UTC", format_time_secs(ask.created_at)),
-        format!("expires     {} UTC", format_time_secs(ask.expires_at)),
-    ];
-    match &ask.body {
-        AskBody::Network {
-            host,
-            methods,
-            paths,
-        } => {
-            let all = |items: &[String]| {
-                if items.is_empty() {
-                    "(all)".to_string()
-                } else {
-                    items.join(" ")
-                }
-            };
-            lines.push(format!("host        {host}"));
-            lines.push(format!("methods     {}", all(methods)));
-            lines.push(format!("paths       {}", all(paths)));
-        }
-        AskBody::Question { question, options } => {
-            lines.push("question".into());
-            lines.extend(question.lines().map(|l| format!("  {l}")));
-            for (i, option) in options.iter().enumerate() {
-                lines.push(format!("option {}    {option}", i + 1));
-            }
-        }
-    }
-    if let Some(reason) = &ask.reason {
-        lines.push("reason".into());
-        lines.extend(reason.lines().map(|l| format!("  {l}")));
-    }
-    if let Some(answer) = &ask.answer {
-        lines.push("answer".into());
-        lines.extend(answer.lines().map(|l| format!("  {l}")));
-    }
-    if let Some(by) = &ask.answered_by {
-        lines.push(format!("by          {by}"));
-    }
-    lines
-}
-
 /// `area` の中央に、幅と高さが最大で `width` と `height` の領域をとる。
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width.saturating_sub(2)).max(1);
@@ -1897,139 +1669,6 @@ pub(crate) mod tests {
         assert!(screen(&app).contains("signed in"));
         app.handle_key(key(KeyCode::Char('q')));
         assert!(app.quit);
-    }
-
-    fn ask_info(id: i64, body: AskBody, can_allow: bool) -> AskInfo {
-        AskInfo {
-            workspace: "alice/default".into(),
-            ask: chloe_controller::asks::Ask {
-                id,
-                workspace_id: 1,
-                body,
-                reason: Some("to read the docs".into()),
-                status: AskStatus::Pending,
-                answer: None,
-                answered_by: None,
-                created_at: 1_792_152_000,
-                expires_at: 1_792_238_400,
-                answered_at: None,
-            },
-            can_allow,
-        }
-    }
-
-    fn network_ask(id: i64, can_allow: bool) -> AskInfo {
-        ask_info(
-            id,
-            AskBody::Network {
-                host: "docs.example.com".into(),
-                methods: vec![],
-                paths: vec![],
-            },
-            can_allow,
-        )
-    }
-
-    fn question_ask(id: i64) -> AskInfo {
-        ask_info(
-            id,
-            AskBody::Question {
-                question: "Which branch?".into(),
-                options: vec!["main".into(), "dev".into()],
-            },
-            false,
-        )
-    }
-
-    #[test]
-    fn answers_asks_in_the_inbox() {
-        let mut app = app();
-        app.apply(Outcome::Asks {
-            all: false,
-            asks: vec![network_ask(1, true)],
-        });
-        // 始めに読んだ依頼は、新しく来たとは知らせない。
-        assert!(!screen(&app).contains("new ask"));
-        assert!(screen(&app).contains("8 Inbox (1)"));
-
-        // 依頼が出たら読み直し、新しく来たものを知らせる。
-        let actions = app.ask_changed();
-        assert!(matches!(&actions[..], [Action::LoadAsks { all: false }]));
-        app.apply(Outcome::Asks {
-            all: false,
-            asks: vec![question_ask(2), network_ask(1, true)],
-        });
-        assert!(screen(&app).contains("new ask 2 from alice/default: Which branch?"));
-        assert!(screen(&app).contains("8 Inbox (2)"));
-
-        app.handle_key(key(KeyCode::Char('8')));
-        let shown = screen(&app);
-        assert!(
-            shown.contains("question pending   Which branch?"),
-            "{shown}"
-        );
-        assert!(shown.contains("docs.example.com"));
-
-        // 質問は選択肢で答える。
-        app.handle_key(key(KeyCode::Char('a')));
-        assert!(screen(&app).contains("Answer ask 2"));
-        app.handle_key(key(KeyCode::Down));
-        app.handle_key(key(KeyCode::Right));
-        let actions = app.handle_key(ctrl('s'));
-        assert!(
-            matches!(&actions[..], [Action::AnswerAsk { id: 2, reply: Reply::Answer(a) }] if a == "dev"),
-            "{}",
-            screen(&app)
-        );
-        app.apply(Outcome::Done {
-            message: "ask 2 is answered".into(),
-            reload: vec![],
-        });
-
-        // 通信の許可は確かめてから承認する。詳細も見られる。
-        app.handle_key(key(KeyCode::Down));
-        app.handle_key(key(KeyCode::Enter));
-        assert!(screen(&app).contains("reason"));
-        app.handle_key(key(KeyCode::Esc));
-        app.handle_key(key(KeyCode::Char('a')));
-        assert!(screen(&app).contains("Allow docs.example.com for alice/default?"));
-        let actions = app.handle_key(key(KeyCode::Char('y')));
-        assert!(matches!(
-            &actions[..],
-            [Action::AnswerAsk {
-                id: 1,
-                reply: Reply::Allow
-            }]
-        ));
-
-        // 規則を変えられない人は承認できず、断ることはできる。
-        app.apply(Outcome::Asks {
-            all: false,
-            asks: vec![network_ask(3, false)],
-        });
-        app.handle_key(key(KeyCode::Char('a')));
-        assert!(screen(&app).contains("you cannot change the rules"));
-        app.handle_key(key(KeyCode::Char('d')));
-        type_text_into_message(&mut app, "not now");
-        let actions = app.handle_key(ctrl('s'));
-        assert!(
-            matches!(&actions[..], [Action::AnswerAsk { id: 3, reply: Reply::Deny(Some(m)) }] if m == "not now")
-        );
-
-        // 答えたものも出すと、一覧を読み直す。
-        app.apply(Outcome::Done {
-            message: "ask 3 is denied".into(),
-            reload: vec![],
-        });
-        let actions = app.handle_key(key(KeyCode::Char('f')));
-        assert!(matches!(&actions[..], [Action::LoadAsks { all: true }]));
-    }
-
-    /// 断るフォームの言葉の欄に書く。
-    fn type_text_into_message(app: &mut App, text: &str) {
-        if let Some(Modal::Form { form, .. }) = app.modals.last_mut() {
-            type_text(form, text);
-        }
     }
 
     #[test]
