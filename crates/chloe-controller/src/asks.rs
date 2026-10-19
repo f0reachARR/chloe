@@ -229,7 +229,8 @@ impl NewAsk {
     }
 }
 
-/// 規則の `hosts` に書ける形 (先頭の `*.` のほかは英数字、`-`、`.`) か。chloe の中の名前は断る。
+/// 規則の `hosts` に書ける形 (先頭の `*.` のほかは英数字、`-`、`.`) か。chloe の中の名前と
+/// IP アドレスは断る。
 fn check_host(host: &str) -> Result<(), String> {
     let name = host.strip_prefix("*.").unwrap_or(host);
     let valid = !name.is_empty()
@@ -242,6 +243,13 @@ fn check_host(host: &str) -> Result<(), String> {
         });
     if !valid {
         return Err(format!("invalid host {host:?}"));
+    }
+    // IP アドレスの宛先は頼ませない (プライベートなアドレスを許させないため)。
+    if name
+        .split('.')
+        .all(|label| label.chars().all(|c| c.is_ascii_digit()))
+    {
+        return Err(format!("{host} is an IP address; ask for a host name"));
     }
     if name == "chloe.internal" || name.ends_with(".chloe.internal") {
         return Err(format!("{host} is internal to chloe"));
@@ -638,6 +646,8 @@ mod tests {
             "example.com:443",
             "ask.chloe.internal",
             "chloe.internal",
+            "10.0.0.5",
+            "172.29.0.1",
         ] {
             assert!(network(bad).sanitize().is_err(), "{bad:?}");
         }
