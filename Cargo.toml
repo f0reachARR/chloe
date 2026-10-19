@@ -36,9 +36,11 @@ rand = "0.10.3"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "crypto", "pem", "x509-parser"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
 russh = "0.64.1"
 rustls = "0.23"
 rustix = { version = "1.1.5", features = ["process", "termios"] }
+schemars = "1.2.3"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
