@@ -8,7 +8,8 @@
 #
 # CHLOE_NET_MODE で出口の作り方を選ぶ。
 #   nat   : VM からの通信をそのまま NAT する (段階 1)。
-#   proxy : 80 番と 443 番を chloe-egress へ転送し、それ以外を遮断する。
+#   proxy : 80 番と 443 番を chloe-egress へ転送し、それ以外を断る (タイムアウトまで待たせない
+#           よう、捨てずに TCP は RST、ほかは ICMP で返す)。
 # どちらのモードでも、VM の DNS はランナーの dnsmasq (172.29.0.1) が答える。
 set -eu
 
@@ -52,13 +53,18 @@ table inet chloe {
         iifname "tap0" meta l4proto { tcp, udp } th dport 53 dnat ip to 172.29.0.1:53
         iifname "tap0" tcp dport 80 redirect to :$http_port
         iifname "tap0" tcp dport 443 redirect to :$https_port
+        # ほかの宛先も手元に向け、input で断る (転送しないので、forward では断れない)。
+        iifname "tap0" meta l4proto { tcp, udp } redirect
     }
     chain input {
         type filter hook input priority 0; policy accept;
         iifname "tap0" ct state established,related accept
         iifname "tap0" meta l4proto { tcp, udp } th dport 53 accept
-        iifname "tap0" tcp dport { $http_port, $https_port } accept
-        iifname "tap0" counter drop
+        # プロキシが受けるのは、VM が 80 番と 443 番に送った接続だけ (プロキシの待ち受けの
+        # ポートへ直に送ったものは受けない)。
+        iifname "tap0" tcp dport { $http_port, $https_port } ct original proto-dst { 80, 443 } accept
+        iifname "tap0" meta l4proto tcp counter reject with tcp reset
+        iifname "tap0" counter reject
     }
     chain forward {
         type filter hook forward priority 0; policy drop;
