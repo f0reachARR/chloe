@@ -9,6 +9,7 @@ mod inbox;
 mod picker;
 mod policy_form;
 mod requests;
+mod rules;
 mod secret_form;
 mod term;
 

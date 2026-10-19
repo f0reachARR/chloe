@@ -5,10 +5,10 @@
 
 use chloe_audit::Record;
 use chloe_controller::catalog::SecretInput;
-use chloe_controller::runner::{PolicyLayer, RuleOrigin};
+use chloe_controller::runner::PolicyLayer;
 use chloe_controller::store::{ApiToken, SshKey};
 use chloe_controller::workspace::{DiskSizes, IdleStop, MachineSize, RootMode};
-use chloe_policy::{Action as RuleAction, PathRuleConfig};
+use chloe_policy::PathRuleConfig;
 use chloe_secrets::Owner;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -325,8 +325,8 @@ pub struct App {
     secret_owner: usize,
     secrets: Vec<String>,
     /// Rules タブのスコープの一覧と、選んでいるスコープで効く規則。
-    scopes: Vec<ScopeEntry>,
-    rules: Option<RulesView>,
+    pub(super) scopes: Vec<ScopeEntry>,
+    pub(super) rules: Option<RulesView>,
     tokens: Vec<ApiToken>,
     keys: Vec<SshKey>,
     github: String,
@@ -383,7 +383,7 @@ impl App {
         actions
     }
 
-    fn current(&self) -> Tab {
+    pub(super) fn current(&self) -> Tab {
         TABS[self.tab]
     }
 
@@ -406,27 +406,6 @@ impl App {
             Tab::GitHub => 0,
             Tab::Inbox => self.asks.len(),
         }
-    }
-
-    /// Rules タブで選んでいるスコープ。
-    fn selected_scope(&self) -> Option<&ScopeEntry> {
-        self.scopes.get(self.selected[tab_index(Tab::Rules)])
-    }
-
-    /// 選んでいるスコープで効く規則を、まだ読んでいなければ読む。
-    fn show_selected_rules(&self) -> Vec<Action> {
-        match self.selected_scope() {
-            Some(entry) if self.rules.as_ref().map(|r| &r.scope) != Some(&entry.scope) => {
-                vec![Action::ShowRules(entry.scope.clone())]
-            }
-            _ => vec![],
-        }
-    }
-
-    /// 読んである、選んでいるスコープの規則。
-    fn selected_rules(&self) -> Option<&RulesView> {
-        let entry = self.selected_scope()?;
-        self.rules.as_ref().filter(|r| r.scope == entry.scope)
     }
 
     fn secret_owner(&self) -> Option<&Owner> {
@@ -680,34 +659,7 @@ impl App {
                     });
                 }
             }
-            (Tab::Rules, KeyCode::Enter | KeyCode::Char('e')) => {
-                let Some(view) = self.selected_rules() else {
-                    return self.show_selected_rules();
-                };
-                if !view.editable {
-                    self.status = Some((
-                        format!("you cannot change the rules of {}", view.scope.label()),
-                        true,
-                    ));
-                    return vec![];
-                }
-                self.modals.push(Modal::Form {
-                    form: policy_form::rules_form(&view.scope.label(), &view.own),
-                    purpose: Purpose::Rules(view.scope.clone()),
-                    saving: false,
-                });
-            }
-            (Tab::Rules, KeyCode::Char('d')) => {
-                if let Some(view) = self.selected_rules()
-                    && view.editable
-                    && !view.own.is_empty()
-                {
-                    self.modals.push(Modal::Confirm {
-                        message: format!("Delete the rules of {}?", view.scope.label()),
-                        action: Action::ClearRules(view.scope.clone()),
-                    });
-                }
-            }
+            (Tab::Rules, _) => return self.handle_rules_key(key),
             (Tab::Settings, KeyCode::Enter | KeyCode::Char('e')) => {
                 if let Some(owner) = self.owners.get(selected) {
                     return vec![Action::ShowPolicy(owner.clone())];
@@ -986,22 +938,8 @@ impl App {
                 purpose: Purpose::Policy(owner),
                 saving: false,
             }),
-            Outcome::RuleScopes(scopes) => {
-                let current = self.selected_scope().map(|e| e.scope.clone());
-                let index = current
-                    .and_then(|c| scopes.iter().position(|e| e.scope == c))
-                    .unwrap_or(0);
-                self.scopes = scopes;
-                self.selected[tab_index(Tab::Rules)] = index;
-                // 一覧を読み直したら、規則も読み直す (変えられるかが変わることがある)。
-                self.rules = None;
-                actions = self.show_selected_rules();
-            }
-            Outcome::Rules(view) => {
-                if self.selected_scope().map(|e| &e.scope) == Some(&view.scope) {
-                    self.rules = Some(view);
-                }
-            }
+            Outcome::RuleScopes(scopes) => actions = self.apply_rule_scopes(scopes),
+            Outcome::Rules(view) => self.apply_rules(view),
             Outcome::Tokens(tokens) => self.tokens = tokens,
             Outcome::TokenCreated { id, name, token } => {
                 self.close_saving_form();
@@ -1211,115 +1149,16 @@ impl App {
     }
 }
 
-impl App {
-    /// Rules タブ。左にスコープの一覧、右に選んでいるスコープで効く規則を評価する順に出す。
-    fn render_rules(&self, frame: &mut Frame, area: Rect) {
-        let [list_area, rules_area] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .areas(area);
-        let items: Vec<ListItem> = self
-            .scopes
-            .iter()
-            .map(|entry| {
-                let (depth, kind) = scope_shape(&entry.scope);
-                let access = if entry.editable { "edit" } else { "view" };
-                let name = format!("{}{}", "  ".repeat(depth), entry.scope.label());
-                ListItem::new(format!("{name:<26} {kind:<8} {access}"))
-            })
-            .collect();
-        render_list(frame, list_area, items, self.selection());
-        let block = Block::bordered().title(match self.selected_scope() {
-            Some(entry) => format!(" Rules applied to {} ", entry.scope.label()),
-            None => " Rules ".to_string(),
-        });
-        let inner = block.inner(rules_area);
-        frame.render_widget(block, rules_area);
-        let Some(view) = self.selected_rules() else {
-            frame.render_widget(Paragraph::new("…".dark_gray()), inner);
-            return;
-        };
-        let mut lines: Vec<Line> = view
-            .rules
-            .iter()
-            .map(|(origin, rule)| {
-                let own = is_own(&view.scope, origin);
-                let text = format!(
-                    "{} {:<14} {}",
-                    if own { "▶" } else { " " },
-                    origin_label(origin),
-                    describe_rule(rule)
-                );
-                if own {
-                    Line::from(text.bold())
-                } else {
-                    Line::from(text)
-                }
-            })
-            .collect();
-        lines.push(Line::from("  anything else is blocked".dark_gray()));
-        if !view.editable {
-            lines.push(Line::default());
-            lines.push(Line::from("  (view only)".dark_gray()));
-        }
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-    }
-}
-
-fn tab_index(tab: Tab) -> usize {
+pub(super) fn tab_index(tab: Tab) -> usize {
     TABS.iter().position(|t| *t == tab).unwrap_or(0)
 }
 
-fn owner_kind(owner: &Owner) -> &'static str {
+pub(super) fn owner_kind(owner: &Owner) -> &'static str {
     match owner {
         Owner::User(_) => "personal",
         Owner::Org(_) => "org",
         Owner::Team { .. } => "team",
     }
-}
-
-/// スコープの一覧での字下げと種類。ワークスペースは持ち主の下に、team は Organization の下に置く。
-fn scope_shape(scope: &RuleScope) -> (usize, &'static str) {
-    let depth = |owner: &Owner| usize::from(matches!(owner, Owner::Team { .. }));
-    match scope {
-        RuleScope::Gateway => (0, "config"),
-        RuleScope::Owner(owner) => (depth(owner), owner_kind(owner)),
-        RuleScope::Workspace(ws) => (depth(&ws.owner) + 1, "ws"),
-    }
-}
-
-/// 規則がスコープ自身のものか。
-fn is_own(scope: &RuleScope, origin: &RuleOrigin) -> bool {
-    match (scope, origin) {
-        (RuleScope::Gateway, RuleOrigin::Gateway) => true,
-        (RuleScope::Owner(owner), RuleOrigin::Owner(from)) => owner == from,
-        (RuleScope::Workspace(_), RuleOrigin::Workspace) => true,
-        _ => false,
-    }
-}
-
-fn origin_label(origin: &RuleOrigin) -> String {
-    match origin {
-        RuleOrigin::Gateway => "gateway".into(),
-        RuleOrigin::Owner(owner) => owner_arg(owner),
-        RuleOrigin::Workspace => "workspace".into(),
-        RuleOrigin::Secret => "(secrets)".into(),
-    }
-}
-
-fn describe_rule(rule: &PathRuleConfig) -> String {
-    let action = match rule.action {
-        RuleAction::Allow => "allow",
-        RuleAction::Deny => "deny",
-        RuleAction::Passthrough => "pass",
-    };
-    let mut text = format!("{action:<5} {}", rule.hosts.join(", "));
-    if !rule.methods.is_empty() {
-        text.push_str(&format!(" {}", rule.methods.join(",")));
-    }
-    if !rule.paths.is_empty() {
-        text.push_str(&format!(" {}", rule.paths.join(", ")));
-    }
-    text
 }
 
 /// ディスクの大きさの欄。空なら `None`。
@@ -1844,100 +1683,7 @@ pub(crate) mod tests {
         .collect()
     }
 
-    fn rule(host: &str, action: RuleAction) -> PathRuleConfig {
-        PathRuleConfig {
-            name: None,
-            hosts: vec![host.into()],
-            methods: vec![],
-            paths: vec![],
-            action,
-        }
-    }
-
-    #[test]
-    fn edits_rules_of_the_selected_scope() {
-        let mut app = app();
-        app.handle_key(key(KeyCode::Char('3')));
-        // 選んだスコープで効く規則を読む。
-        for _ in 0..4 {
-            app.handle_key(key(KeyCode::Down));
-        }
-        let actions = app.handle_key(key(KeyCode::Up));
-        let [Action::ShowRules(scope @ RuleScope::Owner(Owner::Org(_)))] = &actions[..] else {
-            panic!("expected the rules of acme");
-        };
-        let acme = Owner::Org("acme".into());
-        app.apply(Outcome::Rules(RulesView {
-            scope: scope.clone(),
-            editable: false,
-            rules: vec![
-                (RuleOrigin::Gateway, rule("github.com", RuleAction::Allow)),
-                (
-                    RuleOrigin::Owner(acme.clone()),
-                    rule("example.org", RuleAction::Allow),
-                ),
-            ],
-            own: vec![rule("example.org", RuleAction::Allow)],
-        }));
-        let text = screen(&app);
-        assert!(text.contains("Rules applied to acme"));
-        assert!(text.contains("▶ acme"));
-        assert!(text.contains("anything else is blocked"));
-        // 変えられないスコープでは、フォームを開かない。
-        assert!(app.handle_key(key(KeyCode::Enter)).is_empty());
-        assert!(app.modals.is_empty());
-        assert!(screen(&app).contains("you cannot change the rules of acme"));
-
-        // ワークスペースのスコープで、規則を足して保存する。
-        let actions = app.handle_key(key(KeyCode::Down));
-        let [Action::ShowRules(scope)] = &actions[..] else {
-            panic!("expected the rules of acme/web");
-        };
-        app.apply(Outcome::Rules(RulesView {
-            scope: scope.clone(),
-            editable: true,
-            rules: vec![],
-            own: vec![],
-        }));
-        app.handle_key(key(KeyCode::Enter));
-        let form = form_mut(&mut app);
-        while form.fields[form.focus].key != "rules" {
-            form.handle_key(key(KeyCode::Down));
-        }
-        app.handle_key(key(KeyCode::Enter));
-        app.handle_key(key(KeyCode::Char('a')));
-        form_mut(&mut app).handle_key(key(KeyCode::Tab));
-        type_text(form_mut(&mut app), "pypi.org");
-        app.handle_key(ctrl('s'));
-        app.handle_key(key(KeyCode::Esc));
-        let actions = app.handle_key(ctrl('s'));
-        let [Action::SaveRules { scope, rules }] = &actions[..] else {
-            panic!("expected a save");
-        };
-        assert!(matches!(scope, RuleScope::Workspace(ws) if ws.display_name() == "acme/web"));
-        assert_eq!(rules, &[rule("pypi.org", RuleAction::Allow)]);
-    }
-
-    #[test]
-    fn opens_the_rules_of_a_workspace() {
-        let mut app = app();
-        let actions = app.handle_key(key(KeyCode::Char('u')));
-        assert!(matches!(
-            &actions[..],
-            [Action::ShowRules(RuleScope::Workspace(ws))] if ws.name == "default"
-        ));
-        assert_eq!(app.current(), Tab::Rules);
-        // 古い結果 (ほかのスコープのもの) は使わない。
-        app.apply(Outcome::Rules(RulesView {
-            scope: RuleScope::Gateway,
-            editable: false,
-            rules: vec![(RuleOrigin::Gateway, rule("github.com", RuleAction::Allow))],
-            own: vec![],
-        }));
-        assert!(!screen(&app).contains("github.com"));
-    }
-
-    fn form_mut(app: &mut App) -> &mut Form {
+    pub fn form_mut(app: &mut App) -> &mut Form {
         match app.modals.last_mut() {
             Some(Modal::Form { form, .. }) => form,
             _ => panic!("no form"),
