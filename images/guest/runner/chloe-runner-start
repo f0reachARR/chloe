@@ -94,14 +94,16 @@ if [ "$CHLOE_NET_MODE" = proxy ]; then
     dns_servers="--address=/#/ --servers-file=$run/dnsmasq-servers.conf"
 fi
 # root でないので、dnsmasq は利用者を切り替えない (--user に自分を渡す)。
+# chloe の中の名前は --host-record で答える。--address では A のほかの問い合わせ (AAAA) に
+# NXDOMAIN を返し、musl の名前の解決は A があっても失敗するためである。
 # shellcheck disable=SC2086
 dnsmasq \
     --keep-in-foreground --no-resolv --no-hosts \
     --user="$(id -un)" --pid-file= \
     --listen-address=172.29.0.1 --bind-interfaces \
     $dns_servers \
-    --address="/ca.chloe.internal/172.29.0.1" \
-    --address="/ask.chloe.internal/172.29.0.1" \
+    --host-record="ca.chloe.internal,172.29.0.1" \
+    --host-record="ask.chloe.internal,172.29.0.1" \
     --log-facility="$logs/dnsmasq.log" --log-queries &
 echo $! > "$run/dnsmasq.pid"
 
