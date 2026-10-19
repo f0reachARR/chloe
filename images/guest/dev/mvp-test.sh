@@ -287,6 +287,36 @@ check no-passthrough-in-policy "passthrough rules can only be set" sh -c 'printf
 check not-admin-org-secret "cannot change the secrets of acme" sh -c 'echo x | "$@"' _ \
     ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 chloe secret set --owner acme openai_api_key
 
+section "asks from agents"
+# 遮断の応答に、許可の頼み方が書いてある。
+# 許可リストにない名前は引けないので、プロキシに直接送って確かめる。
+check ask-hint "chloe-ask network example.com" as alice+acme/proj 'curl -s --resolve example.com:443:172.29.0.1 https://example.com/'
+ask_id="$(as alice+acme/proj 'chloe-ask network example.com --reason "read the docs" --no-wait')"
+check ask-inbox "$ask_id	acme/proj	network	pending" as alice chloe inbox
+check ask-not-member "no such ask: $ask_id" as bob chloe inbox show "$ask_id"
+check ask-same-host "$ask_id" as alice+acme/proj 'chloe-ask network example.com --no-wait'
+as alice+acme/proj "chloe-ask wait $ask_id" > "$work/ask-wait.out" 2>&1 &
+ask_wait=$!
+check ask-allow "ask $ask_id is allowed" as alice chloe inbox allow "$ask_id"
+wait "$ask_wait" || true
+check ask-waited "allowed by alice" cat "$work/ask-wait.out"
+check ask-reachable "200" as alice+acme/proj "curl -s -o /dev/null -w '%{http_code}' https://example.com/"
+check ask-rule "ask-$ask_id" as alice chloe ws policy show acme/proj
+check ask-answered-once "already allowed" as alice chloe inbox allow "$ask_id"
+question_id="$(as alice+acme/proj 'chloe-ask question "Which branch?" --option main --option dev --no-wait')"
+check ask-answer "ask $question_id is answered" as alice chloe inbox answer "$question_id" 2
+check ask-answer-printed "dev" as alice+acme/proj "chloe-ask wait $question_id"
+deny_id="$(as alice+acme/proj 'chloe-ask question "Delete the cache?" --no-wait')"
+check ask-deny "ask $deny_id is denied" as alice chloe inbox deny "$deny_id" not now
+check ask-denied-exit "1 chloe-ask: denied by alice (ask $deny_id): not now" as alice+acme/proj \
+    "out=\$(chloe-ask wait $deny_id 2>&1); echo \"\$? \$out\""
+check ask-audited "an agent asked" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep -o "an agent asked" | tail -1' "$logs/gateway.log"
+# ログインで、Claude Code と Codex の利用者の設定に MCP のサーバーを足す。
+check ask-registered '"command": "/usr/local/bin/chloe-ask"' as alice+acme/proj 'cat ~/.claude.json'
+check ask-registered-codex "[mcp_servers.chloe]" as alice+acme/proj 'cat ~/.codex/config.toml'
+check ask-mcp-tools "\"name\":\"request_network_access\"" as alice+acme/proj \
+    "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' | timeout 5 chloe-ask mcp"
+
 section "authentication"
 check wrong-key "Permission denied" ssh "${ssh_opts[@]}" -i "$work/stranger" alice@127.0.0.1 true
 check not-allowed-user "Permission denied" as carol true
@@ -354,6 +384,10 @@ check api-show-other "404" api "$bob_token" GET /v1/workspaces/acme/from-api
 check api-requests '"event":"request"' api "$alice_token" GET '/v1/workspace-requests/default?lines=5'
 check api-requests-lines "between 1 and 2000" api "$alice_token" GET '/v1/workspace-requests/default?lines=0'
 check api-requests-other "404" api "$bob_token" GET /v1/workspace-requests/acme/proj
+check api-asks '"workspace":"acme/proj","id":' api "$alice_token" GET '/v1/asks?all=true'
+check api-asks-other "[] 200" api "$bob_token" GET '/v1/asks?all=true'
+check api-ask-answer-invalid "write one of allow" api "$alice_token" POST "/v1/asks/$ask_id/answer" -d '{"allow":true,"answer":"x"}'
+check api-ask-answered "409" api "$alice_token" POST "/v1/asks/$ask_id/answer" -d '{"deny":true}'
 check api-secret-set "204" api "$alice_token" PUT /v1/secrets/openai_api_key \
     -d '{"value":"real-api-secret","env":["OPENAI_API_KEY"],"placeholder":"sk-proj-{id}","inject":[{"hosts":["api.openai.com"],"header":"authorization"}]}'
 check api-secret-show '"placeholder":"sk-proj-{id}"' api "$alice_token" GET /v1/secrets/openai_api_key
