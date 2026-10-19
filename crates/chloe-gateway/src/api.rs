@@ -25,6 +25,9 @@
 //! GET    /v1/tokens
 //! POST   /v1/tokens                     {"name": "ci", "expires": "30d"}
 //! DELETE /v1/tokens/{id}
+//! GET    /v1/asks[?all=true]            VM の中のエージェントからの依頼 (all=true なら答えたものも)
+//! GET    /v1/asks/{id}
+//! POST   /v1/asks/{id}/answer           {"allow": true}、{"deny": true, "message": "..."} か {"answer": "..."}
 //! ```
 
 use std::sync::Arc;
@@ -33,7 +36,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
@@ -90,6 +93,9 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .route("/v1/tokens", get(list_tokens).post(create_token))
         .route("/v1/tokens/{id}", delete(revoke_token))
+        .route("/v1/asks", get(list_asks))
+        .route("/v1/asks/{id}", get(show_ask))
+        .route("/v1/asks/{id}/answer", post(answer_ask))
         .layer(middleware::from_fn_with_state(shared.clone(), authenticate))
         .with_state(shared)
 }
@@ -412,6 +418,61 @@ async fn workspace_requests(
 ) -> Result<Response, ops::Error> {
     let records = ops::tail_requests(&shared, &caller.login, &name, query.lines).await?;
     Ok(Json(records).into_response())
+}
+
+#[derive(Deserialize)]
+struct AsksQuery {
+    #[serde(default)]
+    all: bool,
+}
+
+async fn list_asks(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Query(query): Query<AsksQuery>,
+) -> Result<Response, ops::Error> {
+    let asks = ops::list_asks(&shared, &caller.login, query.all).await?;
+    Ok(Json(asks).into_response())
+}
+
+async fn show_ask(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<i64>,
+) -> Result<Response, ops::Error> {
+    Ok(Json(ops::show_ask(&shared, &caller.login, id).await?).into_response())
+}
+
+/// 依頼への答え。`allow`、`deny`、`answer` のどれか一つを書く。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerBody {
+    #[serde(default)]
+    allow: bool,
+    #[serde(default)]
+    deny: bool,
+    /// 断るときにエージェントへ渡す言葉。
+    message: Option<String>,
+    answer: Option<String>,
+}
+
+async fn answer_ask(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<i64>,
+    Json(body): Json<AnswerBody>,
+) -> Result<Response, ops::Error> {
+    let reply = match (body.allow, body.deny, body.answer) {
+        (true, false, None) if body.message.is_none() => ops::Reply::Allow,
+        (false, true, None) => ops::Reply::Deny(body.message),
+        (false, false, Some(answer)) if body.message.is_none() => ops::Reply::Answer(answer),
+        _ => {
+            return Err(ops::Error::Invalid(
+                "write one of allow, deny (with an optional message) or answer".into(),
+            ));
+        }
+    };
+    Ok(Json(ops::answer_ask(&shared, &caller.login, id, reply).await?).into_response())
 }
 
 async fn show_workspace_policy(
