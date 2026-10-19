@@ -12,6 +12,7 @@ mod requests;
 mod rules;
 mod secret_form;
 mod term;
+mod workspace_form;
 
 use std::io;
 use std::sync::Arc;
