@@ -63,6 +63,9 @@ pub async fn run(
     let start = app.start();
     spawn_all(&shared, &login, &results, start);
     let mut parser = InputParser::default();
+    // 依頼が出たり答えられたりしたら、Inbox を読み直す (ほかのタブは自動で読み直さない)。
+    let mut asks = shared.controller.asks().subscribe();
+    let mut asks_open = true;
     loop {
         if let Err(error) = terminal.draw(|frame| app.render(frame)) {
             warn!("failed to draw the TUI: {error}");
@@ -93,6 +96,13 @@ pub async fn run(
                 }
                 Some(ClientMessage::CloseStdin) | None => break,
                 Some(_) => {}
+            },
+            event = asks.recv(), if asks_open => match event {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let actions = app.ask_changed();
+                    spawn_all(&shared, &login, &results, actions);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => asks_open = false,
             },
             Some(outcome) = outcomes.recv() => {
                 let actions = app.apply(outcome);
@@ -236,6 +246,19 @@ async fn perform(
                 done(
                     format!("stopped {}", ws.display_name()),
                     vec![Action::LoadWorkspaces],
+                )
+            }
+            Action::LoadAsks { all } => Outcome::Asks {
+                all,
+                asks: ops::list_asks(shared, login, all).await.map_err(shown)?,
+            },
+            Action::AnswerAsk { id, reply } => {
+                let info = ops::answer_ask(shared, login, id, reply)
+                    .await
+                    .map_err(shown)?;
+                done(
+                    format!("ask {} is {}", info.ask.id, info.ask.status),
+                    vec![Action::LoadAsks { all: false }],
                 )
             }
             Action::LoadRequests(name) => {
