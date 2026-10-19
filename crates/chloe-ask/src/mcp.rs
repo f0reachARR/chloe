@@ -30,7 +30,7 @@ use crate::describe;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
 
 const INSTRUCTIONS: &str = "This VM is a chloe workspace. Outbound HTTP(S) is limited to an allowlist, and a person may not be watching the terminal. \
-When a request is blocked by chloe (403 with \"blocked by chloe\") and you need that host, call request_network_access. \
+A host outside the allowlist does not resolve (\"Could not resolve host\"), and a request to it is refused with 403 \"blocked by chloe\". When you need such a host, call request_network_access. \
 When you need a decision or information from a person, call ask_user instead of stopping. \
 Both wait for the answer; if they return pending, call wait_for_answer with the id to keep waiting.";
 

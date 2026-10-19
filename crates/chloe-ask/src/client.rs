@@ -50,9 +50,20 @@ pub struct Client {
 }
 
 impl Client {
+    /// VM の既定の経路のゲートウェイの 80 番につなぐ。ランナーは VM からの 80 番への接続を
+    /// 宛先によらずプロキシに渡し、プロキシは `Host` で `ask.chloe.internal` を見分けるので、
+    /// 名前を引かなくてよい。musl の名前の解決は、AAAA に NXDOMAIN が返ると A があっても
+    /// 失敗するので、引かずに済ませる。経路が読めなければ名前でつなぐ。
     pub fn from_env() -> Self {
+        let addr = std::env::var("CHLOE_ASK_ADDR").unwrap_or_else(|_| {
+            let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+            match default_gateway(&route) {
+                Some(ip) => format!("{ip}:80"),
+                None => format!("{ASK_HOST}:80"),
+            }
+        });
         Self {
-            addr: std::env::var("CHLOE_ASK_ADDR").unwrap_or_else(|_| format!("{ASK_HOST}:80")),
+            addr,
             poll: POLL_FIRST,
         }
     }
@@ -145,6 +156,18 @@ impl Client {
     }
 }
 
+/// `/proc/net/route` の既定の経路 (宛先 0.0.0.0) のゲートウェイ。値はリトルエンディアンの 16 進。
+fn default_gateway(route: &str) -> Option<std::net::Ipv4Addr> {
+    route.lines().skip(1).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.get(1) != Some(&"00000000") {
+            return None;
+        }
+        let gateway = u32::from_str_radix(fields.get(2)?, 16).ok()?;
+        (gateway != 0).then(|| std::net::Ipv4Addr::from(gateway.swap_bytes()))
+    })
+}
+
 /// HTTP/1.1 の応答からステータスと本文を取り出す。本文は `Content-Length` か、なければ
 /// 接続が閉じるまで。チャンクで送られた本文は扱う。
 fn parse_response(response: &[u8]) -> Result<(u16, Vec<u8>)> {
@@ -218,6 +241,18 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncBufReadExt;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn finds_the_default_gateway() {
+        let route = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n\
+            eth0\t0000001D\t00000000\t0001\t0\t0\t0\t00FFFFFF\n\
+            eth0\t00000000\t01001DAC\t0003\t0\t0\t0\t00000000\n";
+        assert_eq!(
+            default_gateway(route),
+            Some(std::net::Ipv4Addr::new(172, 29, 0, 1))
+        );
+        assert_eq!(default_gateway("Iface\tDestination\n"), None);
+    }
 
     #[test]
     fn parses_responses() {
