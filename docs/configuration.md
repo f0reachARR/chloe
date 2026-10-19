@@ -116,8 +116,10 @@ action = "passthrough"
 
 宛先は名前で書く。
 `*.example.com` は example.com のサブドメインに一致し、example.com そのものには一致しない。
-VM の DNS は、`allow` と `passthrough` の規則にある名前だけを引ける（`*.example.com` は、DNS では example.com そのものも引ける）。
-`deny` の規則だけに書いた名前は引けない。
+VM の DNS は、`allow` と `passthrough` の規則にある名前だけを上流に問い合わせる（`*.example.com` は、DNS では example.com そのものも問い合わせる）。
+ほかの名前には、上流に問い合わせずにプロキシのアドレスを答える。そこへの HTTP(S) は、プロキシが 403 で断る。
+DNS の問い合わせに情報を載せて外へ持ち出せないようにするためである。
+一語だけの名前と、`.local`、`.internal`、`.lan`、`.home.arpa` の名前は引けない。
 
 `passthrough` は、証明書を固定するクライアント向けである。
 復号しないので、規則も差し替えも効かない。
