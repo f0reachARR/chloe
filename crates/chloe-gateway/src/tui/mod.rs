@@ -7,6 +7,7 @@ mod app;
 mod form;
 mod picker;
 mod policy_form;
+mod requests;
 mod secret_form;
 mod term;
 
