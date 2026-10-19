@@ -84,14 +84,18 @@ if [ "$CHLOE_NET_MODE" = proxy ]; then
     fi
 fi
 
-# proxy モードでは、許可リストにある名前だけを上流に問い合わせ、それ以外は NXDOMAIN を返す。
-# DNS の問い合わせ名に情報を載せて持ち出す経路を塞ぐためである。
-# 上流の一覧は --servers-file に書き、方針が変わったら chloe-dns-update で書き直して読み直させる。
+# proxy モードでは、許可リストにある名前だけを上流に問い合わせる。DNS の問い合わせ名に情報を
+# 載せて持ち出す経路を塞ぐためである。上流の一覧は --servers-file に書き、方針が変わったら
+# chloe-dns-update で書き直して読み直させる。
+# ほかの名前には、上流に問い合わせずにプロキシのアドレスを答える。VM からの 80 番と 443 番は
+# 宛先によらずプロキシに届くので、規則にない宛先への要求は 403 になり、許可の頼み方 (chloe-ask)
+# が届く。一語だけの名前と、外にない名前の決まりの名前 (.local など) は NXDOMAIN のままにする。
 echo "$upstream_dns" > "$run/upstream-dns"
 dns_servers="--server=$upstream_dns"
 if [ "$CHLOE_NET_MODE" = proxy ]; then
     "$here/chloe-dns-update" "$state" "$CHLOE_POLICY" --no-reload
-    dns_servers="--address=/#/ --servers-file=$run/dnsmasq-servers.conf"
+    dns_servers="--address=/#/172.29.0.1 --address=// --address=/local/ --address=/internal/"
+    dns_servers="$dns_servers --address=/lan/ --address=/home.arpa/ --servers-file=$run/dnsmasq-servers.conf"
 fi
 # root でないので、dnsmasq は利用者を切り替えない (--user に自分を渡す)。
 # chloe の中の名前は --host-record で答える。--address では A のほかの問い合わせ (AAAA) に
