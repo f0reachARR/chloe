@@ -375,6 +375,48 @@ ssh chloe@chloe.example.com chloe ws log api --lines 1000 # 末尾の 1000 件 (
 ストリーミングの応答（SSE など）は、応答を流し終えるまで記録に現れない。
 共有ワークスペースの記録は、誰の要求かを区別しない。
 
+## エージェントからの依頼
+
+VM の中のエージェントは、`chloe-ask` で人に依頼を出し、答えを待てる。
+依頼は、許可リストにない宛先への通信の許可と、質問の二種類である。
+端末の前に人がいなくても、エージェントは遮断や判断に迷う場面で止まらずに、答えを待ってから作業を続けられる。
+
+```sh
+chloe-ask network docs.example.com --reason "API の仕様を読む"
+chloe-ask network api.example.com --method GET --path '/v1/*' --reason "..."
+chloe-ask question "どちらのブランチに入れますか" --option main --option dev
+```
+
+`chloe-ask` は答えが来るまで待ち、承認されるか答えが来たら 0、断られたら 1、期限が切れたら 2 で終わる。
+質問の答えは標準出力に出る。
+`--no-wait` を付けると依頼の ID を出してすぐに終わり、あとで `chloe-ask wait ID` で待てる。
+依頼は既定で 24 時間（`--timeout` で短くできる）で期限が切れる。
+答えを待つ依頼があるあいだは、接続がなくても VM を止めない。
+
+Claude Code と Codex には、同じ操作を MCP のツール（`request_network_access`、`ask_user`、`wait_for_answer`）として登録してある。
+ログインしたときに、利用者の設定（`~/.claude.json` と `~/.codex/config.toml`）に `chloe` のサーバーを一度だけ足す。
+設定から外せば、足し直さない。
+ツールの呼び出し一回は 55 分まで待ち、それまでに答えがなければ ID を返し、エージェントは `wait_for_answer` で待ち直す。
+プロキシが遮断したときの 403 の本文にも、`chloe-ask network` で許可を頼めることが書いてある。
+ただし、許可リストにない名前は VM の中で引けないので、たいていのツールは 403 を受け取る前に名前の解決で失敗する。
+
+人は、ワークスペースに入れれば依頼を見られ、管理の画面の Inbox タブ、`chloe inbox`、[管理 API](api.md) で答える。
+
+```sh
+ssh chloe@chloe.example.com chloe inbox                 # 答えを待つ依頼 (--all なら答えたものも)
+ssh chloe@chloe.example.com chloe inbox show 12
+ssh chloe@chloe.example.com chloe inbox allow 12        # 通信を許可する
+ssh chloe@chloe.example.com chloe inbox deny 12 今は不要  # 断る (言葉はエージェントに渡る)
+ssh chloe@chloe.example.com chloe inbox answer 13 2     # 選択肢の番号か、答えの文
+```
+
+通信の許可を承認すると、ワークスペースの規則の最後にその宛先を許す規則（名前は `ask-<ID>`）が足され、動いている VM にすぐ効く。
+取り消すときは、ワークスペースの規則から消す。
+上の層（ゲートウェイ、Organization、team）の規則が遮断している宛先は、承認しても通らない。
+承認できるのはワークスペースの規則を変えられる人だけで、ゲートウェイの設定で個人の規則を許していなければ、個人のワークスペースの通信の許可は承認できない（断ることはできる）。
+質問には、ワークスペースに入れる人なら誰でも答えられる。
+依頼に答えられるのは一度だけで、依頼を出したことと答えたことは監査ログに残る。
+
 ## ポート転送
 
 VM の中で動かしているサーバーに、手元からつなげる。
@@ -407,6 +449,11 @@ ssh -t chloe@chloe.example.com chloe
 新しいものが下に並び、遮断したものは赤で出る。
 `Enter` で一件の欄をすべて出し、`f` で絞り込み（すべて、遮断、差し替え、中継のみ）を切り替え、`r` で読み直す。
 
+Inbox タブには、エージェントからの依頼が出る。
+ほかのタブと違い、依頼が出たり答えられたりすると自動で読み直し、新しい依頼が来たことを画面の下に出す。
+タブの名前には、答えを待つ依頼の数が出る。
+`Enter` で依頼の欄をすべて出し、`a` で通信を許可するか質問に答え、`d` で断り、`f` で答えたものも出すかを切り替える。
+
 Rules タブでは、左の一覧でスコープ（ゲートウェイ、個人、Organization、team、ワークスペース）を選ぶ。
 右には、そのスコープで効く規則を評価する順に、層の名前と一緒に出す（`▶` がそのスコープ自身の規則）。
 `Enter` でそのスコープ自身の規則を編集し、`d` で消す。
@@ -415,7 +462,7 @@ Settings タブでは、規則のほか（ルートの扱いの既定とトー�
 
 | キー | 操作 |
 | --- | --- |
-| `←` `→`、`1`〜`7` | タブを切り替える |
+| `←` `→`、`1`〜`8` | タブを切り替える |
 | `↑` `↓` | 一覧で選ぶ |
 | `n`、`Enter`、`d` | 作る、編集する、消す（タブの下に、そのタブで使えるキーが出る） |
 | `Tab`、`↑` `↓` | フォームの欄を移る |
@@ -467,6 +514,11 @@ chloe token revoke ID
 chloe key list                                  Device Flow で結び付けた SSH の公開鍵
 chloe key rm FINGERPRINT
 chloe github login|status|logout
+chloe inbox [--all]                             エージェントからの依頼
+chloe inbox show ID
+chloe inbox allow ID                            通信を許可する (ワークスペースの規則に足す)
+chloe inbox deny ID [MESSAGE]
+chloe inbox answer ID [TEXT]                    選択肢の番号か答え。TEXT を省くと標準入力から読む
 ```
 
 NAME は SSH のユーザー名の `+` のあとと同じ書き方、OWNER は Organization（`acme`）か team（`acme/dev`）。

@@ -61,6 +61,9 @@ API の呼び出しは、利用者、トークンの ID、メソッド、パス�
 | `GET /v1/tokens` | 自分のトークンの一覧（値は含まない） |
 | `POST /v1/tokens` | トークンを作る |
 | `DELETE /v1/tokens/{id}` | トークンを失効させる |
+| `GET /v1/asks[?all=true]` | 入れるワークスペースの、エージェントからの依頼（`all=true` でなければ答えを待つものだけ） |
+| `GET /v1/asks/{id}` | 依頼 |
+| `POST /v1/asks/{id}/answer` | 依頼に答える |
 
 権限は SSH のコマンドと同じである。
 シークレットの `owner=` を省くと、自分の個人のシークレットを扱う。
@@ -164,6 +167,22 @@ api '/v1/workspace-requests/acme/web?lines=2'
 #   "method":"POST","path":"/v1/messages","query_keys":[],"http_version":"HTTP/2.0","status":200,
 #   "request_bytes":1834,"body_scanned":true,"error":null,"decision":"allowed",
 #   "injected":["anthropic_api_key-0"],"response_bytes":5120,"duration_ms":2310}]
+```
+
+### エージェントからの依頼
+
+本文には `allow`、`deny`、`answer` のどれか一つを書く。
+`allow` は通信の許可に、`answer` は質問に使い、`deny` はどちらにも使える。
+`can_allow` は、トークンの利用者が通信の許可を承認できるかを示す。
+
+```sh
+api /v1/asks
+# [{"workspace":"acme/web","id":12,"kind":"network","host":"docs.example.com","reason":"API の仕様を読む",
+#   "status":"pending","created_at":1792152059,"expires_at":1792238459,"can_allow":true}]
+api /v1/asks/12/answer -X POST -d '{"allow": true}'
+api /v1/asks/13/answer -X POST -d '{"answer": "dev"}'
+api /v1/asks/14/answer -X POST -d '{"deny": true, "message": "今は不要"}'
+# 答えた依頼に答え直すと 409
 ```
 
 ### トークン

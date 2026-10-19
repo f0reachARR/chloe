@@ -27,6 +27,7 @@ jailer による Firecracker の隔離と Kubernetes への配置はまだない
 - **通信の制限**：許可リストにない宛先への通信と名前の解決を遮断する。宛先、メソッド、パスの規則で、API の使い方も絞れる。
 - **管理**：SSH の `chloe` コマンド、`ssh -t <host> chloe` で開く管理の画面（TUI）、HTTP(S) の API で、ワークスペース、シークレット、外への通信の規則（個人、Organization、team、ワークスペースごと）を扱う。
 - **複数のホスト**：ランナーを複数の物理サーバーに置ける（`chloe-node`）。コントロールプレーンとホストのあいだは相互 TLS でつなぐ。
+- **エージェントからの依頼**：VM の中のエージェントは、`chloe-ask`（CLI と MCP のツール）で、遮断された宛先への通信の許可や質問を人に出し、答えを待てる。人は管理の画面、`chloe inbox`、管理 API で答える。無人で動かしていても、エージェントは止まらずに答えを待てる。
 - **監査**：ログイン、セッション、ポート転送、管理の操作、シークレットの問い合わせを JSON Lines で記録する。HTTP の通信は、ワークスペースごとにメタデータだけを記録し、利用者は `chloe ws log` と管理の画面で見られる。
 
 ## 構成
@@ -112,6 +113,7 @@ crates/
   chloe-github       GitHub App (インストールトークン、所属の確認、Device Flow)
   chloe-guest-agent  VM の中の常駐プロセス (vsock 越しの端末と exec)
   chloe-agent-proto  ホストと guest-agent のあいだのプロトコル
+  chloe-ask          VM の中のエージェントが人に依頼を出す CLI と MCP のサーバー
   chloe-runner       VM に直接つなぐ開発用の CLI
 images/guest/
   kernel/            ゲストのカーネルのビルド
