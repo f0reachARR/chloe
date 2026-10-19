@@ -17,12 +17,13 @@ mkdir -p "$out" "$cache"
 source "$here/../build-lib.sh"
 steps 4
 
-step "build chloe-guest-agent (musl)"
+step "build chloe-guest-agent and chloe-ask (musl)"
 cargo build --release --target x86_64-unknown-linux-musl \
-    --manifest-path "$root/Cargo.toml" -p chloe-guest-agent
+    --manifest-path "$root/Cargo.toml" -p chloe-guest-agent -p chloe-ask
 bin="$cache/bin"
 mkdir -p "$bin"
-cp "$root/target/x86_64-unknown-linux-musl/release/chloe-guest-agent" "$bin/"
+cp "$root/target/x86_64-unknown-linux-musl/release/chloe-guest-agent" \
+    "$root/target/x86_64-unknown-linux-musl/release/chloe-ask" "$bin/"
 
 release="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$root" rev-parse --short HEAD)"
 step "build the root filesystem image (Ubuntu, Docker, mise)"
