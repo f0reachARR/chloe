@@ -3,6 +3,7 @@
 //! SSH の `chloe` コマンド ([`crate::commands`]) と HTTP の管理 API ([`crate::api`]) の両方から
 //! 使う。権限の確認はここで行い、結果は型のある値で返す (表示は呼ぶ側が決める)。
 
+use chloe_controller::asks::{Ask, AskBody, AskStatus, Resolution};
 use chloe_controller::catalog::{self, SecretInput, SecretSpec};
 use chloe_controller::runner::{
     PolicyLayer, RuleOrigin, WorkspacePolicy, label_rules, most_specific,
@@ -11,7 +12,7 @@ use chloe_controller::store::{ApiToken, SshKey};
 use chloe_controller::workspace::{
     DiskSizes, IdleStop, MachineSize, RootMode, Workspace, WorkspaceRef,
 };
-use chloe_policy::PathRuleConfig;
+use chloe_policy::{Action, PathRuleConfig};
 use chloe_secrets::{ExposeSecret, Owner};
 use serde::Serialize;
 
@@ -1019,9 +1020,205 @@ pub async fn remove_ssh_key(shared: &Shared, login: &str, fingerprint: &str) -> 
     }
 }
 
+/// エージェントからの依頼と、そのワークスペース。
+#[derive(Debug, Clone, Serialize)]
+pub struct AskInfo {
+    pub workspace: String,
+    #[serde(flatten)]
+    pub ask: Ask,
+    /// 見ている人が通信の許可を承認できるか (答えを待つ通信の許可のときだけ `true` になりうる)。
+    pub can_allow: bool,
+}
+
+/// 依頼への答え。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    /// 通信の許可を承認する。
+    Allow,
+    /// 断る。言葉はエージェントに渡す。
+    Deny(Option<String>),
+    /// 質問に答える。
+    Answer(String),
+}
+
+async fn ask_info(shared: &Shared, login: &str, ws: &Workspace, ask: Ask) -> Result<AskInfo> {
+    let can_allow = matches!(ask.body, AskBody::Network { .. })
+        && ask.status == AskStatus::Pending
+        && shared.can_manage_workspace_policy(login, ws).await?;
+    Ok(AskInfo {
+        workspace: ws.display_name(),
+        ask,
+        can_allow,
+    })
+}
+
+/// 利用者が入れるワークスペースの依頼を新しい順に。`all` でなければ答えを待つものだけ。
+pub async fn list_asks(shared: &Shared, login: &str, all: bool) -> Result<Vec<AskInfo>> {
+    let workspaces = shared
+        .controller
+        .store()
+        .list(&shared.owners_for(login).await?)
+        .await?;
+    let ids: Vec<i64> = workspaces.iter().map(|ws| ws.id).collect();
+    let asks = shared.controller.asks().list(&ids, !all).await?;
+    let mut infos = Vec::with_capacity(asks.len());
+    for ask in asks {
+        if let Some(ws) = workspaces.iter().find(|ws| ws.id == ask.workspace_id) {
+            infos.push(ask_info(shared, login, ws, ask).await?);
+        }
+    }
+    Ok(infos)
+}
+
+/// 依頼を探す。入れないワークスペースの依頼は、ないものとして扱う。
+async fn find_ask(shared: &Shared, login: &str, id: i64) -> Result<(Workspace, Ask)> {
+    let not_found = || Error::NotFound(format!("no such ask: {id}"));
+    let ask = shared
+        .controller
+        .asks()
+        .get(id)
+        .await?
+        .ok_or_else(not_found)?;
+    let ws = shared
+        .controller
+        .store()
+        .get(ask.workspace_id)
+        .await?
+        .ok_or_else(not_found)?;
+    if !shared.can_access(login, &ws.owner).await? {
+        return Err(not_found());
+    }
+    Ok((ws, ask))
+}
+
+pub async fn show_ask(shared: &Shared, login: &str, id: i64) -> Result<AskInfo> {
+    let (ws, ask) = find_ask(shared, login, id).await?;
+    ask_info(shared, login, &ws, ask).await
+}
+
+/// 依頼に答える。通信の許可を承認するときは、ワークスペースの規則を変えられる人でなければ
+/// ならず、ワークスペースの規則にその宛先を許す規則を足して、動いているランナーに送る。
+/// 断ることと質問に答えることは、ワークスペースに入れる人ならできる。
+pub async fn answer_ask(shared: &Shared, login: &str, id: i64, reply: Reply) -> Result<AskInfo> {
+    let (ws, ask) = find_ask(shared, login, id).await?;
+    if ask.status != AskStatus::Pending {
+        return Err(Error::Conflict(format!(
+            "ask {id} is already {}",
+            ask.status
+        )));
+    }
+    let resolution = resolution_for(&ask.body, reply)?;
+    if resolution == Resolution::Allow {
+        check_workspace_policy_admin(shared, login, &ws).await?;
+        let mut policy = shared
+            .controller
+            .store()
+            .workspace_policy(ws.id)
+            .await?
+            .unwrap_or_default();
+        if let Some(rule) = allow_rule(&ask)
+            && !policy.rules.iter().any(|r| r.name == rule.name)
+        {
+            policy.rules.push(rule);
+        }
+        set_workspace_policy(shared, login, &ws, &policy).await?;
+    }
+    let ask = shared
+        .controller
+        .asks()
+        .resolve(id, resolution, login)
+        .await
+        .map_err(|e| Error::Conflict(e.to_string()))?;
+    ask_info(shared, login, &ws, ask).await
+}
+
+/// 依頼の種類に合う答えか。通信の許可は承認か断るか、質問は答えるか断るか。
+fn resolution_for(body: &AskBody, reply: Reply) -> Result<Resolution> {
+    match (body, reply) {
+        (AskBody::Network { .. }, Reply::Allow) => Ok(Resolution::Allow),
+        (_, Reply::Deny(message)) => Ok(Resolution::Deny(message.filter(|m| !m.trim().is_empty()))),
+        (AskBody::Question { .. }, Reply::Answer(text)) if !text.trim().is_empty() => {
+            Ok(Resolution::Answer(text))
+        }
+        (AskBody::Question { .. }, Reply::Answer(_)) => {
+            Err(Error::Invalid("the answer is empty".into()))
+        }
+        (AskBody::Network { .. }, Reply::Answer(_)) => Err(Error::Invalid(
+            "a network ask is allowed or denied, not answered".into(),
+        )),
+        (AskBody::Question { .. }, Reply::Allow) => Err(Error::Invalid(
+            "a question is answered or denied, not allowed".into(),
+        )),
+    }
+}
+
+/// 通信の許可を承認したときに、ワークスペースの規則に足す規則。
+fn allow_rule(ask: &Ask) -> Option<PathRuleConfig> {
+    match &ask.body {
+        AskBody::Network {
+            host,
+            methods,
+            paths,
+        } => Some(PathRuleConfig {
+            name: Some(format!("ask-{}", ask.id)),
+            hosts: vec![host.clone()],
+            methods: methods.clone(),
+            paths: paths.clone(),
+            action: Action::Allow,
+        }),
+        AskBody::Question { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_fit_the_kind_of_ask() {
+        let network = AskBody::Network {
+            host: "example.com".into(),
+            methods: vec!["GET".into()],
+            paths: vec![],
+        };
+        let question = AskBody::Question {
+            question: "ok?".into(),
+            options: vec![],
+        };
+        assert_eq!(
+            resolution_for(&network, Reply::Allow).unwrap(),
+            Resolution::Allow
+        );
+        assert_eq!(
+            resolution_for(&network, Reply::Deny(Some(" ".into()))).unwrap(),
+            Resolution::Deny(None)
+        );
+        assert!(resolution_for(&network, Reply::Answer("yes".into())).is_err());
+        assert!(resolution_for(&question, Reply::Allow).is_err());
+        assert!(resolution_for(&question, Reply::Answer(" ".into())).is_err());
+        assert_eq!(
+            resolution_for(&question, Reply::Answer("yes".into())).unwrap(),
+            Resolution::Answer("yes".into())
+        );
+
+        let ask = Ask {
+            id: 7,
+            workspace_id: 1,
+            body: network,
+            reason: None,
+            status: AskStatus::Pending,
+            answer: None,
+            answered_by: None,
+            created_at: 0,
+            expires_at: 0,
+            answered_at: None,
+        };
+        let rule = allow_rule(&ask).unwrap();
+        assert_eq!(rule.name.as_deref(), Some("ask-7"));
+        assert_eq!(rule.hosts, ["example.com"]);
+        assert_eq!(rule.methods, ["GET"]);
+        assert_eq!(rule.action, Action::Allow);
+    }
 
     #[test]
     fn parses_owners() {
