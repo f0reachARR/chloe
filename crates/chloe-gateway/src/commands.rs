@@ -27,6 +27,11 @@
 //! chloe github login         (Device Flow で GitHub のトークンを得る)
 //! chloe github status
 //! chloe github logout
+//! chloe inbox [--all]        (VM の中のエージェントからの依頼。--all なら答えたものも)
+//! chloe inbox show ID
+//! chloe inbox allow ID       (通信の許可を承認し、ワークスペースの規則に足す)
+//! chloe inbox deny ID [MESSAGE]
+//! chloe inbox answer ID [TEXT]   (TEXT を省くと標準入力から読む。選択肢の番号でもよい)
 //! ```
 //!
 //! ワークスペースの NAME は SSH と同じ書き方 (`name`、`org/name`、`org/team/name`)。
@@ -34,6 +39,7 @@
 //! 接続した利用者の個人のものを扱う。
 
 use chloe_audit::{Event, Record};
+use chloe_controller::asks::AskBody;
 use chloe_controller::catalog::{self, SecretInput};
 use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
 use chloe_controller::workspace::{DiskSizes, IdleStop, MachineSize, RootMode};
@@ -81,6 +87,7 @@ pub fn parse(command: &str) -> Option<Vec<String>> {
 pub fn needs_stdin(args: &[String]) -> bool {
     match args {
         [a, b, ..] if (a == "secret" || a == "policy") && b == "set" => true,
+        [a, b, _] if a == "inbox" && b == "answer" => true,
         [a, b, c, ..] => a == "ws" && b == "policy" && c == "set",
         _ => false,
     }
@@ -160,6 +167,19 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
         ["key", "rm", fingerprint] => key_rm(shared, login, fingerprint).await,
         ["github", "status"] => github_status(shared, login).await,
         ["github", "logout"] => github_logout(shared, login).await,
+        ["inbox"] | ["inbox", "list"] => inbox_list(shared, login, false).await,
+        ["inbox", "--all"] | ["inbox", "list", "--all"] => inbox_list(shared, login, true).await,
+        ["inbox", "show", id] => inbox_show(shared, login, id).await,
+        ["inbox", "allow", id] => inbox_reply(shared, login, id, ops::Reply::Allow).await,
+        ["inbox", "deny", id, message @ ..] => {
+            let message = (!message.is_empty()).then(|| message.join(" "));
+            inbox_reply(shared, login, id, ops::Reply::Deny(message)).await
+        }
+        ["inbox", "answer", id] => {
+            let text = String::from_utf8_lossy(stdin).trim_end().to_string();
+            inbox_answer(shared, login, id, text).await
+        }
+        ["inbox", "answer", id, text @ ..] => inbox_answer(shared, login, id, text.join(" ")).await,
         [] | ["help"] => Ok(help()),
         _ => Err(format!(
             "unknown command: chloe {}\n{}",
@@ -176,7 +196,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws log NAME [--lines N] [--blocked]   (shows the end of the HTTP request log)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws log NAME [--lines N] [--blocked]   (shows the end of the HTTP request log)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\n  chloe inbox [--all]   (asks from the agents in your workspaces)\n  chloe inbox show ID\n  chloe inbox allow ID   (adds a rule for the host to the workspace)\n  chloe inbox deny ID [MESSAGE]\n  chloe inbox answer ID [TEXT]   (an option number or any text; reads stdin without TEXT)\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -412,6 +432,117 @@ async fn ws_log(
         .filter(|r| !blocked || matches!(&r.event, Event::Request(req) if req.blocked()))
         .map(request_line)
         .collect())
+}
+
+/// 依頼の一覧。ID、ワークスペース、種類、状態、出た時刻、短い説明をタブで区切る。
+async fn inbox_list(shared: &Shared, login: &str, all: bool) -> Result<String, String> {
+    let asks = ops::list_asks(shared, login, all).await.map_err(shown)?;
+    Ok(asks
+        .iter()
+        .map(|info| {
+            let ask = &info.ask;
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                ask.id,
+                info.workspace,
+                ask.body.kind(),
+                ask.status,
+                format_time_secs(ask.created_at),
+                ask.body.summary()
+            )
+        })
+        .collect())
+}
+
+fn parse_ask_id(id: &str) -> Result<i64, String> {
+    id.parse().map_err(|_| format!("invalid ask id: {id}"))
+}
+
+async fn inbox_show(shared: &Shared, login: &str, id: &str) -> Result<String, String> {
+    let info = ops::show_ask(shared, login, parse_ask_id(id)?)
+        .await
+        .map_err(shown)?;
+    Ok(ask_detail(&info))
+}
+
+/// 依頼の欄をすべて、一行に一つずつ出す。
+fn ask_detail(info: &ops::AskInfo) -> String {
+    let ask = &info.ask;
+    let mut out = format!(
+        "id: {}\nworkspace: {}\nkind: {}\nstatus: {}\ncreated: {}\nexpires: {}\n",
+        ask.id,
+        info.workspace,
+        ask.body.kind(),
+        ask.status,
+        format_time_secs(ask.created_at),
+        format_time_secs(ask.expires_at)
+    );
+    match &ask.body {
+        AskBody::Network {
+            host,
+            methods,
+            paths,
+        } => {
+            out.push_str(&format!("host: {host}\n"));
+            if !methods.is_empty() {
+                out.push_str(&format!("methods: {}\n", methods.join(" ")));
+            }
+            if !paths.is_empty() {
+                out.push_str(&format!("paths: {}\n", paths.join(" ")));
+            }
+        }
+        AskBody::Question { question, options } => {
+            out.push_str(&format!("question: {}\n", indent(question)));
+            for (i, option) in options.iter().enumerate() {
+                out.push_str(&format!("option {}: {option}\n", i + 1));
+            }
+        }
+    }
+    if let Some(reason) = &ask.reason {
+        out.push_str(&format!("reason: {}\n", indent(reason)));
+    }
+    if let Some(answer) = &ask.answer {
+        out.push_str(&format!("answer: {}\n", indent(answer)));
+    }
+    if let Some(by) = &ask.answered_by {
+        out.push_str(&format!("answered by: {by}\n"));
+    }
+    out
+}
+
+/// 複数行の値の二行目からを字下げする。
+fn indent(text: &str) -> String {
+    text.trim_end().replace('\n', "\n  ")
+}
+
+async fn inbox_reply(
+    shared: &Shared,
+    login: &str,
+    id: &str,
+    reply: ops::Reply,
+) -> Result<String, String> {
+    let info = ops::answer_ask(shared, login, parse_ask_id(id)?, reply)
+        .await
+        .map_err(shown)?;
+    Ok(format!("ask {} is {}\n", info.ask.id, info.ask.status))
+}
+
+/// 質問に答える。選択肢があって `text` がその番号なら、その選択肢を答えにする。
+async fn inbox_answer(
+    shared: &Shared,
+    login: &str,
+    id: &str,
+    text: String,
+) -> Result<String, String> {
+    let id = parse_ask_id(id)?;
+    let info = ops::show_ask(shared, login, id).await.map_err(shown)?;
+    let text = match (&info.ask.body, text.trim().parse::<usize>()) {
+        (AskBody::Question { options, .. }, Ok(n)) if (1..=options.len()).contains(&n) => {
+            options[n - 1].clone()
+        }
+        _ => text,
+    };
+    inbox_reply(shared, login, &id.to_string(), ops::Reply::Answer(text)).await
 }
 
 /// ログの一件を、タブで区切った一行にする。時刻、判定、ステータス、メソッド、ホスト、パス、
