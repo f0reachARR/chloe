@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::Error;
+use crate::asks::Asks;
 use crate::catalog::{self, SecretSpec};
 use crate::runner::{
     AgentStream, BasePolicy, PolicyLayer, RuleOrigin, RunnerBackend, RunnerSpec, build_spec,
@@ -161,6 +162,7 @@ impl<B> Clone for Controller<B> {
 struct Inner<B> {
     store: Store,
     resolver: Resolver,
+    asks: Asks,
     backend: B,
     base: BasePolicy,
     disks: DiskConfig,
@@ -239,6 +241,7 @@ impl<B: RunnerBackend> Controller<B> {
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
+                asks: Asks::new(store.clone()),
                 store,
                 resolver: Resolver {
                     secrets: Arc::new(secrets),
@@ -411,6 +414,11 @@ impl<B: RunnerBackend> Controller<B> {
         self.inner.idle_timeout
     }
 
+    /// VM の中のエージェントからの依頼。
+    pub fn asks(&self) -> &Asks {
+        &self.inner.asks
+    }
+
     pub fn store(&self) -> &Store {
         &self.inner.store
     }
@@ -488,6 +496,7 @@ impl<B: RunnerBackend> Controller<B> {
                 &socket,
                 workspace.clone(),
                 self.inner.resolver.clone(),
+                self.inner.asks.clone(),
             )?)),
             None => Ok(None),
         }
@@ -512,7 +521,8 @@ impl<B: RunnerBackend> Controller<B> {
         };
         match workspace {
             Some(workspace) => {
-                crate::broker::answer(question, &workspace, &self.inner.resolver).await
+                crate::broker::answer(question, &workspace, &self.inner.resolver, &self.inner.asks)
+                    .await
             }
             None => format!("{}\n", serde_json::json!({ "error": "unknown runner" })),
         }
@@ -652,16 +662,27 @@ impl<B: RunnerBackend> Controller<B> {
                 return;
             };
             tokio::time::sleep(timeout).await;
-            let busy_since = tokio::time::Instant::now();
+            let mut busy_since = tokio::time::Instant::now();
             loop {
                 if !still_idle() {
                     return;
                 }
+                // 答えを待つ依頼があれば止めない。依頼の期限で終わるので、上限は当てない。
+                let asking = match inner.asks.has_pending(workspace_id).await {
+                    Ok(asking) => asking,
+                    Err(error) => {
+                        warn!(workspace_id, "failed to read the pending asks: {error}");
+                        false
+                    }
+                };
                 let busy = controller.activity(workspace_id, &state).await;
-                if busy.is_empty() {
+                if busy.is_empty() && !asking {
                     break;
                 }
-                if busy_since.elapsed() >= inner.max_busy_wait {
+                if asking {
+                    // 依頼に答えたあと、作業中のエージェントの上限をそこから数える。
+                    busy_since = tokio::time::Instant::now();
+                } else if busy_since.elapsed() >= inner.max_busy_wait {
                     warn!(
                         workspace_id,
                         ?busy,
@@ -672,6 +693,7 @@ impl<B: RunnerBackend> Controller<B> {
                 info!(
                     workspace_id,
                     ?busy,
+                    asking,
                     "an agent is working; the runner keeps running"
                 );
                 tokio::time::sleep(inner.activity_poll).await;
@@ -1180,9 +1202,13 @@ mod tests {
     }
 
     async fn ask(socket: &std::path::Path, secret: &str) -> String {
+        send_line(socket, serde_json::json!({ "secret": secret })).await
+    }
+
+    async fn send_line(socket: &std::path::Path, question: serde_json::Value) -> String {
         let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
         stream
-            .write_all(format!("{}\n", serde_json::json!({ "secret": secret })).as_bytes())
+            .write_all(format!("{question}\n").as_bytes())
             .await
             .unwrap();
         let mut line = String::new();
@@ -1247,6 +1273,81 @@ mod tests {
         backend.busy.lock().unwrap().clear();
         tokio::time::sleep(ms(600)).await;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn waits_while_an_ask_is_pending() {
+        let ms = Duration::from_millis;
+        let backend = backend();
+        let pool = crate::store::tests::pool().await;
+        // 作業中のエージェントの上限 (300ms) を過ぎても、答えを待つ依頼があれば止めない。
+        let controller =
+            controller_on(pool, backend.clone(), ms(100)).with_activity_wait(ms(50), ms(300));
+        let ws = workspace(&controller, "api", "alice").await;
+        let new =
+            serde_json::from_value(serde_json::json!({"kind": "question", "question": "ok?"}))
+                .unwrap();
+        let ask = controller.asks().create(&ws, new).await.unwrap();
+        drop(controller.open(&ws).await.unwrap());
+        tokio::time::sleep(ms(900)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 0);
+
+        controller
+            .asks()
+            .resolve(
+                ask.id,
+                crate::asks::Resolution::Answer("yes".into()),
+                "alice",
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(ms(400)).await;
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn broker_handles_only_the_workspace_asks() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let ws_a = workspace(&controller, "w", "alice").await;
+        let ws_b = workspace(&controller, "w", "bob").await;
+        let _a = controller.open(&ws_a).await.unwrap();
+        let _b = controller.open(&ws_b).await.unwrap();
+        let socket_a = backend.broker_socket(&ws_a.key());
+        let socket_b = backend.broker_socket(&ws_b.key());
+
+        let created = send_line(
+            &socket_a,
+            serde_json::json!({"ask": {"create": {"kind": "network", "host": "example.com", "reason": "docs"}}}),
+        )
+        .await;
+        let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+        assert_eq!(created["ask"]["status"], "pending");
+        assert_eq!(created["ask"]["host"], "example.com");
+        let id = created["ask"]["id"].as_i64().unwrap();
+
+        // ほかのワークスペースの依頼は、見ることも取り下げることもできない。
+        for op in ["get", "cancel"] {
+            let refused = send_line(&socket_b, serde_json::json!({"ask": {op: id}})).await;
+            assert!(refused.contains("not_found"), "{refused}");
+        }
+        let got = send_line(&socket_a, serde_json::json!({"ask": {"get": id}})).await;
+        assert!(got.contains("\"pending\""), "{got}");
+        let invalid = send_line(
+            &socket_a,
+            serde_json::json!({"ask": {"create": {"kind": "network", "host": "bad host"}}}),
+        )
+        .await;
+        assert!(invalid.contains("\"invalid\""), "{invalid}");
+        let cancelled = send_line(&socket_a, serde_json::json!({"ask": {"cancel": id}})).await;
+        assert!(cancelled.contains("\"cancelled\""), "{cancelled}");
+        // 問い合わせを中継する chloe-node からも同じに答える。
+        let relayed = controller
+            .answer_secret(
+                &ws_a.key(),
+                &serde_json::json!({"ask": {"get": id}}).to_string(),
+            )
+            .await;
+        assert!(relayed.contains("\"cancelled\""), "{relayed}");
     }
 
     #[tokio::test]

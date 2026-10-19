@@ -2,6 +2,7 @@
 //!
 //! ゲートウェイと同じプロセスで使うライブラリ。
 
+pub mod asks;
 mod broker;
 pub mod catalog;
 pub mod cluster;

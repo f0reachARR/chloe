@@ -23,6 +23,10 @@ impl Store {
         Self { pool }
     }
 
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// ワークスペースを作る。プレースホルダーは使うときに作る ([`Store::ensure_placeholders`])。
     pub async fn create(
         &self,
