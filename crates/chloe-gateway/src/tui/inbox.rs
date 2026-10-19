@@ -7,8 +7,9 @@ use ratatui::style::Stylize;
 use ratatui::widgets::{ListItem, Paragraph};
 use terminput::{KeyCode, KeyEvent};
 
-use super::app::{Action, App, Modal, Purpose, render_list};
+use super::app::{Action, App, render_list};
 use super::form::{Field, Form};
+use super::modal::{Modal, Purpose};
 use crate::ops::{AskInfo, Reply, format_time_secs};
 
 /// 質問の選択肢のほかに、自由に書いて答えるときの選択肢。

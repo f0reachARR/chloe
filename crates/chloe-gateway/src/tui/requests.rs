@@ -7,7 +7,8 @@ use ratatui::style::Stylize;
 use ratatui::widgets::{Block, Clear, ListItem, Paragraph};
 use terminput::{KeyCode, KeyEvent};
 
-use super::app::{Action, App, Modal, render_list};
+use super::app::{Action, App, render_list};
+use super::modal::Modal;
 use crate::ops::{format_bytes, format_time_secs};
 
 /// HTTP の要求のログの絞り込み。

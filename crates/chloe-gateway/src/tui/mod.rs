@@ -6,6 +6,7 @@
 mod app;
 mod form;
 mod inbox;
+mod modal;
 mod picker;
 mod policy_form;
 mod requests;

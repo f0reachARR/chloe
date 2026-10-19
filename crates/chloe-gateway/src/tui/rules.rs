@@ -10,7 +10,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, ListItem, Paragraph, Wrap};
 use terminput::{KeyCode, KeyEvent};
 
-use super::app::{Action, App, Modal, Purpose, Tab, owner_kind, render_list, tab_index};
+use super::app::{Action, App, Tab, owner_kind, render_list, tab_index};
+use super::modal::{Modal, Purpose};
 use super::policy_form;
 use crate::ops::{RuleScope, RulesView, ScopeEntry, owner_arg};
 
