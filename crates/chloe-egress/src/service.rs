@@ -20,6 +20,8 @@ use crate::log::{LoggedBody, Logger, query_keys};
 
 /// これより大きい本文はプレースホルダーを探さずに送る。
 pub const BODY_SCAN_LIMIT: u64 = 1 << 20;
+/// エージェントからの依頼の本文の上限。
+const ASK_BODY_LIMIT: usize = 64 * 1024;
 
 /// TLS を復号した接続に付ける、クライアントが送った SNI。
 #[derive(Debug, Clone, Extension)]
@@ -135,6 +137,14 @@ where
                     .log_request(record(Some(200), "ca", &[]), started);
                 return Ok(ca_response(&self.ca_pem));
             }
+            Decision::Ask => {
+                let resp = self
+                    .ask(&method, &path, scanned_body.as_deref().unwrap_or_default())
+                    .await;
+                self.logger
+                    .log_request(record(Some(resp.status().as_u16()), "ask", &[]), started);
+                return Ok(resp);
+            }
             Decision::Blocked { reason, rule } => {
                 let decision = format!("blocked:{}", reason.as_str());
                 let record = LogRequest {
@@ -142,7 +152,7 @@ where
                     ..record(Some(403), &decision, &[])
                 };
                 self.logger.log_request(record, started);
-                return Ok(blocked_response(reason.as_str()));
+                return Ok(blocked_response(reason.as_str(), &host));
             }
             Decision::Allowed { injected } => injected,
         };
@@ -213,6 +223,63 @@ where
     }
 }
 
+impl<C> EgressService<C> {
+    /// エージェントからの依頼 (`ask.chloe.internal`) を問い合わせ用ソケットへ送る。
+    ///
+    /// ```text
+    /// POST   /v1/asks        依頼を出す (本文は依頼の JSON)
+    /// GET    /v1/asks/{id}   依頼の状態を見る
+    /// DELETE /v1/asks/{id}   依頼を取り下げる
+    /// ```
+    async fn ask(&self, method: &str, path: &str, body: &[u8]) -> Response {
+        let id = path
+            .strip_prefix("/v1/asks/")
+            .and_then(|id| id.parse::<i64>().ok());
+        let question = match (method, path, id) {
+            ("POST", "/v1/asks", _) => {
+                if body.len() > ASK_BODY_LIMIT {
+                    return error_response(StatusCode::PAYLOAD_TOO_LARGE, "the ask is too large");
+                }
+                match serde_json::from_slice::<serde_json::Value>(body) {
+                    Ok(ask) if ask.is_object() => serde_json::json!({ "ask": { "create": ask } }),
+                    _ => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "the body must be a JSON object",
+                        );
+                    }
+                }
+            }
+            ("GET", _, Some(id)) => serde_json::json!({ "ask": { "get": id } }),
+            ("DELETE", _, Some(id)) => serde_json::json!({ "ask": { "cancel": id } }),
+            _ => return error_response(StatusCode::NOT_FOUND, "no such endpoint"),
+        };
+        let answer = match self.secrets.relay(&question).await {
+            Ok(line) => serde_json::from_str::<serde_json::Value>(&line).unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!("failed to send an ask: {error:#}");
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the control plane is not reachable",
+                );
+            }
+        };
+        if let Some(ask) = answer.get("ask") {
+            return json_response(StatusCode::OK, ask);
+        }
+        let status = match answer.get("code").and_then(|c| c.as_str()) {
+            Some("invalid") => StatusCode::BAD_REQUEST,
+            Some("not_found") => StatusCode::NOT_FOUND,
+            _ => StatusCode::BAD_GATEWAY,
+        };
+        let message = answer
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("invalid answer from the control plane");
+        json_response(status, &serde_json::json!({ "error": message }))
+    }
+}
+
 /// 要求先のホスト名。ポートがあれば含める (署名し直すときに `host` ヘッダーの代わりに使う)。
 fn request_host(req: &Request) -> Option<String> {
     req.uri()
@@ -230,17 +297,28 @@ fn ca_response(pem: &str) -> Response {
     resp
 }
 
-fn blocked_response(reason: &str) -> Response {
-    let body = serde_json::json!({ "error": "blocked by chloe", "reason": reason });
-    let mut resp = Response::new(Body::from(body.to_string()));
-    *resp.status_mut() = StatusCode::FORBIDDEN;
-    resp.headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    resp
+/// 遮断したときの応答。宛先に届かないときは、人に許可を頼めることを書いておく。エージェントが
+/// 依頼のツールを知らなくても、遮断された応答から辿れるようにするためである。
+fn blocked_response(reason: &str, host: &str) -> Response {
+    let mut body = serde_json::json!({ "error": "blocked by chloe", "reason": reason });
+    if reason == "not-allowed" || reason == "path-denied" {
+        let host = chloe_policy::normalize_host(host);
+        body["hint"] = format!(
+            "ask a person to allow it: chloe-ask network {host} --reason '...' (or the request_network_access tool of the chloe MCP server)"
+        )
+        .into();
+    }
+    json_response(StatusCode::FORBIDDEN, &body)
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
-    let mut resp = blocked_response(message);
+    json_response(status, &serde_json::json!({ "error": message }))
+}
+
+fn json_response(status: StatusCode, body: &serde_json::Value) -> Response {
+    let mut resp = Response::new(Body::from(body.to_string()));
     *resp.status_mut() = status;
+    resp.headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     resp
 }

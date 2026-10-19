@@ -101,6 +101,7 @@ dnsmasq \
     --listen-address=172.29.0.1 --bind-interfaces \
     $dns_servers \
     --address="/ca.chloe.internal/172.29.0.1" \
+    --address="/ask.chloe.internal/172.29.0.1" \
     --log-facility="$logs/dnsmasq.log" --log-queries &
 echo $! > "$run/dnsmasq.pid"
 

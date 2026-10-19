@@ -57,6 +57,26 @@ impl SecretSource {
     }
 }
 
+impl SecretSource {
+    /// 問い合わせを一行送り、答えの一行をそのまま返す (エージェントからの依頼に使う)。
+    pub async fn relay(&self, question: &serde_json::Value) -> Result<String> {
+        let Self::Broker(socket) = self else {
+            bail!("no secret broker to send asks to");
+        };
+        tokio::time::timeout(BROKER_TIMEOUT, async {
+            let mut stream = tokio::net::UnixStream::connect(socket)
+                .await
+                .with_context(|| format!("connect to the secret broker at {}", socket.display()))?;
+            stream.write_all(format!("{question}\n").as_bytes()).await?;
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).await?;
+            Ok(line)
+        })
+        .await
+        .context("the secret broker did not answer in time")?
+    }
+}
+
 async fn ask(socket: &PathBuf, name: &str) -> Result<SecretString> {
     let mut stream = tokio::net::UnixStream::connect(socket)
         .await
