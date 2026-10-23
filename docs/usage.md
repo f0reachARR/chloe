@@ -449,7 +449,7 @@ URL を開くと、Web の画面のログインを通ってから、VM の中の
 サーバーが動いていなければ 502 になる。
 
 - **`localhost` だけで待ち受けてよい**：ゲートウェイは VM の中から `localhost:<ポート>` につなぐ。`0.0.0.0` で待ち受ける必要はない。
-- **`Host` は `localhost:<ポート>` になる**：開発用のサーバーが知らない `Host` を断らないよう、VM の中で開いたときと同じにする。元のホストは `X-Forwarded-Host` と `X-Forwarded-Proto` で届く。アプリが `Host` から自分の URL を組み立てると、`localhost` の URL になる。
+- **`Host` は `localhost:<ポート>` になる**：開発用のサーバーが知らない `Host` を断らないよう、VM の中で開いたときと同じにする。元のホストは `X-Forwarded-Host` で届く。`X-Forwarded-Proto` も、公開の URL ではなく VM の中のサーバーとの話し方（`--https` を付けて公開したなら `https`、なければ `http`）になる。アプリが `Host` から自分の URL を組み立てると、`localhost` の URL になる。
 - **利用者の IP アドレスは `X-Forwarded-For` で届く**：ゲートウェイにつないできた相手のアドレスを末尾に足す。手前にリバースプロキシを置くなら、そのプロキシが付けた値のあとに続く。先頭のほうは利用者が書けるので、信じてよいのは末尾から数えたものである。
 - **そのページ自身の `Origin` も `localhost:<ポート>` になる**：Vite の HMR の WebSocket のように `Origin` を確かめるサーバーも、設定を変えずに使える。ほかのオリジンからの要求の `Origin` は、そのまま届く。
 - **chloe の認証は VM に届かない**：プロキシのホストの cookie（`chloe_proxy`）と、chloe のトークンを付けた `Authorization` は、VM の中のサーバーに渡す前に除く。アプリが自分で付けた cookie はそのまま届く。
