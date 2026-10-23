@@ -237,17 +237,11 @@ impl<C> EgressService<C> {
     async fn ask(&self, method: &str, path: &str, body: &[u8]) -> Response {
         let object = || {
             if body.len() > ASK_BODY_LIMIT {
-                return Err(error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "the body is too large",
-                ));
+                return Err((StatusCode::PAYLOAD_TOO_LARGE, "the body is too large"));
             }
             match serde_json::from_slice::<serde_json::Value>(body) {
                 Ok(value) if value.is_object() => Ok(value),
-                _ => Err(error_response(
-                    StatusCode::BAD_REQUEST,
-                    "the body must be a JSON object",
-                )),
+                _ => Err((StatusCode::BAD_REQUEST, "the body must be a JSON object")),
             }
         };
         let id = path
@@ -259,13 +253,13 @@ impl<C> EgressService<C> {
         let question = match (method, path, id, port) {
             ("POST", "/v1/asks", _, _) => match object() {
                 Ok(ask) => serde_json::json!({ "ask": { "create": ask } }),
-                Err(resp) => return resp,
+                Err((status, message)) => return error_response(status, message),
             },
             ("GET", _, Some(id), _) => serde_json::json!({ "ask": { "get": id } }),
             ("DELETE", _, Some(id), _) => serde_json::json!({ "ask": { "cancel": id } }),
             ("POST", "/v1/ports", _, _) => match object() {
                 Ok(port) => serde_json::json!({ "port": { "publish": port } }),
-                Err(resp) => return resp,
+                Err((status, message)) => return error_response(status, message),
             },
             ("GET", "/v1/ports", _, _) => serde_json::json!({ "port": "list" }),
             ("DELETE", _, _, Some(port)) => serde_json::json!({ "port": { "unpublish": port } }),
