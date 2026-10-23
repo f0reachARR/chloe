@@ -35,13 +35,13 @@ describe('WorkspacesPage', () => {
       {
         port: 5173,
         scheme: 'http' as const,
-        url: 'https://5173-ws-1.preview.example.com/',
+        url: 'https://k3x7q2m5vbtd.preview.example.com/',
         created_at: 0,
       },
       {
         port: 8443,
         scheme: 'https' as const,
-        url: 'https://8443-ws-1.preview.example.com/',
+        url: 'https://p4rz6wq2hnma.preview.example.com/',
         created_at: 0,
       },
     ];
@@ -60,7 +60,7 @@ describe('WorkspacesPage', () => {
     );
     renderWithProviders(<WorkspacesPage />);
     const link = await screen.findByRole('link', { name: /5173/ });
-    expect(link).toHaveAttribute('href', 'https://5173-ws-1.preview.example.com/');
+    expect(link).toHaveAttribute('href', 'https://k3x7q2m5vbtd.preview.example.com/');
     expect(link).toHaveAttribute('target', '_blank');
     expect(screen.getByRole('link', { name: /8443 \(https\)/ })).toBeInTheDocument();
 

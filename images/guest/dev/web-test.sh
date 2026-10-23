@@ -86,7 +86,7 @@ ssh "${ssh_opts[@]}" -i "$work/alice" alice+acme/proj@127.0.0.1 'python3 /tmp/pr
 server_pid=$!
 wait_until 30 grep -q listening "$work/server.out" || true
 proxy_url="$(as alice+acme/proj 'chloe-ask port publish 5173')"
-check port-published "http://5173-ws-" echo "$proxy_url"
+check port-published ".preview.localhost:" echo "$proxy_url"
 
 section "browser"
 code=0

@@ -1,7 +1,7 @@
 import { expect, test } from './fixtures';
 
 // web-test.sh が acme/proj の VM の中で 5173 を公開し、"hello from 5173" を返すサーバーを動かす。
-const proxyHost = /^http:\/\/5173-ws-\d+\.preview\.localhost:\d+\//;
+const proxyHost = /^http:\/\/[a-z2-7]{12}\.preview\.localhost:\d+\//;
 
 test('opens a published port through the web UI sign-in', async ({ page, context }) => {
   await page.goto('/workspaces');
