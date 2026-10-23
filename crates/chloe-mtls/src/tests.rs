@@ -6,6 +6,10 @@ async fn whoami(Extension(peer): Extension<Peer>) -> String {
     format!("{:?}", peer.0)
 }
 
+async fn peer_addr(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> String {
+    addr.ip().to_string()
+}
+
 /// `router` を相互 TLS で待ち受け、URL を返す。
 async fn start(credentials: &Credentials, client_auth: ClientAuth, router: Router) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -109,7 +113,9 @@ async fn plain_tls_does_not_ask_for_client_certificates() {
     tokio::spawn(serve(
         listener,
         config,
-        Router::new().route("/whoami", get(whoami)),
+        Router::new()
+            .route("/whoami", get(whoami))
+            .route("/peer", get(peer_addr)),
     ));
     // 証明書を出すクライアントでも、役割は読まない (求めていないので送られない)。
     for client in [
@@ -126,6 +132,17 @@ async fn plain_tls_does_not_ask_for_client_certificates() {
             .unwrap();
         assert_eq!(body, "None");
     }
+    // 接続元のアドレスを、axum の ConnectInfo で読める。
+    let peer = client_trusting(ca.cert_pem())
+        .unwrap()
+        .get(format!("https://127.0.0.1:{port}/peer"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(peer, "127.0.0.1");
 }
 
 #[test]

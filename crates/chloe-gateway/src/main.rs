@@ -359,7 +359,9 @@ async fn start_api(shared: Arc<Shared>, config: &config::ApiConfig) -> Result<()
         (None, None) => {
             tracing::info!(listen = %config.listen, "listening for the management API (HTTP)");
             tokio::spawn(async move {
-                if let Err(error) = axum::serve(listener, router).await {
+                // 接続元のアドレスは、公開したポートへの中継の X-Forwarded-For に使う。
+                let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+                if let Err(error) = axum::serve(listener, service).await {
                     tracing::error!("the management API stopped: {error}");
                 }
             });

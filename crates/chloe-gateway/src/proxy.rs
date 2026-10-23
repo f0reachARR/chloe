@@ -20,13 +20,14 @@
 //! 中継は要求ごとに、ポート転送と同じく guest-agent に VM の中のポートへの接続を頼み、その上で
 //! HTTP/1.1 を話す。本文は溜めずに流し、`Upgrade` (WebSocket) は切り替えたあとのバイト列を中継する。
 
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context as _, Result, bail};
 use axum::body::Body;
-use axum::extract::{Query, Request, State};
+use axum::extract::{ConnectInfo, Query, Request, State};
 use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use axum::http::{Method, StatusCode, Uri, Version};
 use axum::middleware::Next;
@@ -170,11 +171,16 @@ async fn handle(shared: Arc<Shared>, base: ProxyBase, name: &str, request: Reque
         Err(response) => return *response,
     };
     let method = request.method().clone();
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().to_canonical());
     let request = upstream_request(
         request,
         &base,
         name,
         (published.scheme, target.port),
+        peer,
         strip_authorization,
     );
     let response = match relay(&shared, &workspace, &published, request).await {
@@ -563,12 +569,14 @@ fn remove_hop_by_hop(headers: &mut HeaderMap) {
 }
 
 /// VM の中のサーバーへ送る要求に書き換える。
-/// `upstream` は VM の中のサーバーとの話し方とポート。
+/// `upstream` は VM の中のサーバーとの話し方とポート、`peer` はゲートウェイにつないできた相手の
+/// IP アドレス (手前にリバースプロキシを置けば、そのアドレス)。
 fn upstream_request(
     request: Request,
     base: &ProxyBase,
     name: &str,
     upstream: (Scheme, u16),
+    peer: Option<IpAddr>,
     strip_authorization: bool,
 ) -> Request {
     let (scheme, port) = upstream;
@@ -606,6 +614,27 @@ fn upstream_request(
         headers.insert(
             header::ORIGIN,
             HeaderValue::from_str(&local).expect("a valid origin"),
+        );
+    }
+    // 手前のリバースプロキシが付けた X-Forwarded-For を残し、末尾につないできた相手を足す
+    // (nginx の $proxy_add_x_forwarded_for と同じ)。先頭のほうは利用者が書けるので、アプリが
+    // 信じてよいのは、信頼するプロキシの数だけ末尾から数えたものである。
+    if let Some(peer) = peer {
+        let forwarded: Vec<&str> = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .collect();
+        let value = if forwarded.is_empty() {
+            peer.to_string()
+        } else {
+            format!("{}, {peer}", forwarded.join(", "))
+        };
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(&value).expect("a valid header value"),
         );
     }
     headers.insert(
@@ -898,6 +927,7 @@ mod tests {
             &base(),
             NAME,
             (Scheme::Http, 5173),
+            Some("203.0.113.7".parse().unwrap()),
             true,
         );
         assert_eq!(rewritten.uri(), "/src/main.ts?t=1");
@@ -909,6 +939,7 @@ mod tests {
             "k3x7q2m5vbtd.preview.example.com"
         );
         assert_eq!(headers["x-forwarded-proto"], "https");
+        assert_eq!(headers["x-forwarded-for"], "203.0.113.7");
         assert_eq!(headers["cookie"], "app=1; theme=dark");
         assert_eq!(headers["accept"], "text/html");
         for gone in ["authorization", "connection", "x-private", "te"] {
@@ -929,6 +960,7 @@ mod tests {
             &base(),
             NAME,
             (Scheme::Https, 5173),
+            None,
             false,
         );
         let headers = rewritten.headers();
@@ -938,6 +970,33 @@ mod tests {
         assert_eq!(headers["upgrade"], "websocket");
         // そのページ自身の `Origin` は、VM の中で開いたときと同じにする。
         assert_eq!(headers["origin"], "https://localhost:5173");
+    }
+
+    #[test]
+    fn appends_the_peer_to_x_forwarded_for() {
+        let peer = Some("10.0.0.2".parse().unwrap());
+        let rewritten = upstream_request(
+            request(&[("x-forwarded-for", "198.51.100.1, 192.0.2.3")]),
+            &base(),
+            NAME,
+            (Scheme::Http, 5173),
+            peer,
+            false,
+        );
+        assert_eq!(
+            rewritten.headers()["x-forwarded-for"],
+            "198.51.100.1, 192.0.2.3, 10.0.0.2"
+        );
+        // 相手が分からなければ、届いたものをそのまま渡す。
+        let rewritten = upstream_request(
+            request(&[("x-forwarded-for", "198.51.100.1")]),
+            &base(),
+            NAME,
+            (Scheme::Http, 5173),
+            None,
+            false,
+        );
+        assert_eq!(rewritten.headers()["x-forwarded-for"], "198.51.100.1");
     }
 
     #[test]
@@ -952,11 +1011,19 @@ mod tests {
                 &base(),
                 NAME,
                 (Scheme::Http, 5173),
+                None,
                 false,
             );
             assert_eq!(rewritten.headers()["origin"], origin);
         }
-        let rewritten = upstream_request(request(&[]), &base(), NAME, (Scheme::Http, 5173), false);
+        let rewritten = upstream_request(
+            request(&[]),
+            &base(),
+            NAME,
+            (Scheme::Http, 5173),
+            None,
+            false,
+        );
         assert!(!rewritten.headers().contains_key("origin"));
     }
 
