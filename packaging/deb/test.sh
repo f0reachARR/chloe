@@ -118,7 +118,8 @@ key="$(in_host ls /var/lib/chloe/workspaces | head -1)"
 check runner "active" in_host systemctl is-active "chloe-runner@$key"
 check users "chloe" in_host sh -c 'ps -o user= -C firecracker,chloe-egress,dnsmasq | sort -u'
 check allowed-host "200" as "curl -s -o /dev/null -w '%{http_code}' https://httpbin.org/get"
-check blocked-host "blocked" as "curl -s --max-time 10 https://example.com >/dev/null && echo reached || echo blocked"
+# 許可リストにない名前はプロキシのアドレスに引け、プロキシが 403 で断る (段階 19)。
+check blocked-host "403" as "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com"
 
 section "upgrade"
 runner_pid="$(main_pid "chloe-runner@$key")"
