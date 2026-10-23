@@ -866,12 +866,13 @@ Web の端末、HTTP のログ、規則とシークレットの画面は、同�
 
 ### 決めたこと（2026-10-23）
 
-- **ログイン**：GitHub App があれば、GitHub の Web のフロー（OAuth の認可コードとコールバック）でログインする。Device Flow と違い、App の client secret とコールバックの URL が要るので、`github-app.toml` に `client_secret` を、ゲートウェイの設定に Web の公開 URL を足す。GitHub App のないゲートウェイでは、SSH の `chloe web login` が出す一度だけ使える URL（期限 5 分）でログインする。どちらでも、ログインできる人と権限は SSH と同じにする（`is_allowed` と、ワークスペースごとの権限の判断を使い回す）。
+- **ログイン**：GitHub App があれば、GitHub の Web のフロー（OAuth の認可コードとコールバック）でログインする。Device Flow と違い、App の client secret とコールバックの URL が要るので、`github-app.toml` に `client_secret` を、ゲートウェイの設定に Web の公開 URL を足す。`client_secret` は省けるようにし、省いたときは Web のフローだけを使わない（Device Flow のログインはこれまでどおり client secret を送らない）。コードと交換した利用者のトークンは、`GET /user` でログイン名を知るために一度だけ使い、残さない。GitHub App のないゲートウェイでは、SSH の `chloe web login` が出す一度だけ使える URL（期限 5 分）でログインする。スマートフォンで開きやすいよう、端末に QR コードも出す。どちらでも、ログインできる人と権限は SSH と同じにする（`is_allowed` と、ワークスペースごとの権限の判断を使い回す）。
 - **セッション**：ログインしたら、ランダムなセッションの ID を cookie（`Secure`、`HttpOnly`、`SameSite=Lax`）で渡し、データベース（`web_sessions`）にはハッシュ、ログイン名、期限（既定 14 日）だけを置く。要求のたびに、API のトークンと同じく、利用者がまだログインできるかを確かめる。ログアウトと `chloe web sessions`、`chloe web revoke ID` でセッションを消せる。
-- **TLS を必須にする**：cookie を `Secure` にするので、Web の画面は HTTPS でだけ出す。`[api]` に証明書がないときは、手前にリバースプロキシを置くとみなし、公開 URL が `https://` であることを起動時に確かめる。
+- **TLS を必須にする**：cookie を `Secure` にするので、Web の画面は HTTPS でだけ出す。`[api]` に証明書がないときは、手前にリバースプロキシを置くとみなし、公開 URL が `https://` であることを起動時に確かめる。ただし、公開 URL のホストがループバック（`127.0.0.1`、`localhost`）なら `http://` を許す。開発と `mvp-test.sh` は管理 API をループバックの HTTP で使っており、外からは届かないからである。
 - **API を共用する**：画面は管理 API（`/v1/*`）を呼ぶ。API の認証は Bearer のトークンか、セッションの cookie のどちらかを受ける。cookie で来た要求は、GET 以外では `Origin` が公開 URL と一致しなければ断る（CSRF の対策。Bearer では要らなかった）。監査ログには `via = "web"` とセッションの ID を残す。
+- **cookie ではトークンを作らせない**：cookie で来た要求には、API のトークンを作る `POST /v1/tokens` を断る。画面に XSS があったとき、期限のあるセッションから、期限のないトークンを作られて持ち出されるのを防ぐためである。シークレットの登録も、この段階の画面では扱わないので、cookie では断る。
 - **出来事の流れ**：`GET /v1/events` で、依頼が出た、答えた、取り下げたという出来事（`AskEvent`）を SSE で流す。利用者が入れるワークスペースの出来事だけを送る。画面はこれを受けて読み直す。TUI の Inbox と同じ出来事を受けるので、あとで Slack などの届け先を足すときも同じ形になる。トークンでも受けられるので、外のプログラムも依頼を待てる。
-- **ワークスペースの状態**：一覧に、答えを待つ依頼の数と、エージェントが作業中か（`busy`）を足す。作業中かは、動いているランナーの guest-agent に、停止の判断と同じ問い合わせを並べて送り、2 秒で答えがなければ不明（`null`）にする。一覧を開くたびに VM に問い合わせるので、画面は自動では読み直さない。
+- **ワークスペースの状態**：一覧に、答えを待つ依頼の数（`pending_asks`）を足す。データベースから数えるだけなので、いつも返す。エージェントが作業中か（`busy`）は、`GET /v1/workspaces?status=true` のときだけ足す。動いているランナーの guest-agent に、停止の判断と同じ問い合わせを並べて送り、2 秒で答えがなければ不明（`null`）にする。いつも問い合わせると、`chloe ws list` や TUI など、作業中かを使わない一覧まで遅くなるからである。一覧を開くたびに VM に問い合わせるので、画面は自動では読み直さない。
 - **画面の作り**：ゲートウェイのバイナリに埋め込んだ HTML と少しの JavaScript で書き、Node.js のビルドを持ち込まない。deb のパッケージとビルドの手順を変えずに済むからである。スマートフォンの幅で使えることを先に確かめる。
 - **入れないもの**：ブラウザへのプッシュ通知（Service Worker と VAPID の鍵が要る）、Web の端末、ポート転送の代わり（VM の中のサーバーをブラウザに見せるには、VM へ向かう逆向きのプロキシと、その認証が要る）は、この段階に入れない。
 - **VM から届かない**：Web の画面は管理 API と同じ待ち受けで出す。VM からはプロキシの許可リストを通らなければ届かず、`*.chloe.internal` の名前にも Web の画面を割り当てない。cookie はブラウザにしかないので、利用者が許可リストにゲートウェイを足しても、VM から画面の操作はできない。
@@ -882,7 +883,8 @@ Web の端末、HTTP のログ、規則とシークレットの画面は、同�
 2. `chloe-github` と `chloe-gateway`：GitHub の Web のフロー（認可の URL、コールバック、コードとトークンの交換）。
 3. `chloe-gateway`：`GET /v1/events` と、ワークスペースの一覧の `pending_asks` と `busy`。
 4. `chloe-gateway`：Inbox とワークスペースの状態の画面。
-5. 確かめる：セッションの期限と失効、ログインできなくなった利用者の cookie が断られること、`Origin` の違う要求が断られること、見えないワークスペースの出来事が流れないことは Rust のテストで、VM の中から出した依頼がブラウザの画面に出て、画面から答えると `chloe-ask` が終わることは `mvp-test.sh` で（ブラウザの代わりに cookie を持たせた curl で）確かめる。
+5. 文書：`github-app.md`（App の設定のコールバックの URL と client secret の作り方）、`configuration.md`（`client_secret` と公開 URL）、`api.md`（cookie での認証、`Origin` の確認、cookie で断る操作、`/v1/events`、`status=true`）、`usage.md`（Web の画面と `chloe web`）。
+6. 確かめる：セッションの期限と失効、ログインできなくなった利用者の cookie が断られること、`Origin` の違う要求と cookie でのトークンの作成が断られること、見えないワークスペースの出来事が流れないことは Rust のテストで確かめる。VM の中から出した依頼が `/v1/events` に流れ、cookie で答えると `chloe-ask` が終わることは、`mvp-test.sh` で確かめる（`chloe web login` の URL でセッションを作り、ブラウザの代わりに `Cookie` のヘッダーを付けた curl で、ループバックの HTTP の API を呼ぶ）。
 
 ## 段階 18 以降の進め方
 
