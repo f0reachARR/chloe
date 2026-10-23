@@ -1,0 +1,57 @@
+# VM を使わずに回せる確認。VM を使う確認 (images/guest/dev/test-all.sh) と deb の確認
+# (packaging/deb/test.sh) は KVM が要るので、手元で回す。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # rust-toolchain.toml の版を入れる。
+      - run: rustup toolchain install && rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # web/openapi.json がコードとずれていると落ちる。
+      - run: cargo test --workspace --locked
+
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      # 版は web/package.json の packageManager に合わせる。
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm test
+      # 型の確認 (tsc --noEmit) も含む。
+      - run: pnpm build
+      # 入れてあるスペックの型とルートの一覧が、作り直したものと同じであること。
+      - run: pnpm api
+      - run: git diff --exit-code -- src/shared/api/schema.d.ts src/routeTree.gen.ts
