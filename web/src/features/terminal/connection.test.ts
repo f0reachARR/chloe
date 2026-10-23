@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type TerminalState, connectTerminal, terminalUrl } from './connection';
+import { PING_INTERVAL_MS, type TerminalState, connectTerminal, terminalUrl } from './connection';
 
 // WebSocket の代わり。テストからフレームを流し、送られたものを覚える。
 class FakeSocket extends EventTarget {
@@ -94,5 +94,37 @@ describe('connectTerminal', () => {
     connection.send('x');
     expect(states.at(-1)).toEqual({ kind: 'closed' });
     expect(socket.sent).toEqual([]);
+  });
+
+  describe('ping', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('keeps sending ping while open and ignores pong', () => {
+      vi.useFakeTimers();
+      const { socket, states } = setup();
+      socket.open();
+      socket.receive('{"type":"started"}');
+      vi.advanceTimersByTime(PING_INTERVAL_MS * 2);
+      socket.receive('{"type":"pong"}');
+      expect(socket.sent).toEqual(['{"type":"ping"}', '{"type":"ping"}']);
+      expect(states.at(-1)).toEqual({ kind: 'running' });
+    });
+
+    it('stops after the connection closes', () => {
+      vi.useFakeTimers();
+      const { socket } = setup();
+      socket.open();
+      socket.drop();
+      vi.advanceTimersByTime(PING_INTERVAL_MS * 2);
+      expect(socket.sent).toEqual([]);
+
+      const other = setup();
+      other.socket.open();
+      other.connection.close();
+      vi.advanceTimersByTime(PING_INTERVAL_MS * 2);
+      expect(other.socket.sent).toEqual([]);
+    });
   });
 });
