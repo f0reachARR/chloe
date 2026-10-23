@@ -158,10 +158,13 @@ async fn api_not_found() -> Response {
     error(StatusCode::NOT_FOUND, "no such API path")
 }
 
-/// 画面のファイル。ないパスには `index.html` を返し、画面のルーティングに任せる。
+/// 画面のファイル。ないパスには `index.html` を返し、画面のルーティングに任せる。ただし
+/// `/assets/` は 404 にする (古い版のファイルを求められたときに、長くキャッシュさせる
+/// `/assets/` の名前で `index.html` を返さないように)。
 fn static_files(root: &Path) -> Router {
     let serve = ServeDir::new(root).fallback(ServeFile::new(root.join("index.html")));
     Router::new()
+        .nest_service("/assets", ServeDir::new(root.join("assets")))
         .fallback_service(serve)
         .layer(middleware::from_fn(static_headers))
 }
