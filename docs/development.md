@@ -138,7 +138,7 @@ GitHub Actions で、VM を使わずに回せる確認と deb のビルドを行
 KVM が要る VM を使う確認と deb の確認（`packaging/deb/test.sh`）は、CI では回さず手元で回す。
 
 - **CI**（`.github/workflows/ci.yml`）：main への push と Pull Request で、上の「ビルドと静的な確認」（clippy は `-D warnings`）と、Web の画面の lint、整形、テスト、ビルドを行う。`web/src/shared/api/schema.d.ts` と `web/src/routeTree.gen.ts` が、作り直したものと違うと落ちる。
-- **deb**（`.github/workflows/deb.yml`）：main への push、`v` で始まるタグ、手動の実行で、`packaging/deb/build.sh` を実行し、`chloe-common`、`chloe-gateway`、`chloe-node` を成果物として置く。`chloe-guest` は作らない。
+- **deb**（`.github/workflows/deb.yml`）：main への push、`v` で始まるタグ、手動の実行で、`packaging/deb/build.sh` を実行し、`chloe-common`、`chloe-gateway`、`chloe-node` を成果物として置く。タグと手動の実行では、ゲストのカーネルとルートファイルシステムをビルドして `chloe-guest` も作る（手動の実行では外せる）。カーネルは、`images/guest/kernel/` が変わらなければキャッシュのものを使う。
 
 ## コミット
 
