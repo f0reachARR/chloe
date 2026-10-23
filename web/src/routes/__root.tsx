@@ -1,5 +1,5 @@
 import type { QueryClient } from '@tanstack/react-query';
-import { Outlet, createRootRouteWithContext } from '@tanstack/react-router';
+import { Navigate, Outlet, createRootRouteWithContext } from '@tanstack/react-router';
 
 export interface RouterContext {
   queryClient: QueryClient;
@@ -7,4 +7,6 @@ export interface RouterContext {
 
 export const Route = createRootRouteWithContext<RouterContext>()({
   component: Outlet,
+  // 知らないパスは Inbox へ (ログインしていなければ、そこからログインの画面へ)。
+  notFoundComponent: () => <Navigate to="/inbox" replace />,
 });

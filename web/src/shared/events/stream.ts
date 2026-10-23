@@ -11,6 +11,9 @@ export type Listeners = Record<string, Listener[]>;
 
 export const RESYNC = 'resync';
 
+// EventSource.CLOSED (テストの環境に EventSource がなくても読めるよう、値で持つ)。
+const CLOSED = 2;
+
 export interface StreamOptions {
   url: string;
   listeners: Listeners;
@@ -56,7 +59,7 @@ export function connectEvents({
     source.addEventListener('error', () => {
       // サーバーが閉じたとき (15 分ごと) はブラウザがつなぎ直す。断られた (401 など) ときは
       // 閉じるので、少し待ってから自分でつなぎ直す。
-      if (source?.readyState === EventSource.CLOSED && !closed) {
+      if (source?.readyState === CLOSED && !closed) {
         onState('offline');
         retry = setTimeout(connect, retryMs);
       }

@@ -38,14 +38,15 @@ export function AppShell() {
     document.title = pending > 0 ? `(${pending}) chloe` : 'chloe';
   }, [pending]);
 
-  // 下のナビゲーションは、スマートフォンの幅 (Mantine の sm より狭い) でだけ場所を取る。
+  // スマートフォンの幅 (Mantine の sm より狭い) では下に、広い画面では左にナビゲーションを置く。
+  // 見えない側は描かない (画面の外のリンクにフォーカスが移らないように)。
   const narrow = useMediaQuery('(max-width: 47.99em)') ?? true;
   const state = liveLabel[live];
   return (
     <MantineAppShell
       header={{ height: 56 }}
-      navbar={{ width: 220, breakpoint: 'sm', collapsed: { mobile: true } }}
-      footer={{ height: 60, collapsed: !narrow }}
+      navbar={narrow ? undefined : { width: 220, breakpoint: 'sm' }}
+      footer={narrow ? { height: 60 } : undefined}
       padding="md"
     >
       <MantineAppShell.Header>
@@ -81,9 +82,11 @@ export function AppShell() {
         </Group>
       </MantineAppShell.Header>
 
-      <MantineAppShell.Navbar p="xs">
-        <SideNavigation items={navItems} />
-      </MantineAppShell.Navbar>
+      {!narrow && (
+        <MantineAppShell.Navbar p="xs">
+          <SideNavigation items={navItems} />
+        </MantineAppShell.Navbar>
+      )}
 
       <MantineAppShell.Main>
         <Box maw={760} mx="auto">
@@ -91,9 +94,11 @@ export function AppShell() {
         </Box>
       </MantineAppShell.Main>
 
-      <MantineAppShell.Footer>
-        <BottomNavigation items={navItems} />
-      </MantineAppShell.Footer>
+      {narrow && (
+        <MantineAppShell.Footer>
+          <BottomNavigation items={navItems} />
+        </MantineAppShell.Footer>
+      )}
     </MantineAppShell>
   );
 }

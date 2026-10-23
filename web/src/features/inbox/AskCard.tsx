@@ -3,7 +3,6 @@ import {
   Button,
   Card,
   Code,
-  Collapse,
   Group,
   Stack,
   Text,
@@ -191,7 +190,7 @@ export function AskCard({ ask }: { ask: AskInfo }) {
                 </Button>
               </Stack>
             )}
-            <Collapse expanded={denying}>
+            {denying && (
               <Stack gap="xs">
                 <Textarea
                   placeholder="Tell the agent why (optional)"
@@ -208,7 +207,7 @@ export function AskCard({ ask }: { ask: AskInfo }) {
                   {ask.kind === 'network' ? 'Deny access' : 'Decline'}
                 </Button>
               </Stack>
-            </Collapse>
+            )}
             <Text size="xs" c="dimmed">
               Expires {relativeTime(ask.expires_at)}
             </Text>

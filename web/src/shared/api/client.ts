@@ -19,9 +19,11 @@ const redirectOnUnauthorized: Middleware = {
 };
 
 // 同じオリジンの /api を呼ぶ。絶対 URL にするのは、テスト (Node の fetch) でも同じ書き方で呼べるように。
+// fetch は呼ぶときに探す (テストで MSW が差し替えた fetch を使えるように)。
 export const fetchClient = createFetchClient<paths>({
   baseUrl: window.location.origin,
   credentials: 'same-origin',
+  fetch: (request) => globalThis.fetch(request),
 });
 fetchClient.use(redirectOnUnauthorized);
 

@@ -17,7 +17,7 @@
     "import/no-unassigned-import": [
       "warn",
       {
-        "allow": ["**/*.css"]
+        "allow": ["**/*.css", "@testing-library/jest-dom/vitest"]
       }
     ]
   },
