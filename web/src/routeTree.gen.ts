@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppInboxRouteImport } from './routes/_app/inbox'
+import { Route as AppTerminalRouteImport } from './routes/_app/terminal'
 import { Route as AppWorkspacesRouteImport } from './routes/_app/workspaces'
 import { Route as LoginIndexRouteImport } from './routes/login/index'
 import { Route as LoginLinkRouteImport } from './routes/login/link'
@@ -28,6 +29,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
 const AppInboxRoute = AppInboxRouteImport.update({
   id: '/inbox',
   path: '/inbox',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppTerminalRoute = AppTerminalRouteImport.update({
+  id: '/terminal',
+  path: '/terminal',
   getParentRoute: () => AppRoute,
 } as any)
 const AppWorkspacesRoute = AppWorkspacesRouteImport.update({
@@ -49,12 +55,14 @@ const LoginLinkRoute = LoginLinkRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/inbox': typeof AppInboxRoute
+  '/terminal': typeof AppTerminalRoute
   '/workspaces': typeof AppWorkspacesRoute
   '/login/link': typeof LoginLinkRoute
   '/login/': typeof LoginIndexRoute
 }
 export interface FileRoutesByTo {
   '/inbox': typeof AppInboxRoute
+  '/terminal': typeof AppTerminalRoute
   '/workspaces': typeof AppWorkspacesRoute
   '/login/link': typeof LoginLinkRoute
   '/': typeof AppIndexRoute
@@ -64,6 +72,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/_app/inbox': typeof AppInboxRoute
+  '/_app/terminal': typeof AppTerminalRoute
   '/_app/workspaces': typeof AppWorkspacesRoute
   '/login/link': typeof LoginLinkRoute
   '/_app/': typeof AppIndexRoute
@@ -71,13 +80,15 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/inbox' | '/workspaces' | '/login/link' | '/login/'
+  fullPaths:
+    '/' | '/inbox' | '/terminal' | '/workspaces' | '/login/link' | '/login/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/inbox' | '/workspaces' | '/login/link' | '/' | '/login'
+  to: '/inbox' | '/terminal' | '/workspaces' | '/login/link' | '/' | '/login'
   id:
     | '__root__'
     | '/_app'
     | '/_app/inbox'
+    | '/_app/terminal'
     | '/_app/workspaces'
     | '/login/link'
     | '/_app/'
@@ -113,6 +124,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppInboxRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/terminal': {
+      id: '/_app/terminal'
+      path: '/terminal'
+      fullPath: '/terminal'
+      preLoaderRoute: typeof AppTerminalRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/workspaces': {
       id: '/_app/workspaces'
       path: '/workspaces'
@@ -139,12 +157,14 @@ declare module '@tanstack/react-router' {
 
 interface AppRouteChildren {
   AppInboxRoute: typeof AppInboxRoute
+  AppTerminalRoute: typeof AppTerminalRoute
   AppWorkspacesRoute: typeof AppWorkspacesRoute
   AppIndexRoute: typeof AppIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppInboxRoute: AppInboxRoute,
+  AppTerminalRoute: AppTerminalRoute,
   AppWorkspacesRoute: AppWorkspacesRoute,
   AppIndexRoute: AppIndexRoute,
 }

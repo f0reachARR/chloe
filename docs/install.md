@@ -290,6 +290,27 @@ web_root = "/usr/share/chloe/web"
 TLS を終端するリバースプロキシの後ろに置くときは、`public_url` をリバースプロキシの URL にする。
 画面は `/` から置くので、`public_url` にパスは書けない（`https://example.com/chloe` のようにはできない）。
 依頼の出来事は `/api/v1/events` から SSE で流すので、リバースプロキシで応答を溜めないようにし、待ち時間を長くする（nginx なら `proxy_buffering off;` と `proxy_read_timeout 1h;`。ゲートウェイは `X-Accel-Buffering: no` も返す）。
+Web の端末は `/api/v1/workspace-terminal/` を WebSocket に切り替えるので、リバースプロキシで `Upgrade` と `Connection` のヘッダーを通す。
+端末は何も打たないあいだ黙っているので、待ち時間は長くする。
+
+```nginx
+# http の中
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# server の中
+location /api/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+}
+```
 
 ログインは二通りある。
 

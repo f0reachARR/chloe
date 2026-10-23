@@ -5,7 +5,8 @@
 //! (Organization から抜けたなど)、トークンも使えない。
 //!
 //! Web の画面 ([`crate::web`]) からは、トークンの代わりにセッションの cookie で呼ぶ。cookie で
-//! 来た GET 以外の要求は、`Origin` が公開 URL と一致しなければ断る (CSRF の対策)。cookie では
+//! 来た GET 以外の要求と WebSocket の切り替えは、`Origin` が公開 URL と一致しなければ断る
+//! (CSRF と Cross-Site WebSocket Hijacking の対策)。cookie では
 //! トークンを作らせず、シークレットも登録させない。
 //!
 //! ```text
@@ -23,6 +24,7 @@
 //! DELETE /api/v1/secrets/{name}[?owner=..]
 //! GET    /api/v1/workspace-policies/{name}  ワークスペースの規則 (PUT、DELETE も同じ形)
 //! GET    /api/v1/workspace-requests/{name}[?lines=200]   HTTP の要求のログの末尾 (古い順)
+//! GET    /api/v1/workspace-terminal/{name}?cols=80&rows=24   シェルの端末 (WebSocket、[`crate::terminal`])
 //! GET    /api/v1/policy                     個人の設定 (PUT、DELETE も /api/v1/policies と同じ)
 //! GET    /api/v1/policies/{owner}           Organization か team の設定
 //! PUT    /api/v1/policies/{owner}           設定 (JSON)
@@ -63,17 +65,19 @@ use crate::ops::{
     self, AskInfo, SecretView, WorkspaceInfo, owner_arg, owner_or_personal, parse_owner,
 };
 use crate::session::Shared;
-use crate::web;
+use crate::{terminal, web};
 
 /// トークンかセッションで確かめた呼び出し元。
 #[derive(Clone)]
-struct Caller {
-    login: String,
-    via: Via,
+pub(crate) struct Caller {
+    pub(crate) login: String,
+    pub(crate) via: Via,
+    /// 渡されたトークンかセッションの値。長く続く接続 (端末) で確かめ直すために持つ。
+    secret: Arc<str>,
 }
 
 #[derive(Clone, Copy)]
-enum Via {
+pub(crate) enum Via {
     /// 管理 API のトークン (ID)。
     Token(i64),
     /// Web の画面のセッション (ID)。
@@ -88,6 +92,32 @@ impl Caller {
             Via::Session(_) => Err(ops::Error::Forbidden(format!(
                 "{what} is not allowed from the web UI; use `ssh ... chloe` or an API token"
             ))),
+        }
+    }
+
+    /// トークンかセッションがまだ使え、利用者がまだログインできるかを確かめ直す。使えなければ
+    /// 理由を返す。
+    pub(crate) async fn recheck(&self, shared: &Shared) -> Result<(), String> {
+        let store = shared.controller.store();
+        let valid = match self.via {
+            Via::Token(id) => store
+                .authenticate_api_token(&self.secret)
+                .await
+                .map(|found| found.is_some_and(|t| t.id == id)),
+            Via::Session(id) => store
+                .authenticate_web_session(&self.secret)
+                .await
+                .map(|found| found.is_some_and(|s| s.id == id)),
+        };
+        match valid {
+            Ok(true) => {}
+            Ok(false) => return Err("the session or token has expired or was revoked".into()),
+            Err(e) => return Err(e.to_string()),
+        }
+        match shared.is_allowed(&self.login).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("the user can no longer log in".into()),
+            Err(e) => Err(format!("{e:#}")),
         }
     }
 }
@@ -121,6 +151,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/api/v1/workspace-requests/{*name}",
             get(workspace_requests),
         )
+        .route("/api/v1/workspace-terminal/{*name}", get(terminal::open))
         .route(
             "/api/v1/policy",
             get(show_own_policy)
@@ -150,10 +181,10 @@ pub fn router(shared: Arc<Shared>) -> Router {
         remove_workspace, workspace_requests, list_secrets, show_secret, set_secret, remove_secret,
         show_workspace_policy, set_workspace_policy, remove_workspace_policy, show_own_policy,
         set_own_policy, remove_own_policy, show_policy, set_policy, remove_policy, list_tokens,
-        create_token, revoke_token, list_asks, show_ask, answer_ask,
+        create_token, revoke_token, list_asks, show_ask, answer_ask, terminal::open,
         web::methods, web::github_start, web::link, web::logout,
     ),
-    components(schemas(AskEventData)),
+    components(schemas(AskEventData, terminal::ClientFrame, terminal::ServerFrame)),
     modifiers(&Security),
     security(("token" = []), ("session" = [])),
 )]
@@ -280,14 +311,14 @@ async fn authenticate(
         Some(_) => None,
         None => web::session_cookie(request.headers()),
     };
-    let (login, via) = if let Some(token) = token {
+    let (login, via, secret) = if let Some(token) = token {
         match shared
             .controller
             .store()
             .authenticate_api_token(token)
             .await
         {
-            Ok(Some(found)) => (found.login, Via::Token(found.id)),
+            Ok(Some(found)) => (found.login, Via::Token(found.id), Arc::from(token)),
             Ok(None) => {
                 info!(target: "audit", via = "api", method = %request.method(), path = request.uri().path(), "rejected an API token");
                 return error(
@@ -300,8 +331,10 @@ async fn authenticate(
     } else if let Some(session) = session
         && let Some(web) = web::WebConfig::of(&shared)
     {
-        // cookie はブラウザが勝手に付けるので、ほかのサイトから送らせた要求を断る。
-        let safe = matches!(*request.method(), Method::GET | Method::HEAD);
+        // cookie はブラウザが勝手に付けるので、ほかのサイトから送らせた要求を断る。WebSocket の
+        // 切り替え (端末) は GET で来るが、ほかのサイトのページからも開けるので、同じく確かめる。
+        let safe = matches!(*request.method(), Method::GET | Method::HEAD)
+            && !request.headers().contains_key(header::UPGRADE);
         if !safe && !web.same_origin(request.headers()) {
             return error(
                 StatusCode::FORBIDDEN,
@@ -314,7 +347,7 @@ async fn authenticate(
             .authenticate_web_session(&session)
             .await
         {
-            Ok(Some(found)) => (found.login, Via::Session(found.id)),
+            Ok(Some(found)) => (found.login, Via::Session(found.id), Arc::from(session)),
             Ok(None) => return error(StatusCode::UNAUTHORIZED, "the session has expired"),
             Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
         }
@@ -332,7 +365,7 @@ async fn authenticate(
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
     let (method, path) = (request.method().clone(), request.uri().path().to_string());
-    let caller = Caller { login, via };
+    let caller = Caller { login, via, secret };
     request.extensions_mut().insert(caller.clone());
     let response = next.run(request).await;
     let status = response.status().as_u16();

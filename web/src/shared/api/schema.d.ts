@@ -288,6 +288,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspace-terminal/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description WebSocket に切り替え、ワークスペースのシェルを開く (SSH の `ssh -t` と同じ)。バイナリのフレームは端末の入力と出力、テキストのフレームは JSON で、送るものは `ClientFrame`、受けるものは `ServerFrame`。cookie で開くときは `Origin` が画面と同じでなければ断る。 */
+        get: operations["open"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces": {
         parameters: {
             query?: never;
@@ -405,6 +422,15 @@ export interface components {
             /** @description `chloe web login` の URL でログインできるか (いつも使える)。 */
             link: boolean;
         };
+        /** @description 画面からゲートウェイへのテキストのフレーム。 */
+        ClientFrame: {
+            /** Format: int32 */
+            cols: number;
+            /** Format: int32 */
+            rows: number;
+            /** @enum {string} */
+            type: "resize";
+        };
         CreateToken: {
             /** @description `30d` や `12h`。なければ期限なし。 */
             expires?: string | null;
@@ -458,6 +484,23 @@ export interface components {
             owner: string;
             /** @description シークレットの定義 (`chloe secret set --spec` と同じ形を JSON にしたもの。値は含まない)。 */
             spec: Record<string, never>;
+        };
+        /** @description ゲートウェイから画面へのテキストのフレーム。 */
+        ServerFrame: {
+            /** @enum {string} */
+            type: "starting";
+        } | {
+            /** @enum {string} */
+            type: "started";
+        } | {
+            /** Format: int32 */
+            code: number;
+            /** @enum {string} */
+            type: "exit";
+        } | {
+            message: string;
+            /** @enum {string} */
+            type: "error";
         };
         UpdateWorkspace: {
             /** Format: int32 */
@@ -1502,6 +1545,50 @@ export interface operations {
                 content: {
                     "application/json": Record<string, never>[];
                 };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    open: {
+        parameters: {
+            query?: {
+                /** @description 端末の最初の幅 (桁)。 */
+                cols?: number;
+                /** @description 端末の最初の高さ (行)。 */
+                rows?: number;
+            };
+            header?: never;
+            path: {
+                /** @description ワークスペース (SSH と同じ書き方。`/` は `%2F` にする) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebSocket に切り替えた */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description 誤り */
             "4XX": {

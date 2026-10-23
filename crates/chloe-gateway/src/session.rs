@@ -39,7 +39,7 @@ use crate::tui;
 /// ワークスペースを指定しなかったときに入る、個人のワークスペースの名前。
 const DEFAULT_WORKSPACE: &str = "default";
 /// ランナーを起動してから guest-agent が応答するまで待つ時間。
-const AGENT_CONNECT_WAIT: Duration = Duration::from_secs(90);
+pub(crate) const AGENT_CONNECT_WAIT: Duration = Duration::from_secs(90);
 /// ホストから guest-agent へ送るメッセージを溜めておく数。
 const INPUT_BUFFER: usize = 64;
 /// 管理コマンドの標準入力の上限。
@@ -55,7 +55,11 @@ pub struct Shared {
 impl Shared {
     /// 入るワークスペースを決める。指定がなければ個人の default を使う。個人の default は、
     /// なければ作る。
-    async fn resolve_workspace(&self, login: &str, spec: Option<&str>) -> Result<Workspace> {
+    pub(crate) async fn resolve_workspace(
+        &self,
+        login: &str,
+        spec: Option<&str>,
+    ) -> Result<Workspace> {
         let target = WorkspaceRef::parse(spec.unwrap_or(DEFAULT_WORKSPACE), login)?;
         if !self.can_access(login, &target.owner).await? {
             bail!("no such workspace: {target}");
@@ -1142,7 +1146,7 @@ async fn github_login_command(
     }
 }
 
-fn window_size(cols: u32, rows: u32) -> WindowSize {
+pub(crate) fn window_size(cols: u32, rows: u32) -> WindowSize {
     WindowSize {
         rows: u16::try_from(rows).unwrap_or(u16::MAX).max(1),
         cols: u16::try_from(cols).unwrap_or(u16::MAX).max(1),

@@ -1,4 +1,5 @@
-import { Badge, Card, Group, Stack, Text } from '@mantine/core';
+import { Badge, Button, Card, Group, Stack, Text } from '@mantine/core';
+import { IconTerminal2 } from '@tabler/icons-react';
 import { Link } from '@tanstack/react-router';
 
 import type { Schemas } from '@/shared/api/client';
@@ -52,8 +53,19 @@ export function WorkspaceCard({ ws }: { ws: WorkspaceInfo }) {
             </Badge>
           )}
         </Group>
-        <Group gap="xs">
+        <Group gap="xs" justify="space-between">
           <AgentStatus ws={ws} />
+          <Button
+            // component={Link} では Link の検索パラメーターの型が失われるので、Link を直に描く。
+            renderRoot={(props) => (
+              <Link to="/terminal" search={{ workspace: ws.name }} {...props} />
+            )}
+            size="compact-sm"
+            variant="light"
+            leftSection={<IconTerminal2 size={14} />}
+          >
+            Terminal
+          </Button>
         </Group>
         <Text size="xs" c="dimmed">
           {ws.vcpus} vCPU · {memory} · {ws.root} root · disk {ws.workspace_disk_gib} GiB

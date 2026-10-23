@@ -33,7 +33,7 @@ API の呼び出しは、利用者、トークンの ID、メソッド、パス�
 [Web の画面](usage.md#web-の画面) は、トークンの代わりにセッションの cookie（`chloe_session`）で同じ API を呼ぶ。
 cookie はブラウザが自動で付けるので、ほかのサイトから送らせた要求を断るために、次のように扱う。
 
-- GET と HEAD のほかの要求は、`Origin` がゲートウェイの `public_url` と一致しなければ 403 にする。
+- GET と HEAD のほかの要求と、WebSocket への切り替え（`Upgrade` のある要求。端末）は、`Origin` がゲートウェイの `public_url` と一致しなければ 403 にする。
 - トークンを作る（`POST /api/v1/tokens`）ことと、シークレットを登録する（`PUT /api/v1/secrets/{name}`）ことは、cookie では 403 にする。
 - 監査ログには `via = "web"` とセッションの ID を残す。
 
@@ -66,6 +66,7 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | `PATCH /api/v1/workspaces/{name}` | ルートの扱い、ディスクや VM の大きさ、止めるまでの時間を変える、止める |
 | `DELETE /api/v1/workspaces/{name}[?disks=true]` | ワークスペースを消す（`disks=true` でなければディスクは残る） |
 | `GET /api/v1/workspace-requests/{name}[?lines=]` | HTTP の要求の記録の末尾（既定 200 件、2000 件まで） |
+| `GET /api/v1/workspace-terminal/{name}[?cols=&rows=]` | シェルの端末（WebSocket） |
 | `GET /api/v1/secrets[?owner=]` | シークレットの名前の一覧 |
 | `PUT /api/v1/secrets/{kind}[?owner=]` | シークレットを登録する |
 | `DELETE /api/v1/secrets/{kind}[?owner=]` | シークレットを消す |
@@ -210,6 +211,31 @@ api /api/v1/asks/14/answer -X POST -d '{"deny": true, "message": "今は不要"}
 curl -sN -H "Authorization: Bearer $CHLOE_TOKEN" https://chloe.example.com:8080/api/v1/events
 # event: ask
 # data: {"type":"created","id":15,"workspace":"acme/web"}
+```
+
+### 端末
+
+`/api/v1/workspace-terminal/{name}` は、WebSocket に切り替えて、ワークスペースのシェルを開く（SSH の `ssh -t` と同じ）。
+ワークスペースが止まっていれば起動し、開いているあいだは止めない。
+接続を閉じるとシェルは終わる。
+`cols` と `rows` は最初の端末の大きさ（既定 80 と 24）で、端末の種類は `xterm-256color` になる。
+
+- バイナリのフレームは、端末の入力と出力そのものである。
+- テキストのフレームは JSON である。送るのは大きさの変更（`{"type":"resize","cols":120,"rows":40}`）だけで、受けるのは次の四つ。
+
+| フレーム | 意味 |
+| --- | --- |
+| `{"type":"starting"}` | ワークスペースを用意している（止まっていれば VM を起動する。1 分ほどかかる） |
+| `{"type":"started"}` | シェルが起動した |
+| `{"type":"exit","code":0}` | シェルが終わった。このあと閉じる |
+| `{"type":"error","message":"..."}` | 開けなかったか、続けられなくなった。このあと閉じる |
+
+開いているあいだは、1 分ごとにトークンかセッションを確かめ直し、失効していれば `error` を送って閉じる。
+入れないワークスペースは、切り替える前に 404 で断る。
+
+```sh
+websocat -H "Authorization: Bearer $CHLOE_TOKEN" --binary \
+  'wss://chloe.example.com:8080/api/v1/workspace-terminal/acme%2Fweb?cols=120&rows=40'
 ```
 
 ### トークン

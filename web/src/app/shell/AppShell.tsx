@@ -11,7 +11,7 @@ import {
 import { useMediaQuery } from '@mantine/hooks';
 import { IconChevronDown, IconLogout } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
-import { Outlet } from '@tanstack/react-router';
+import { Outlet, useMatches } from '@tanstack/react-router';
 import { useEffect } from 'react';
 
 import { meQuery, signOut } from '@/features/auth';
@@ -33,6 +33,7 @@ export function AppShell() {
   const me = useQuery(meQuery());
   const live = useFeatureEvents();
   const pending = useQuery(asksQuery()).data?.length ?? 0;
+  const wide = useMatches({ select: (matches) => matches.some((m) => m.staticData.wide) });
 
   useEffect(() => {
     document.title = pending > 0 ? `(${pending}) chloe` : 'chloe';
@@ -89,7 +90,7 @@ export function AppShell() {
       )}
 
       <MantineAppShell.Main>
-        <Box maw={760} mx="auto">
+        <Box maw={wide ? undefined : 760} mx="auto">
           <Outlet />
         </Box>
       </MantineAppShell.Main>

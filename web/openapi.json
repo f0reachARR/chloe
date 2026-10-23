@@ -1216,6 +1216,73 @@
         }
       }
     },
+    "/api/v1/workspace-terminal/{name}": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "description": "WebSocket に切り替え、ワークスペースのシェルを開く (SSH の `ssh -t` と同じ)。バイナリのフレームは端末の入力と出力、テキストのフレームは JSON で、送るものは `ClientFrame`、受けるものは `ServerFrame`。cookie で開くときは `Origin` が画面と同じでなければ断る。",
+        "operationId": "open",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cols",
+            "in": "query",
+            "description": "端末の最初の幅 (桁)。",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "description": "端末の最初の高さ (行)。",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket に切り替えた"
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces": {
       "get": {
         "tags": [
@@ -1758,6 +1825,38 @@
           }
         }
       },
+      "ClientFrame": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "端末の大きさが変わった。",
+            "required": [
+              "cols",
+              "rows",
+              "type"
+            ],
+            "properties": {
+              "cols": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "rows": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "resize"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "画面からゲートウェイへのテキストのフレーム。"
+      },
       "CreateToken": {
         "type": "object",
         "required": [
@@ -1953,6 +2052,80 @@
             "description": "シークレットの定義 (`chloe secret set --spec` と同じ形を JSON にしたもの。値は含まない)。"
           }
         }
+      },
+      "ServerFrame": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "ワークスペースを用意している (止まっていれば起動する)。",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "starting"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "シェルが起動した。",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "シェルが終わった。このあと閉じる。",
+            "required": [
+              "code",
+              "type"
+            ],
+            "properties": {
+              "code": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "exit"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "開けなかったか、続けられなくなった。このあと閉じる。",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "ゲートウェイから画面へのテキストのフレーム。"
       },
       "UpdateWorkspace": {
         "type": "object",
