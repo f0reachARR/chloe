@@ -5,6 +5,7 @@ import { Link } from '@tanstack/react-router';
 import type { Schemas } from '@/shared/api/client';
 
 import { agents } from './agents';
+import { WorkspacePorts } from './WorkspacePorts';
 
 type WorkspaceInfo = Schemas['WorkspaceInfo'];
 
@@ -67,6 +68,7 @@ export function WorkspaceCard({ ws }: { ws: WorkspaceInfo }) {
             Terminal
           </Button>
         </Group>
+        <WorkspacePorts workspace={ws.name} />
         <Text size="xs" c="dimmed">
           {ws.vcpus} vCPU · {memory} · {ws.root} root · disk {ws.workspace_disk_gib} GiB
         </Text>
