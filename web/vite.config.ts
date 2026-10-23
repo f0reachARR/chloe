@@ -1,5 +1,8 @@
+import { fileURLToPath } from 'node:url';
+
+import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import { VitePWA } from 'vite-plugin-pwa';
 
 // 開発では Vite が画面を出し、`/api` をゲートウェイへ中継する。ゲートウェイの `[api] public_url` を
@@ -8,7 +11,12 @@ import { VitePWA } from 'vite-plugin-pwa';
 const gateway = process.env.CHLOE_API ?? 'http://127.0.0.1:8080';
 
 export default defineConfig({
+  resolve: {
+    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+  },
   plugins: [
+    // ルートは src/routes のファイルから作る (routeTree.gen.ts)。react() より前に置く。
+    tanstackRouter({ target: 'react', autoCodeSplitting: true }),
     react(),
     VitePWA({
       // あとでプッシュ通知を足せるよう、Service Worker は自分で書く (src/sw.ts)。
@@ -42,6 +50,11 @@ export default defineConfig({
       },
     }),
   ],
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    css: false,
+  },
   server: {
     proxy: {
       '/api': { target: gateway },

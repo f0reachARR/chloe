@@ -1,0 +1,85 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "react-hooks", "import", "unicorn", "vitest"],
+  "env": {
+    "browser": true,
+    "es2022": true
+  },
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "ignorePatterns": ["dist", "src/routeTree.gen.ts", "src/shared/api/schema.d.ts"],
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "import/no-cycle": "error",
+    "no-console": "warn",
+    "import/no-unassigned-import": [
+      "warn",
+      {
+        "allow": ["**/*.css"]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["src/shared/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "@/app",
+                  "@/app/*",
+                  "@/routes",
+                  "@/routes/*",
+                  "@/features",
+                  "@/features/*"
+                ],
+                "message": "shared \u306f\u6a5f\u80fd\u3001\u67a0\u3001\u30eb\u30fc\u30c8\u3092\u4f7f\u308f\u306a\u3044 (docs/development.md \u306e Web \u306e\u753b\u9762)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/features/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@/app", "@/app/*", "@/routes", "@/routes/*"],
+                "message": "\u6a5f\u80fd\u306f\u67a0\u3068\u30eb\u30fc\u30c8\u3092\u4f7f\u308f\u306a\u3044"
+              },
+              {
+                "group": ["@/features", "@/features/*", "../../*"],
+                "message": "\u6a5f\u80fd\u3069\u3046\u3057\u306f\u4e92\u3044\u3092\u4f7f\u308f\u306a\u3044\u3002\u8981\u308b\u3082\u306e\u306f shared \u306b\u4e0a\u3052\u308b (\u81ea\u5206\u306e\u6a5f\u80fd\u306e\u4e2d\u306f\u76f8\u5bfe\u30d1\u30b9\u3067\u66f8\u304f)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/app/**", "src/routes/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@/features/*/*", "../features/*/*"],
+                "message": "\u6a5f\u80fd\u306f\u5165\u53e3 (@/features/<\u6a5f\u80fd>) \u304b\u3089\u4f7f\u3046"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

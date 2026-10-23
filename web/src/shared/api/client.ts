@@ -2,13 +2,11 @@
 import type { QueryClient } from '@tanstack/react-query';
 import createFetchClient, { type Middleware } from 'openapi-fetch';
 import createClient from 'openapi-react-query';
+
 import type { components, paths } from './schema';
 
-export type WorkspaceInfo = components['schemas']['WorkspaceInfo'];
-export type AskInfo = components['schemas']['AskInfo'];
-export type AskEventData = components['schemas']['AskEventData'];
-export type AuthMethods = components['schemas']['AuthMethods'];
-export type ErrorBody = components['schemas']['ErrorBody'];
+export type Schemas = components['schemas'];
+export type ErrorBody = Schemas['ErrorBody'];
 
 // セッションが切れたら、ログインの画面に戻す。
 const redirectOnUnauthorized: Middleware = {
@@ -20,7 +18,11 @@ const redirectOnUnauthorized: Middleware = {
   },
 };
 
-export const fetchClient = createFetchClient<paths>({ credentials: 'same-origin' });
+// 同じオリジンの /api を呼ぶ。絶対 URL にするのは、テスト (Node の fetch) でも同じ書き方で呼べるように。
+export const fetchClient = createFetchClient<paths>({
+  baseUrl: window.location.origin,
+  credentials: 'same-origin',
+});
 fetchClient.use(redirectOnUnauthorized);
 
 export const api = createClient(fetchClient);
@@ -36,12 +38,7 @@ export function errorMessage(error: unknown): string {
   return 'Something went wrong';
 }
 
-// 依頼とワークスペースの一覧を読み直させる (依頼が出たり答えたりしたとき)。
-export function reloadAsks(queryClient: QueryClient): Promise<void> {
-  return queryClient.invalidateQueries({
-    predicate: (query) => {
-      const path = query.queryKey[1];
-      return path === '/api/v1/asks' || path === '/api/v1/workspaces';
-    },
-  });
+// あるパスの問い合わせを、引数によらずすべて読み直させる。
+export function invalidatePath(queryClient: QueryClient, path: keyof paths): Promise<void> {
+  return queryClient.invalidateQueries({ predicate: (query) => query.queryKey[1] === path });
 }

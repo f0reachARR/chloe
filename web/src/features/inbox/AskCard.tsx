@@ -16,11 +16,13 @@ import { IconCheck, IconMessageQuestion, IconNetwork, IconX } from '@tabler/icon
 import { useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 
-import { type AskInfo, api, errorMessage, reloadAsks } from '../api/client';
-import type { components } from '../api/schema';
-import { absoluteTime, relativeTime } from '../time';
+import { type Schemas, api, errorMessage } from '@/shared/api/client';
+import { absoluteTime, relativeTime } from '@/shared/lib/time';
 
-type Answer = components['schemas']['AnswerBody'];
+import { reloadAsks } from './api';
+
+type AskInfo = Schemas['AskInfo'];
+type Answer = Schemas['AnswerBody'];
 
 const statusColor: Record<AskInfo['status'], string> = {
   pending: 'blue',

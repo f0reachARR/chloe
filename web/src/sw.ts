@@ -7,6 +7,7 @@ import { NavigationRoute, registerRoute } from 'workbox-routing';
 
 declare let self: ServiceWorkerGlobalScope;
 
+// oxlint-disable-next-line no-underscore-dangle -- Workbox が埋め込む名前
 precacheAndRoute(self.__WB_MANIFEST);
 
 // 画面のパスは index.html で開く。`/api` (ログインの送り出しやコールバックを含む) はゲートウェイに任せる。
