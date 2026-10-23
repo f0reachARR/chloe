@@ -861,7 +861,7 @@ pub fn token_hash(token: &str) -> String {
         .collect()
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

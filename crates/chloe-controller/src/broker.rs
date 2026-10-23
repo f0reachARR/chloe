@@ -20,6 +20,20 @@
 //! {"ask": {"id": 12, "kind": "network", "status": "pending", ...}}
 //!     または  {"error": "...", "code": "invalid" | "not_found"}
 //! ```
+//!
+//! 公開したポート ([`crate::ports`]) も同じソケットで受ける。扱えるのは、そのワークスペースの
+//! ポートだけである。
+//!
+//! ```json
+//! {"port": {"publish": {"port": 5173, "scheme": "http"}}}
+//! {"port": {"port": 5173, "scheme": "http", "url": "https://5173-ws-12.preview.example.com/", ...}}
+//!
+//! {"port": "list"}
+//! {"ports": [{"port": 5173, ...}]}
+//!
+//! {"port": {"unpublish": 5173}}
+//! {"unpublished": true}
+//! ```
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -36,6 +50,7 @@ use crate::Error;
 use crate::asks::{Asks, NewAsk, Resolution};
 use crate::catalog;
 use crate::controller::Resolver;
+use crate::ports::{NewPort, Ports};
 use crate::workspace::Workspace;
 
 #[derive(Deserialize)]
@@ -43,6 +58,7 @@ use crate::workspace::Workspace;
 enum Question {
     Secret(String),
     Ask(AskOp),
+    Port(PortOp),
 }
 
 #[derive(Deserialize)]
@@ -53,12 +69,21 @@ enum AskOp {
     Cancel(i64),
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PortOp {
+    Publish(NewPort),
+    List,
+    Unpublish(u16),
+}
+
 /// `socket` で待ち受けを始め、問い合わせに答えるタスクを返す。タスクを止めると待ち受けも終わる。
 pub(crate) fn serve(
     socket: &Path,
     workspace: Workspace,
     resolver: Resolver,
     asks: Asks,
+    ports: Ports,
 ) -> Result<JoinHandle<()>, Error> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
@@ -74,13 +99,14 @@ pub(crate) fn serve(
             let workspace = workspace.clone();
             let resolver = resolver.clone();
             let asks = asks.clone();
+            let ports = ports.clone();
             tokio::spawn(async move {
                 let (read, mut write) = stream.into_split();
                 let mut line = String::new();
                 if BufReader::new(read).read_line(&mut line).await.is_err() {
                     return;
                 }
-                let mut answer = answer(&line, &workspace, &resolver, &asks).await;
+                let mut answer = answer(&line, &workspace, &resolver, &asks, &ports).await;
                 let _ = write.write_all(answer.as_bytes()).await;
                 answer.zeroize();
             });
@@ -93,10 +119,12 @@ pub(crate) async fn answer(
     workspace: &Workspace,
     resolver: &Resolver,
     asks: &Asks,
+    ports: &Ports,
 ) -> String {
     match serde_json::from_str::<Question>(line) {
         Ok(Question::Secret(secret)) => answer_secret(&secret, workspace, resolver).await,
         Ok(Question::Ask(op)) => answer_ask(op, workspace, asks).await,
+        Ok(Question::Port(op)) => answer_port(op, workspace, ports).await,
         Err(_) => error_line("invalid question"),
     }
 }
@@ -140,6 +168,35 @@ async fn answer_ask(op: AskOp, workspace: &Workspace, asks: &Asks) -> String {
     match result {
         Ok(ask) => format!("{}\n", serde_json::json!({ "ask": ask })),
         Err(refused) => refused,
+    }
+}
+
+/// 公開したポートの問い合わせに答える。
+async fn answer_port(op: PortOp, workspace: &Workspace, ports: &Ports) -> String {
+    let answer = match op {
+        PortOp::Publish(new) => ports
+            .publish(workspace, new)
+            .await
+            .map(|port| serde_json::json!({ "port": port })),
+        PortOp::List => ports
+            .list(workspace.id)
+            .await
+            .map(|list| serde_json::json!({ "ports": list })),
+        PortOp::Unpublish(port) => ports
+            .unpublish(workspace, port, "agent")
+            .await
+            .map(|removed| serde_json::json!({ "unpublished": removed })),
+    };
+    match answer {
+        Ok(answer) => format!("{answer}\n"),
+        Err(Error::Invalid(message)) => format!(
+            "{}\n",
+            serde_json::json!({ "error": message, "code": "invalid" })
+        ),
+        Err(error) => format!(
+            "{}\n",
+            serde_json::json!({ "error": error.to_string(), "code": "internal" })
+        ),
     }
 }
 
