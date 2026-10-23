@@ -641,13 +641,11 @@ fn upstream_request(
         "x-forwarded-host",
         HeaderValue::from_str(&public_host).expect("a valid host"),
     );
+    // `Host` と `Origin` と同じく、VM の中で開いたときに合わせ、VM の中のサーバーとの話し方にする
+    // (公開の URL が https でも、http で話すサーバーには http を渡す)。
     headers.insert(
         "x-forwarded-proto",
-        HeaderValue::from_static(if base.scheme() == "https" {
-            "https"
-        } else {
-            "http"
-        }),
+        HeaderValue::from_static(scheme.as_str()),
     );
     parts.uri = parts
         .uri
@@ -938,7 +936,8 @@ mod tests {
             headers["x-forwarded-host"],
             "k3x7q2m5vbtd.preview.example.com"
         );
-        assert_eq!(headers["x-forwarded-proto"], "https");
+        // 公開の URL は https でも、VM の中のサーバーとは http で話す。
+        assert_eq!(headers["x-forwarded-proto"], "http");
         assert_eq!(headers["x-forwarded-for"], "203.0.113.7");
         assert_eq!(headers["cookie"], "app=1; theme=dark");
         assert_eq!(headers["accept"], "text/html");
@@ -970,6 +969,7 @@ mod tests {
         assert_eq!(headers["upgrade"], "websocket");
         // そのページ自身の `Origin` は、VM の中で開いたときと同じにする。
         assert_eq!(headers["origin"], "https://localhost:5173");
+        assert_eq!(headers["x-forwarded-proto"], "https");
     }
 
     #[test]
