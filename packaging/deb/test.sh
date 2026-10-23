@@ -70,6 +70,11 @@ action = "allow"
 
 [runner]
 kind = "systemd"
+
+[api]
+listen = "0.0.0.0:8080"
+public_url = "http://chloe.test:8080"
+web_root = "/usr/share/chloe/web"
 EOF
 
 docker build -q --build-arg UBUNTU="$ubuntu" -t "chloe-deb-test-host:$ubuntu" -f "$here/test-host.Dockerfile" "$here" >/dev/null
@@ -104,6 +109,9 @@ in_host systemd-run --quiet --unit keys python3 -m http.server --bind 127.0.0.1 
 in_host systemctl enable --now chloe-gateway
 wait_until 20 bash -c "exec 3<>/dev/tcp/$host_ip/2222"
 check shell "hello" as 'echo hello'
+# deb に入れた Web の画面を、ゲートウェイが出す。
+check web-ui '<div id="root">' curl -s "http://$host_ip:8080/inbox"
+check web-manifest '"name":"chloe"' curl -s "http://$host_ip:8080/manifest.webmanifest"
 ssh "${ssh_opts[@]}" "alice@$host_ip" 'sleep 300' &
 hold=$!
 key="$(in_host ls /var/lib/chloe/workspaces | head -1)"

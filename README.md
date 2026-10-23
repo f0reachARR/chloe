@@ -17,6 +17,7 @@ user@chloe:/workspace$ claude
 systemd の実装では、root で動くのはネットワークの準備だけで、Firecracker とプロキシは専用の利用者で動く。
 jailer による Firecracker の隔離と Kubernetes への配置はまだない。
 ホストに配置するための設定の例と systemd の unit は `deploy/` にあるが、まだ実際のホストで確かめていない。
+Web の画面の GitHub のログインは、GitHub の代わりのスタブを相手にしか確かめていない。
 実装の順序と各段階の結果は [実装手順](docs/implementation-steps.md) にある。
 
 ## できること
@@ -122,6 +123,7 @@ images/guest/
   rootfs/            ゲストのルートファイルシステムのビルド
   runner/            ランナーの起動のスクリプト (開発用のコンテナと systemd の unit で共通)
   dev/               開発用のランナーのコンテナ、開発用の設定の例、VM を使う確認
+web/                 Web の画面 (React、Mantine、Vite。型は web/openapi.json から作る)
 deploy/              ホストに配置するための設定の例、systemd の unit、polkit の規則
 migrations/          データベースのマイグレーション
 docs/                文書
