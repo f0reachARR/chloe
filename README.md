@@ -123,7 +123,7 @@ images/guest/
   rootfs/            ゲストのルートファイルシステムのビルド
   runner/            ランナーの起動のスクリプト (開発用のコンテナと systemd の unit で共通)
   dev/               開発用のランナーのコンテナ、開発用の設定の例、VM を使う確認
-web/                 Web の画面 (React、Mantine、Vite。型は web/openapi.json から作る)
+web/                 Web の画面 (React、Mantine、TanStack Router と Query。型は web/openapi.json から作る)
 deploy/              ホストに配置するための設定の例、systemd の unit、polkit の規則
 migrations/          データベースのマイグレーション
 docs/                文書
