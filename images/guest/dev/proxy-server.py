@@ -5,7 +5,8 @@
 127.0.0.1 だけで待ち受ける (VM の外から直には届かない)。CERT と KEY を渡すと HTTPS で話す。
 
     GET /headers   受けたヘッダーを JSON で返す (chloe の cookie とトークンが届かないことを確かめる)
-    GET /ws        WebSocket に切り替え、受けたテキストに "echo:" を付けて返す
+    GET /ws        WebSocket に切り替え、受けたテキストに "echo:" を付けて返す。Vite の HMR と同じく、
+                   Origin があって localhost のものでなければ 403 で断る
     GET /*         "hello from PORT" と、アプリの cookie を一つ渡す
 """
 
@@ -46,6 +47,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def websocket(self):
+        origin = self.headers.get("Origin")
+        port = self.server.server_port
+        if origin and origin not in (f"http://localhost:{port}", f"https://localhost:{port}"):
+            self.reply(403, f"origin {origin} is not allowed")
+            return
         key = self.headers["Sec-WebSocket-Key"]
         accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
         self.send_response(101)

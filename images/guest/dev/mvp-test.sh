@@ -431,6 +431,9 @@ proxy_headers() { proxied "$proxy_host" /headers -H "Authorization: Bearer $prox
 check proxy-host-rewritten '"host": "localhost:5173"' proxy_headers
 check proxy-forwarded-host "\"x-forwarded-host\": \"$proxy_host\"" proxy_headers
 check proxy-app-cookie '"cookie": "app=1"' proxy_headers
+# そのページ自身の Origin は localhost:<ポート> に書き換え、ほかのオリジンはそのまま渡す。
+check proxy-foreign-origin '"origin": "https://elsewhere.example.com"' proxied "$proxy_host" /headers \
+    -H "Authorization: Bearer $proxy_token" -H 'Origin: https://elsewhere.example.com'
 proxy_leaks() { if proxy_headers | grep -qiE "authorization|chloe_proxy|$proxy_token"; then echo leaked; else echo clean; fi; }
 check proxy-no-credentials "clean" proxy_leaks
 check proxy-not-member "404" proxied "$proxy_host" / -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $bob_proxy_token"
@@ -459,6 +462,9 @@ check proxy-same-site-fetch "403" proxied "$proxy_host" / -o /dev/null -w '%{htt
     -H 'Sec-Fetch-Site: same-site' -H 'Sec-Fetch-Mode: no-cors'
 check proxy-same-site-navigate "hello from 5173" proxied "$proxy_host" / -H "Cookie: $proxy_cookie" \
     -H 'Sec-Fetch-Site: same-site' -H 'Sec-Fetch-Mode: navigate'
+check proxy-own-origin '"origin": "http://localhost:5173"' proxied "$proxy_host" /headers \
+    -H "Cookie: $proxy_cookie" -H "Origin: $own_origin"
+# VM の中のサーバーは、Vite と同じく localhost でない Origin の WebSocket を断る。
 check proxy-cookie-websocket "echo:cookie" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
     "Cookie: $proxy_cookie" cookie "$own_origin"
 check proxy-cross-site-websocket "403" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
