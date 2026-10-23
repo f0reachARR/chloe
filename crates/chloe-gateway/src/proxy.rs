@@ -170,7 +170,13 @@ async fn handle(shared: Arc<Shared>, base: ProxyBase, name: &str, request: Reque
         Err(response) => return *response,
     };
     let method = request.method().clone();
-    let request = upstream_request(request, &base, name, target.port, strip_authorization);
+    let request = upstream_request(
+        request,
+        &base,
+        name,
+        (published.scheme, target.port),
+        strip_authorization,
+    );
     let response = match relay(&shared, &workspace, &published, request).await {
         Ok(response) => response,
         Err(error) => {
@@ -557,13 +563,15 @@ fn remove_hop_by_hop(headers: &mut HeaderMap) {
 }
 
 /// VM の中のサーバーへ送る要求に書き換える。
+/// `upstream` は VM の中のサーバーとの話し方とポート。
 fn upstream_request(
     request: Request,
     base: &ProxyBase,
     name: &str,
-    port: u16,
+    upstream: (Scheme, u16),
     strip_authorization: bool,
 ) -> Request {
+    let (scheme, port) = upstream;
     let (mut parts, body) = request.into_parts();
     let upgrade = parts.headers.get(header::UPGRADE).cloned();
     let cookies = strip_cookies(&parts.headers);
@@ -586,6 +594,20 @@ fn upstream_request(
         header::HOST,
         HeaderValue::from_str(&format!("{UPSTREAM_HOST}:{port}")).expect("a valid host"),
     );
+    // そのページ自身からの要求 (HMR の WebSocket など) の `Origin` も、VM の中で開いたときと
+    // 同じにする (Vite などは `Origin` も確かめる)。ほかのオリジンからの要求は、アプリが CORS や
+    // CSRF を正しく判断できるよう、書き換えずに渡す。
+    let own_origin = base.origin(name);
+    if headers
+        .get(header::ORIGIN)
+        .is_some_and(|origin| origin.as_bytes() == own_origin.as_bytes())
+    {
+        let local = format!("{}://{UPSTREAM_HOST}:{port}", scheme.as_str());
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_str(&local).expect("a valid origin"),
+        );
+    }
     headers.insert(
         "x-forwarded-host",
         HeaderValue::from_str(&public_host).expect("a valid host"),
@@ -875,7 +897,7 @@ mod tests {
             ]),
             &base(),
             NAME,
-            5173,
+            (Scheme::Http, 5173),
             true,
         );
         assert_eq!(rewritten.uri(), "/src/main.ts?t=1");
@@ -902,10 +924,11 @@ mod tests {
                 ("authorization", "Bearer app-token"),
                 ("connection", "Upgrade"),
                 ("upgrade", "websocket"),
+                ("origin", "https://k3x7q2m5vbtd.preview.example.com"),
             ]),
             &base(),
             NAME,
-            5173,
+            (Scheme::Https, 5173),
             false,
         );
         let headers = rewritten.headers();
@@ -913,6 +936,28 @@ mod tests {
         assert_eq!(headers["authorization"], "Bearer app-token");
         assert_eq!(headers["connection"], "upgrade");
         assert_eq!(headers["upgrade"], "websocket");
+        // そのページ自身の `Origin` は、VM の中で開いたときと同じにする。
+        assert_eq!(headers["origin"], "https://localhost:5173");
+    }
+
+    #[test]
+    fn keeps_other_origins() {
+        for origin in [
+            "https://p4rz6wq2hnma.preview.example.com",
+            "https://evil.example.com",
+            "null",
+        ] {
+            let rewritten = upstream_request(
+                request(&[("origin", origin)]),
+                &base(),
+                NAME,
+                (Scheme::Http, 5173),
+                false,
+            );
+            assert_eq!(rewritten.headers()["origin"], origin);
+        }
+        let rewritten = upstream_request(request(&[]), &base(), NAME, (Scheme::Http, 5173), false);
+        assert!(!rewritten.headers().contains_key("origin"));
     }
 
     #[test]
