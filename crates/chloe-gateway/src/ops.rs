@@ -5,6 +5,7 @@
 
 use chloe_controller::asks::{Ask, AskBody, AskStatus, Resolution};
 use chloe_controller::catalog::{self, SecretInput, SecretSpec};
+use chloe_controller::ports::PublishedPort;
 use chloe_controller::runner::{
     PolicyLayer, RuleOrigin, WorkspacePolicy, label_rules, most_specific,
 };
@@ -337,6 +338,39 @@ pub async fn remove_workspace(
 ) -> Result<Workspace> {
     let ws = find_workspace(shared, login, name).await?;
     shared.controller.remove(&ws, disks).await?;
+    Ok(ws)
+}
+
+/// VM の中で公開したポートの一覧。
+pub async fn workspace_ports(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+) -> Result<(Workspace, Vec<PublishedPort>)> {
+    let ws = find_workspace(shared, login, name).await?;
+    let ports = shared.controller.ports().list(ws.id).await?;
+    Ok((ws, ports))
+}
+
+/// ポートの公開を取り消す。公開は VM の中からしかできないが、取り消しはメンバーならできる。
+pub async fn unpublish_port(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    port: u16,
+) -> Result<Workspace> {
+    let ws = find_workspace(shared, login, name).await?;
+    if !shared
+        .controller
+        .ports()
+        .unpublish(&ws, port, login)
+        .await?
+    {
+        return Err(Error::NotFound(format!(
+            "port {port} is not published in {}",
+            ws.display_name()
+        )));
+    }
     Ok(ws)
 }
 

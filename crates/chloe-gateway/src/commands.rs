@@ -11,6 +11,8 @@
 //! chloe ws idle NAME [30m|2h|never|default]   (最後の接続が閉じてから止めるまで)
 //! chloe ws policy show|set|rm NAME        (ワークスペースの規則。set は TOML を標準入力から読む)
 //! chloe ws log NAME [--lines 200] [--blocked]   (HTTP の要求のログの末尾)
+//! chloe ws ports NAME   (VM の中で公開したポートと、ブラウザで開く URL)
+//! chloe ws unpublish NAME PORT
 //! chloe ws stop NAME
 //! chloe ws rm NAME [--disks]   (--disks ならランナーのホストのディスクも消す)
 //! chloe secret list [--owner OWNER]
@@ -131,6 +133,11 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
             Ok((lines, blocked)) => ws_log(shared, login, name, lines, blocked).await,
             Err(e) => Err(e),
         },
+        ["ws", "ports", name] => ws_ports(shared, login, name).await,
+        ["ws", "unpublish", name, port] => match port.parse() {
+            Ok(port) => ws_unpublish(shared, login, name, port).await,
+            Err(_) => Err(format!("invalid port {port:?}")),
+        },
         ["ws", "stop", name] => ws_stop(shared, login, name).await,
         ["ws", "rm", name] => ws_rm(shared, login, name, false).await,
         ["ws", "rm", name, "--disks"] => ws_rm(shared, login, name, true).await,
@@ -202,7 +209,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws log NAME [--lines N] [--blocked]   (shows the end of the HTTP request log)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\n  chloe inbox [--all]   (asks from the agents in your workspaces)\n  chloe inbox show ID\n  chloe inbox allow ID   (adds a rule for the host to the workspace)\n  chloe inbox deny ID [MESSAGE]\n  chloe inbox answer ID [TEXT]   (an option number or any text; reads stdin without TEXT)\n  chloe web login   (a one-time URL and QR code to sign in to the web UI)\n  chloe web sessions\n  chloe web revoke ID\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws log NAME [--lines N] [--blocked]   (shows the end of the HTTP request log)\n  chloe ws ports NAME   (ports published in the VM with `chloe-ask port publish`, and their URLs)\n  chloe ws unpublish NAME PORT\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\n  chloe inbox [--all]   (asks from the agents in your workspaces)\n  chloe inbox show ID\n  chloe inbox allow ID   (adds a rule for the host to the workspace)\n  chloe inbox deny ID [MESSAGE]\n  chloe inbox answer ID [TEXT]   (an option number or any text; reads stdin without TEXT)\n  chloe web login   (a one-time URL and QR code to sign in to the web UI)\n  chloe web sessions\n  chloe web revoke ID\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -584,6 +591,39 @@ fn request_line(record: &Record) -> String {
         or_dash(req.duration_ms.map(|ms| format!("{ms}ms"))),
         or_dash(req.error.clone()),
     )
+}
+
+/// 公開したポート。ポート、VM の中のサーバーとの話し方、URL をタブで区切る。
+async fn ws_ports(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
+    let (_, ports) = ops::workspace_ports(shared, login, name)
+        .await
+        .map_err(shown)?;
+    Ok(ports
+        .iter()
+        .map(|p| {
+            format!(
+                "{}\t{}\t{}\n",
+                p.port,
+                p.scheme.as_str(),
+                p.url.as_deref().unwrap_or("-")
+            )
+        })
+        .collect())
+}
+
+async fn ws_unpublish(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    port: u16,
+) -> Result<String, String> {
+    let ws = ops::unpublish_port(shared, login, name, port)
+        .await
+        .map_err(shown)?;
+    Ok(format!(
+        "unpublished port {port} of {}\n",
+        ws.display_name()
+    ))
 }
 
 async fn ws_stop(shared: &Shared, login: &str, name: &str) -> Result<String, String> {
