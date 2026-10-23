@@ -6,6 +6,10 @@
 //!
 //! 開いているあいだは、ワークスペースを止めない。1 分ごとにトークンかセッションを確かめ直し、
 //! 使えなくなっていれば閉じる (SSE と違い、つなぎ直させるとシェルが消えるので)。
+//!
+//! ブラウザの WebSocket は制御フレームの Ping を送れないので、画面は何も打たないあいだも
+//! `ping` のフレームを送り、ゲートウェイは `pong` を返す。黙った接続をリバースプロキシに
+//! 切られないように、両向きに流す。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,6 +64,8 @@ fn default_rows() -> u16 {
 pub(crate) enum ClientFrame {
     /// 端末の大きさが変わった。
     Resize { cols: u16, rows: u16 },
+    /// 接続を保つために送る。`pong` を返す。
+    Ping,
 }
 
 /// ゲートウェイから画面へのテキストのフレーム。
@@ -74,6 +80,8 @@ pub(crate) enum ServerFrame {
     Exit { code: i32 },
     /// 開けなかったか、続けられなくなった。このあと閉じる。
     Error { message: String },
+    /// `ping` への返事。
+    Pong,
 }
 
 type Sender = SplitSink<WebSocket, Message>;
@@ -170,6 +178,11 @@ async fn relay(
                         let size = window_size(cols.into(), rows.into());
                         agent_tx.send(&ClientMessage::Resize(size)).await?;
                     }
+                    Ok(ClientFrame::Ping) => {
+                        if send_frame(tx, &ServerFrame::Pong).await.is_err() {
+                            return Ok(None);
+                        }
+                    }
                     Err(e) => bail!("invalid frame from the browser: {e}"),
                 },
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -244,6 +257,10 @@ mod tests {
                 rows: 40
             }
         );
+        assert_eq!(
+            serde_json::from_str::<ClientFrame>(r#"{"type":"ping"}"#).unwrap(),
+            ClientFrame::Ping
+        );
         assert!(serde_json::from_str::<ClientFrame>(r#"{"type":"exec"}"#).is_err());
         assert_eq!(
             serde_json::to_string(&ServerFrame::Exit { code: 130 }).unwrap(),
@@ -252,6 +269,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ServerFrame::Starting).unwrap(),
             r#"{"type":"starting"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerFrame::Pong).unwrap(),
+            r#"{"type":"pong"}"#
         );
     }
 }

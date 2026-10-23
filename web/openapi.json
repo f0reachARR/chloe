@@ -1853,6 +1853,21 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "接続を保つために送る。`pong` を返す。",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ping"
+                ]
+              }
+            }
           }
         ],
         "description": "画面からゲートウェイへのテキストのフレーム。"
@@ -2120,6 +2135,21 @@
                 "type": "string",
                 "enum": [
                   "error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "`ping` への返事。",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pong"
                 ]
               }
             }
