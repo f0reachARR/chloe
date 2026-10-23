@@ -48,6 +48,16 @@ export function Workspaces() {
   );
 }
 
+// 作業中の印 (`<ツール>-<セッションの ID>`) を、ツールごとの数にまとめる (`claude ×2, codex`)。
+function agents(busy: string[]): string {
+  const counts = new Map<string, number>();
+  for (const mark of busy) {
+    const tool = mark.split('-')[0] || mark;
+    counts.set(tool, (counts.get(tool) ?? 0) + 1);
+  }
+  return [...counts].map(([tool, n]) => (n > 1 ? `${tool} ×${n}` : tool)).join(', ');
+}
+
 function AgentStatus({ ws }: { ws: WorkspaceInfo }) {
   if (!ws.running) {
     return (
@@ -66,7 +76,7 @@ function AgentStatus({ ws }: { ws: WorkspaceInfo }) {
   if (ws.busy && ws.busy.length > 0) {
     return (
       <Badge color="orange" variant="light">
-        Working: {ws.busy.join(', ')}
+        Working: {agents(ws.busy)}
       </Badge>
     );
   }
