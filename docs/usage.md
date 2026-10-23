@@ -450,10 +450,11 @@ URL を開くと、Web の画面のログインを通ってから、VM の中の
 
 - **`localhost` だけで待ち受けてよい**：ゲートウェイは VM の中から `localhost:<ポート>` につなぐ。`0.0.0.0` で待ち受ける必要はない。
 - **`Host` は `localhost:<ポート>` になる**：開発用のサーバーが知らない `Host` を断らないよう、VM の中で開いたときと同じにする。元のホストは `X-Forwarded-Host` と `X-Forwarded-Proto` で届く。アプリが `Host` から自分の URL を組み立てると、`localhost` の URL になる。
+- **そのページ自身の `Origin` も `localhost:<ポート>` になる**：Vite の HMR の WebSocket のように `Origin` を確かめるサーバーも、設定を変えずに使える。ほかのオリジンからの要求の `Origin` は、そのまま届く。
 - **chloe の認証は VM に届かない**：プロキシのホストの cookie（`chloe_proxy`）と、chloe のトークンを付けた `Authorization` は、VM の中のサーバーに渡す前に除く。アプリが自分で付けた cookie はそのまま届く。
 - **ポートごとに別のオリジン**：ホスト名は公開したポートごとのランダムな名前（12 文字）で、ワークスペースもポートも含まない。あるポートのページから、ほかのポートや Web の画面の cookie は読めない。公開し直して `--https` を変えても名前は変わらず、取り消してから公開すると新しい名前になる（前の URL は開けなくなる）。
 - **ほかのサイトのページからは使えない**：ほかのポートやほかのサイトのページのスクリプトが、利用者の cookie で WebSocket を開いたり、フォームや `fetch` で GET のほかの要求を送ったりすると断る（403）。そのページ自身からの要求と、リンクからページを開くことは通る。
-- **WebSocket も通る**：ただし、Vite などの開発用のサーバーは、HMR の WebSocket の `Origin` を確かめることがある。`Origin` はブラウザが開いたホスト（`https://k3x7q2m5vbtd.…`）のまま届くので、断られたら、サーバーの許すホストにプロキシのドメインを足す（Vite なら `server.allowedHosts` に `.chloe-preview.example.net`）。
+- **WebSocket も通る**：開発用のサーバーの HMR なども使える。
 - **`/__chloe/` はアプリに届かない**：プロキシのホストのログインに `/__chloe/auth` を使う。
 
 Claude Code と Codex には、同じ操作を MCP のツール（`publish_port`）として登録してある。
