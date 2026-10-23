@@ -328,6 +328,7 @@ proxy_url = "https://chloe-preview.example.net"
 ドメインの下のすべての名前（`*.chloe-preview.example.net`）を、ゲートウェイかリバースプロキシに向ける。
 ワイルドカードの DNS のレコードと、ワイルドカードの証明書（Let's Encrypt なら DNS-01 のチャレンジで取る）が要る。
 ゲートウェイは、要求の `Host` でプロキシのホストを見分けるので、リバースプロキシは `Host` をそのまま渡す。
+ゲートウェイは、つないできた相手（リバースプロキシ）のアドレスを `X-Forwarded-For` の末尾に足して VM の中のサーバーへ渡すので、利用者の IP アドレスを届けるには、リバースプロキシでも `X-Forwarded-For` を付ける。
 VM の中の開発用のサーバーの HMR などは WebSocket を使うので、`Upgrade` と `Connection` も通す。
 
 ```nginx
@@ -342,6 +343,8 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
+        # 利用者の IP アドレスを、ゲートウェイが VM の中のサーバーへ渡す。
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_buffering off;
