@@ -67,6 +67,8 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | `DELETE /api/v1/workspaces/{name}[?disks=true]` | ワークスペースを消す（`disks=true` でなければディスクは残る） |
 | `GET /api/v1/workspace-requests/{name}[?lines=]` | HTTP の要求の記録の末尾（既定 200 件、2000 件まで） |
 | `GET /api/v1/workspace-terminal/{name}[?cols=&rows=]` | シェルの端末（WebSocket） |
+| `GET /api/v1/workspace-ports/{name}` | VM の中で公開したポートと、ブラウザで開く URL |
+| `DELETE /api/v1/workspace-ports/{name}?port=` | ポートの公開を取り消す |
 | `GET /api/v1/secrets[?owner=]` | シークレットの名前の一覧 |
 | `PUT /api/v1/secrets/{kind}[?owner=]` | シークレットを登録する |
 | `DELETE /api/v1/secrets/{kind}[?owner=]` | シークレットを消す |
@@ -237,6 +239,29 @@ curl -sN -H "Authorization: Bearer $CHLOE_TOKEN" https://chloe.example.com:8080/
 websocat -H "Authorization: Bearer $CHLOE_TOKEN" --binary \
   'wss://chloe.example.com:8080/api/v1/workspace-terminal/acme%2Fweb?cols=120&rows=40'
 ```
+
+### 公開したポート
+
+VM の中で `chloe-ask port publish` で公開したポートは、`url` をブラウザで開くと、Web の画面のログインを通って VM の中のサーバーに届く（[使い方](usage.md#vm-の中のサーバーをブラウザで開く)）。
+公開は VM の中からしかできず、管理 API では一覧と取り消しだけができる。
+
+```sh
+api /api/v1/workspace-ports/acme%2Fweb
+# [{"port":5173,"scheme":"http","url":"https://5173-ws-12.chloe-preview.example.net/","created_at":1792152059}]
+api '/api/v1/workspace-ports/acme%2Fweb?port=5173' -X DELETE   # 204
+```
+
+プロキシのホスト（`url` のホスト）は、管理 API と同じトークンを `Authorization: Bearer` で受ける。
+トークンは VM の中のサーバーに渡さない。
+
+```sh
+curl -H "Authorization: Bearer $CHLOE_TOKEN" https://5173-ws-12.chloe-preview.example.net/
+```
+
+ブラウザで開くと、プロキシのホストは Web の画面の `/api/auth/proxy` へ送り、Web の画面のセッションで一度だけ使えるコードを作って、プロキシのホストの `/__chloe/auth` へ戻す。
+プロキシのホストはコードを、そのホストだけに付く cookie（`chloe_proxy`）に替える。
+この cookie は Web の画面のセッションに結び付いていて、ログアウトや `chloe web revoke` で使えなくなる。
+Web の画面にログインしていなければ、ログインのあと（`/api/auth/continue`）に開こうとしたポートへ戻す。
 
 ### トークン
 

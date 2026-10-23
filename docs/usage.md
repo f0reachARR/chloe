@@ -430,6 +430,40 @@ ssh -N -L 8080:127.0.0.1:3000 chloe@chloe.example.com
 手元から VM の外へ抜ける経路にはならない（VM の中からつなげる宛先にしかつながらない）。
 リモートの転送（`-R`）はまだできない。
 
+## VM の中のサーバーをブラウザで開く
+
+ゲートウェイで有効にしていれば（[インストール](install.md#vm-の中のサーバーを開けるようにする)）、VM の中で動かしている HTTP(S) のサーバーを、SSH のポート転送なしに、スマートフォンのブラウザからでも開ける。
+開けるのは、VM の中で公開したポートだけである。
+
+```sh
+chloe-ask port publish 5173            # URL を出す (https://5173-ws-12.chloe-preview.example.net/)
+chloe-ask port publish 8443 --https    # サーバーが HTTPS で話すとき (証明書は確かめない)
+chloe-ask port list
+chloe-ask port unpublish 5173
+```
+
+URL を開くと、Web の画面のログインを通ってから、VM の中のサーバーに届く。
+開けるのは、そのワークスペースに入れる人だけである。
+管理 API のトークンを `Authorization: Bearer` で付ければ、curl などからも開ける。
+公開は取り消すまで残り、VM が止まっていれば、URL を開いたときに起動する。
+サーバーが動いていなければ 502 になる。
+
+- **`localhost` だけで待ち受けてよい**：ゲートウェイは VM の中から `localhost:<ポート>` につなぐ。`0.0.0.0` で待ち受ける必要はない。
+- **`Host` は `localhost:<ポート>` になる**：開発用のサーバーが知らない `Host` を断らないよう、VM の中で開いたときと同じにする。元のホストは `X-Forwarded-Host` と `X-Forwarded-Proto` で届く。アプリが `Host` から自分の URL を組み立てると、`localhost` の URL になる。
+- **chloe の認証は VM に届かない**：プロキシのホストの cookie（`chloe_proxy`）と、chloe のトークンを付けた `Authorization` は、VM の中のサーバーに渡す前に除く。アプリが自分で付けた cookie はそのまま届く。
+- **ポートごとに別のオリジン**：ホスト名はポートとワークスペースごとに違うので、あるポートのページから、ほかのポートや Web の画面の cookie は読めない。
+- **WebSocket も通る**：開発用のサーバーの HMR なども使える。
+
+Claude Code と Codex には、同じ操作を MCP のツール（`publish_port`）として登録してある。
+エージェントにサーバーを起動させたら、公開して URL を教えるように頼める。
+
+VM の外からは、公開したポートの一覧と取り消しができる（Web の画面のワークスペースのカードにもリンクが出る）。
+
+```sh
+ssh chloe@chloe.example.com chloe ws ports acme/web
+ssh chloe@chloe.example.com chloe ws unpublish acme/web 5173
+```
+
 ## Web の画面
 
 ゲートウェイで Web の画面を有効にしていれば（[インストール](install.md#web-の画面を有効にする)）、ブラウザから、エージェントからの依頼に答え、ワークスペースの状態を見て、ワークスペースの端末を使える。
@@ -446,6 +480,7 @@ ssh chloe@chloe.example.com chloe web revoke 3  # セッションを消す
 
 - **Inbox**：答えを待つ依頼が出ると、開いている画面にすぐ出て知らせる。通信の許可は承認か拒否、質問は選択肢か文で答える。
 - **Workspaces**：ワークスペースごとに、動いているか、エージェントが作業中か、答えを待つ依頼の数を出す。作業中かは、開いたときと読み直したときに VM に尋ねる。
+- **公開したポート**：ワークスペースのカードに、VM の中で公開したポート（[VM の中のサーバーをブラウザで開く](#vm-の中のサーバーをブラウザで開く)）のリンクが出る。× で公開を取り消す。
 - **Terminal**：ワークスペースのカードの Terminal から、そのワークスペースのシェルを開く。SSH で入ったときと同じシェルで、止まっていたワークスペースは起動する。スマートフォンでは、端末の下の列で Esc、Tab、矢印、Ctrl（次に打つ一文字に効く）を打てる。
 
 Web の端末は、SSH と同じく、画面を閉じるか接続が切れるとシェルが終わる（スマートフォンで別のアプリに移ったときも切れることがある）。
@@ -525,6 +560,8 @@ chloe ws policy show NAME                        ワークスペースの規則
 chloe ws policy set NAME                         TOML を標準入力から読む
 chloe ws policy rm NAME
 chloe ws log NAME [--lines N] [--blocked]        HTTP の要求の記録の末尾
+chloe ws ports NAME                              VM の中で公開したポートと URL
+chloe ws unpublish NAME PORT                     ポートの公開を取り消す
 chloe ws stop NAME
 chloe ws rm NAME [--disks]                      --disks ならディスクも消す
 chloe secret list [--owner OWNER]
