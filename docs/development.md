@@ -16,7 +16,8 @@ cargo test --workspace
 
 ## Web の画面
 
-Web の画面は `web/` にある（React、Mantine、TanStack Router と TanStack Query、Vite、pnpm）。
+Web の画面は `web/` にある。
+構成、依存の向き、状態の置き場所、安全のための決まりは [Web の画面の方針](web.md) にある。
 Node.js と pnpm は mise などで入れる（版は `web/package.json` の `packageManager`）。
 
 ```sh
@@ -34,31 +35,6 @@ pnpm build          # web/dist に書き出す
 GitHub のログインのコールバックも Vite を通ってゲートウェイに届き、cookie と `Origin` の確認もそのまま働く。
 GitHub App を使わないときは、`chloe web login` が出す URL でログインする。
 
-### 構成
-
-```text
-web/src/
-  app/           起動、ルーター、機能の一覧 (features.ts)、枠 (ヘッダーとナビゲーション)
-  routes/        ルートのファイル (TanStack Router。routeTree.gen.ts はこれから作られる)
-  features/<機能>/
-    index.ts     入口。ほかから使ってよいものだけを書き出す
-    feature.ts   ナビゲーションの項目と、出来事 (SSE) の処理の申告
-    api.ts       この機能の問い合わせ (queryOptions) と読み直し
-    *.tsx        画面と部品 (*.test.tsx はそのテスト)
-  shared/        API のクライアントと型、出来事の配り手、機能をまたぐ部品と関数
-  test/          テストの準備 (MSW の偽の API、描き方、データ)
-```
-
-依存の向きは、`app` と `routes` → 機能の入口（`@/features/<機能>`）→ `shared` に限る。
-機能どうしは互いを使わず、要るものは `shared` に上げる。
-この向きは `pnpm lint` が確かめる（`.oxlintrc.json` の `no-restricted-imports`）。
-
-ルートのファイルは薄く保ち、検索パラメーターの検証（zod）、読み込み（`loader` で TanStack Query のキャッシュを満たす）、機能の画面を描くことだけを書く。
-画面の部品は、検索パラメーターを引数で受け取り、ルーターに頼らずにテストできるようにする。
-
-出来事（`/api/v1/events`）は、枠が一本の接続で受け、各機能が `feature.ts` で申告した処理に、出来事の名前ごとに渡す。
-`resync` は、つながったときと取りこぼしたときに呼ぶので、出来事を見ずに読み直す。
-
 ### 機能を足す
 
 1. `web/src/features/<機能>/` を作り、`index.ts` と、要れば `feature.ts`（ナビゲーションの項目、出来事の処理）を書く。
@@ -67,7 +43,6 @@ web/src/
 
 ### API の型とテスト
 
-画面の API の型は、ゲートウェイが出す OpenAPI のスペック（`web/openapi.json`）から作る。
 管理 API を変えたら、スペックを書き出し直して型を作り直す。
 `cargo test` は、`web/openapi.json` がコードとずれていると失敗する。
 
@@ -76,9 +51,8 @@ cargo run -p chloe-gateway -- openapi > web/openapi.json
 (cd web && pnpm api)
 ```
 
-テストは Vitest と Testing Library で書き、API は MSW の偽物（`web/src/test/msw.ts`）で返す。
-偽の API の手続きは `openapi-msw` で書くので、スペックにないパスや、型の合わない応答は `pnpm typecheck` で落ちる。
-本物のゲートウェイを相手にする確認は `mvp-test.sh` で行う。
+テストの偽の API は `web/src/test/msw.ts` の `http` で書く。
+スペックにないパスや、型の合わない応答は `pnpm typecheck` で落ちる。
 
 ## 確認の二層
 

@@ -38,7 +38,7 @@
                   "@/features",
                   "@/features/*"
                 ],
-                "message": "shared \u306f\u6a5f\u80fd\u3001\u67a0\u3001\u30eb\u30fc\u30c8\u3092\u4f7f\u308f\u306a\u3044 (docs/development.md \u306e Web \u306e\u753b\u9762)"
+                "message": "shared は機能、枠、ルートを使わない (docs/web.md)"
               }
             ]
           }
@@ -54,11 +54,11 @@
             "patterns": [
               {
                 "group": ["@/app", "@/app/*", "@/routes", "@/routes/*"],
-                "message": "\u6a5f\u80fd\u306f\u67a0\u3068\u30eb\u30fc\u30c8\u3092\u4f7f\u308f\u306a\u3044"
+                "message": "機能は枠とルートを使わない (docs/web.md)"
               },
               {
                 "group": ["@/features", "@/features/*", "../../*"],
-                "message": "\u6a5f\u80fd\u3069\u3046\u3057\u306f\u4e92\u3044\u3092\u4f7f\u308f\u306a\u3044\u3002\u8981\u308b\u3082\u306e\u306f shared \u306b\u4e0a\u3052\u308b (\u81ea\u5206\u306e\u6a5f\u80fd\u306e\u4e2d\u306f\u76f8\u5bfe\u30d1\u30b9\u3067\u66f8\u304f)"
+                "message": "機能どうしは互いを使わない。要るものは shared に上げる (自分の機能の中は相対パスで書く) (docs/web.md)"
               }
             ]
           }
@@ -74,7 +74,7 @@
             "patterns": [
               {
                 "group": ["@/features/*/*", "../features/*/*"],
-                "message": "\u6a5f\u80fd\u306f\u5165\u53e3 (@/features/<\u6a5f\u80fd>) \u304b\u3089\u4f7f\u3046"
+                "message": "機能は入口 (@/features/<機能>) から使う (docs/web.md)"
               }
             ]
           }

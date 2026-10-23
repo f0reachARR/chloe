@@ -98,6 +98,7 @@ ssh -p 2222 <GitHub のログイン名>@127.0.0.1
 | [管理 API](docs/api.md) | HTTP(S) の API とトークン |
 | [GitHub App の準備](docs/github-app.md) | アプリの登録と権限 |
 | [開発](docs/development.md) | クレートの構成と確認の回し方 |
+| [Web の画面の方針](docs/web.md) | Web の画面の技術、構成、依存の向き、安全のための決まり |
 | [調査と計画](docs/research-and-plan.md) | 設計の前提と、ほかの選択肢の比較 |
 | [OpenShell の調査](docs/research-openshell.md) | NVIDIA OpenShell に委ねられる範囲と、取り入れる候補 |
 | [実装手順](docs/implementation-steps.md) | 段階ごとの計画と結果 |
