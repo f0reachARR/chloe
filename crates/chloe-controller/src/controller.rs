@@ -707,6 +707,16 @@ impl<B: RunnerBackend> Controller<B> {
         });
     }
 
+    /// 動いているワークスペースの VM に、作業中のエージェントの印を尋ねる。`wait` までに
+    /// 答えがなければ `None`。止まっているワークスペースには使わない (起動を待たないため)。
+    pub async fn agent_activity(&self, workspace_id: i64, wait: Duration) -> Option<Vec<String>> {
+        let key = format!("ws-{workspace_id}");
+        tokio::time::timeout(wait, self.query_activity(&key))
+            .await
+            .ok()?
+            .ok()
+    }
+
     /// VM の中で作業中のエージェントの印。尋ねられなければ作業中のものはないとみなす。
     async fn activity(&self, workspace_id: i64, state: &RunnerState) -> Vec<String> {
         if state.lifecycle.lock().await.is_none() {
