@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -39,6 +40,16 @@ impl Ask {
     pub fn pending(&self) -> bool {
         self.status == "pending"
     }
+}
+
+/// VM の中で公開したポート。
+#[derive(Debug, Clone, Deserialize)]
+pub struct Port {
+    pub port: u16,
+    pub scheme: String,
+    /// ブラウザで開く URL。ゲートウェイにプロキシのドメインがなければない。
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -81,6 +92,23 @@ impl Client {
         self.call("DELETE", &format!("/v1/asks/{id}"), None).await
     }
 
+    /// ポートを公開する。公開してあれば、話し方 (`https`) を変える。
+    pub async fn publish(&self, port: u16, https: bool) -> Result<Port> {
+        let scheme = if https { "https" } else { "http" };
+        let body = serde_json::json!({ "port": port, "scheme": scheme });
+        self.call("POST", "/v1/ports", Some(&body)).await
+    }
+
+    pub async fn ports(&self) -> Result<Vec<Port>> {
+        self.call("GET", "/v1/ports", None).await
+    }
+
+    pub async fn unpublish(&self, port: u16) -> Result<()> {
+        self.call::<serde_json::Value>("DELETE", &format!("/v1/ports/{port}"), None)
+            .await
+            .map(drop)
+    }
+
     /// 答えが来るまで状態を見直す。`limit` を過ぎたら、答えを待つままの依頼を返す。
     /// 状態を見るのに失敗しても (プロキシの入れ替えなど)、続けて試す。
     pub async fn wait(&self, id: i64, limit: Option<Duration>) -> Result<Ask> {
@@ -110,12 +138,12 @@ impl Client {
         }
     }
 
-    async fn call(
+    async fn call<T: DeserializeOwned>(
         &self,
         method: &str,
         path: &str,
         body: Option<&serde_json::Value>,
-    ) -> Result<Ask> {
+    ) -> Result<T> {
         let (status, body) = tokio::time::timeout(REQUEST_TIMEOUT, self.send(method, path, body))
             .await
             .with_context(|| format!("{ASK_HOST} did not answer in time"))??;

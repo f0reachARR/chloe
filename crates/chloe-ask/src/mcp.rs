@@ -1,10 +1,11 @@
 //! 標準入出力の MCP のサーバー (公式の Rust SDK の `rmcp` で書く)。
 //!
-//! ツールは三つ。
+//! ツールは四つ。
 //!
 //! - `request_network_access`：宛先への通信の許可を頼む。
 //! - `ask_user`：人に質問する。
 //! - `wait_for_answer`：答えを待つ依頼を待ち直す。
+//! - `publish_port`：VM の中の HTTP(S) のサーバーを公開し、人がブラウザで開く URL を返す。
 //!
 //! 依頼のツールは、決めた時間 (`--wait`) だけ答えを待ち、それまでに答えがなければ ID と
 //! `pending` を返す。クライアントのツールの待ち時間に当たらないようにするためである。
@@ -32,7 +33,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
 const INSTRUCTIONS: &str = "This VM is a chloe workspace. Outbound HTTP(S) is limited to an allowlist, and a person may not be watching the terminal. \
 A request to a host outside the allowlist is refused with 403 \"blocked by chloe\", and other ports than 80 and 443 are refused. When you need such a host, call request_network_access. \
 When you need a decision or information from a person, call ask_user instead of stopping. \
-Both wait for the answer; if they return pending, call wait_for_answer with the id to keep waiting.";
+Both wait for the answer; if they return pending, call wait_for_answer with the id to keep waiting. \
+When you start an HTTP(S) server the person should see (a dev server, a preview), call publish_port and tell them the URL.";
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct NetworkParams {
@@ -63,6 +65,15 @@ struct QuestionParams {
 struct WaitParams {
     /// The id of the ask that returned pending.
     id: i64,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct PortParams {
+    /// The TCP port the server listens on in this VM.
+    port: u16,
+    /// The server speaks HTTPS instead of HTTP (its certificate is not checked).
+    #[serde(default)]
+    https: bool,
 }
 
 #[derive(Clone)]
@@ -123,6 +134,25 @@ impl Server {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         self.ask(None, Some(params.id), context).await
+    }
+
+    #[tool(
+        description = "Publish an HTTP(S) server running in this VM, so that workspace members can open it in their browser after logging in to chloe. Returns the URL; tell it to the person. The server may listen on localhost. Publishing again changes HTTP/HTTPS."
+    )]
+    async fn publish_port(&self, Parameters(params): Parameters<PortParams>) -> CallToolResult {
+        match self.client.publish(params.port, params.https).await {
+            Ok(port) => match port.url {
+                Some(url) => CallToolResult::success(vec![ContentBlock::text(format!(
+                    "published port {}: {url}",
+                    port.port
+                ))]),
+                None => result_error(format!(
+                    "published port {}, but chloe has no proxy domain configured, so there is no URL to open it",
+                    port.port
+                )),
+            },
+            Err(error) => result_error(format!("chloe: {error:#}")),
+        }
     }
 }
 
@@ -306,7 +336,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["ask_user", "request_network_access", "wait_for_answer"]
+            [
+                "ask_user",
+                "publish_port",
+                "request_network_access",
+                "wait_for_answer"
+            ]
         );
 
         let result = call(
