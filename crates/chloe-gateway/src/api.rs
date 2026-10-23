@@ -49,15 +49,19 @@ use axum::{Extension, Json, Router};
 use chloe_controller::asks::AskEvent;
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
+use chloe_controller::store::ApiToken;
 use chloe_controller::workspace::{DiskSizes, MachineSize, RootMode};
 use chloe_secrets::Owner;
 use futures::Stream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::info;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::access::personal;
-use crate::ops::{self, owner_arg, owner_or_personal, parse_owner};
+use crate::ops::{
+    self, AskInfo, SecretView, WorkspaceInfo, owner_arg, owner_or_personal, parse_owner,
+};
 use crate::session::Shared;
 use crate::web;
 
@@ -136,10 +140,113 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .with_state(shared)
 }
 
+/// 管理 API とログインの OpenAPI のスペック。`chloe-gateway openapi` で書き出し、画面の型を作る
+/// (`web/openapi.json`)。
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    info(title = "chloe", description = "chloe のゲートウェイの管理 API"),
+    paths(
+        me, events, list_workspaces, create_workspace, show_workspace, update_workspace,
+        remove_workspace, workspace_requests, list_secrets, show_secret, set_secret, remove_secret,
+        show_workspace_policy, set_workspace_policy, remove_workspace_policy, show_own_policy,
+        set_own_policy, remove_own_policy, show_policy, set_policy, remove_policy, list_tokens,
+        create_token, revoke_token, list_asks, show_ask, answer_ask,
+        web::methods, web::github_start, web::link, web::logout,
+    ),
+    components(schemas(AskEventData)),
+    modifiers(&Security),
+    security(("token" = []), ("session" = [])),
+)]
+pub struct ApiDoc;
+
+/// 書き出すスペック (整形した JSON)。
+pub fn openapi_json() -> String {
+    use utoipa::OpenApi as _;
+    ApiDoc::openapi()
+        .to_pretty_json()
+        .expect("the spec serializes")
+}
+
+/// トークン (`Authorization: Bearer`) とセッションの cookie の二つの認証。
+struct Security;
+
+impl utoipa::Modify for Security {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{
+            ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme,
+        };
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "token",
+            SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+        );
+        components.add_security_scheme(
+            "session",
+            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new("chloe_session"))),
+        );
+    }
+}
+
+/// 誤りの応答。
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ErrorBody {
+    error: String,
+}
+
+/// 呼び出し元。トークンで呼べば `token`、Web の画面のセッションなら `session` に ID が入る。
+#[derive(Serialize, ToSchema)]
+pub(crate) struct Me {
+    login: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<i64>,
+}
+
+/// 依頼の出来事 (`/api/v1/events` の `ask` のデータ)。
+#[derive(Serialize, ToSchema)]
+pub(crate) struct AskEventData {
+    #[serde(rename = "type")]
+    kind: AskEventKind,
+    /// 依頼の ID。
+    id: i64,
+    workspace: String,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AskEventKind {
+    /// 依頼が出た。
+    Created,
+    /// 答えたか、取り下げた。
+    Resolved,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SecretNames {
+    owner: String,
+    names: Vec<String>,
+}
+
+/// 設定を送り直した、動いているランナーの数。
+#[derive(Serialize, ToSchema)]
+pub(crate) struct UpdatedRunners {
+    updated_runners: usize,
+}
+
+/// 作ったトークン。値はこのときにしか返さない。
+#[derive(Serialize, ToSchema)]
+pub(crate) struct CreatedToken {
+    id: i64,
+    token: String,
+}
+
 pub(crate) fn error(status: StatusCode, message: impl std::fmt::Display) -> Response {
     (
         status,
-        Json(serde_json::json!({ "error": message.to_string() })),
+        Json(ErrorBody {
+            error: message.to_string(),
+        }),
     )
         .into_response()
 }
@@ -254,10 +361,16 @@ async fn authenticate(
     response
 }
 
+#[utoipa::path(get, path = "/api/v1/me", tag = "me", responses((status = 200, body = Me), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn me(Extension(caller): Extension<Caller>) -> Response {
-    Json(match caller.via {
-        Via::Token(id) => serde_json::json!({ "login": caller.login, "token": id }),
-        Via::Session(id) => serde_json::json!({ "login": caller.login, "session": id }),
+    let (token, session) = match caller.via {
+        Via::Token(id) => (Some(id), None),
+        Via::Session(id) => (None, Some(id)),
+    };
+    Json(Me {
+        login: caller.login,
+        token,
+        session,
     })
     .into_response()
 }
@@ -268,6 +381,7 @@ const EVENTS_LIFETIME: Duration = Duration::from_secs(15 * 60);
 
 /// 依頼が出た、答えた (取り下げた) という出来事を SSE で流す。呼び出し元が入れる
 /// ワークスペースの出来事だけを送る。取りこぼしたら `lagged` を送るので、一覧を読み直す。
+#[utoipa::path(get, path = "/api/v1/events", tag = "asks", description = "依頼の出来事を SSE (`text/event-stream`) で流す。出来事の名前は `ask` (データは `AskEventData`) と、取りこぼしたときの `lagged`。15 分で閉じるので、つなぎ直す。", responses((status = 200, description = "SSE", content_type = "text/event-stream", body = AskEventData), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn events(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -311,8 +425,8 @@ fn ask_events(
 /// 利用者が入れるワークスペースの出来事なら、送る JSON を返す。
 async fn visible_event(shared: &Shared, login: &str, event: &AskEvent) -> Option<String> {
     let (kind, workspace_id, id) = match *event {
-        AskEvent::Created { workspace_id, id } => ("created", workspace_id, id),
-        AskEvent::Resolved { workspace_id, id } => ("resolved", workspace_id, id),
+        AskEvent::Created { workspace_id, id } => (AskEventKind::Created, workspace_id, id),
+        AskEvent::Resolved { workspace_id, id } => (AskEventKind::Resolved, workspace_id, id),
     };
     let ws = shared
         .controller
@@ -324,16 +438,23 @@ async fn visible_event(shared: &Shared, login: &str, event: &AskEvent) -> Option
     if !shared.can_access(login, &ws.owner).await.unwrap_or(false) {
         return None;
     }
-    Some(serde_json::json!({ "type": kind, "id": id, "workspace": ws.display_name() }).to_string())
+    let data = AskEventData {
+        kind,
+        id,
+        workspace: ws.display_name(),
+    };
+    serde_json::to_string(&data).ok()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct StatusQuery {
     /// 動いているワークスペースの VM に、作業中かを尋ねる。
     #[serde(default)]
     status: bool,
 }
 
+#[utoipa::path(get, path = "/api/v1/workspaces", tag = "workspaces", params(StatusQuery), responses((status = 200, body = Vec<WorkspaceInfo>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn list_workspaces(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -342,7 +463,7 @@ async fn list_workspaces(
     Ok(Json(ops::list_workspaces(&shared, &caller.login, query.status).await?).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct CreateWorkspace {
     name: String,
@@ -361,6 +482,7 @@ struct CreateWorkspace {
     idle_timeout: Option<String>,
 }
 
+#[utoipa::path(post, path = "/api/v1/workspaces", tag = "workspaces", request_body = CreateWorkspace, responses((status = 201, body = WorkspaceInfo), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn create_workspace(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -385,6 +507,7 @@ async fn create_workspace(
     Ok((StatusCode::CREATED, Json(ws)).into_response())
 }
 
+#[utoipa::path(get, path = "/api/v1/workspaces/{name}", tag = "workspaces", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)"), StatusQuery), responses((status = 200, body = WorkspaceInfo), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn show_workspace(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -395,7 +518,7 @@ async fn show_workspace(
     Ok(Json(info).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct UpdateWorkspace {
     #[serde(default)]
@@ -418,6 +541,7 @@ struct UpdateWorkspace {
     running: Option<bool>,
 }
 
+#[utoipa::path(patch, path = "/api/v1/workspaces/{name}", tag = "workspaces", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), request_body = UpdateWorkspace, responses((status = 200, body = WorkspaceInfo), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn update_workspace(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -461,13 +585,15 @@ async fn update_workspace(
     Ok(Json(ops::workspace_info(&shared, &caller.login, &name).await?).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct RemoveQuery {
     /// ランナーのホストにあるディスクも消す。
     #[serde(default)]
     disks: bool,
 }
 
+#[utoipa::path(delete, path = "/api/v1/workspaces/{name}", tag = "workspaces", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)"), RemoveQuery), responses((status = 204, description = "消した"), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn remove_workspace(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -478,12 +604,14 @@ async fn remove_workspace(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct OwnerQuery {
     #[serde(default)]
     owner: Option<String>,
 }
 
+#[utoipa::path(get, path = "/api/v1/secrets", tag = "secrets", params(OwnerQuery), responses((status = 200, body = SecretNames), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn list_secrets(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -491,9 +619,14 @@ async fn list_secrets(
 ) -> Result<Response, ops::Error> {
     let owner = owner_or_personal(&caller.login, query.owner.as_deref())?;
     let names = ops::list_secrets(&shared, &caller.login, &owner).await?;
-    Ok(Json(serde_json::json!({ "owner": owner_arg(&owner), "names": names })).into_response())
+    Ok(Json(SecretNames {
+        owner: owner_arg(&owner),
+        names,
+    })
+    .into_response())
 }
 
+#[utoipa::path(get, path = "/api/v1/secrets/{name}", tag = "secrets", params(("name" = String, Path), OwnerQuery), responses((status = 200, body = SecretView), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn show_secret(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -505,6 +638,7 @@ async fn show_secret(
     Ok(Json(view).into_response())
 }
 
+#[utoipa::path(put, path = "/api/v1/secrets/{name}", tag = "secrets", description = "Web の画面のセッションからは使えない。", params(("name" = String, Path), OwnerQuery), request_body(content = Object, description = "`{\"value\": \"...\"}` か、定義と値"), responses((status = 204, description = "登録した"), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn set_secret(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -518,6 +652,7 @@ async fn set_secret(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[utoipa::path(delete, path = "/api/v1/secrets/{name}", tag = "secrets", params(("name" = String, Path), OwnerQuery), responses((status = 204, description = "消した"), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn remove_secret(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -529,6 +664,7 @@ async fn remove_secret(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[utoipa::path(get, path = "/api/v1/policies/{owner}", tag = "policies", params(("owner" = String, Path, description = "Organization (`acme`) か team (`acme/dev`)。`/` は `%2F` にする")), responses((status = 200, description = "設定", body = Object), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn show_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -537,6 +673,7 @@ async fn show_policy(
     respond_policy(&shared, &caller, parse_owner(&owner)?).await
 }
 
+#[utoipa::path(put, path = "/api/v1/policies/{owner}", tag = "policies", params(("owner" = String, Path, description = "Organization (`acme`) か team (`acme/dev`)。`/` は `%2F` にする")), request_body(content = Object, description = "設定"), responses((status = 200, body = UpdatedRunners), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn set_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -546,6 +683,7 @@ async fn set_policy(
     save_policy(&shared, &caller, parse_owner(&owner)?, &body).await
 }
 
+#[utoipa::path(delete, path = "/api/v1/policies/{owner}", tag = "policies", params(("owner" = String, Path, description = "Organization (`acme`) か team (`acme/dev`)。`/` は `%2F` にする")), responses((status = 200, body = UpdatedRunners), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn remove_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -554,11 +692,13 @@ async fn remove_policy(
     drop_policy(&shared, &caller, parse_owner(&owner)?).await
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct RequestsQuery {
     lines: Option<usize>,
 }
 
+#[utoipa::path(get, path = "/api/v1/workspace-requests/{name}", tag = "workspaces", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)"), RequestsQuery), responses((status = 200, description = "HTTP の要求の記録 (古い順)", body = Vec<Object>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn workspace_requests(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -569,12 +709,14 @@ async fn workspace_requests(
     Ok(Json(records).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct AsksQuery {
     #[serde(default)]
     all: bool,
 }
 
+#[utoipa::path(get, path = "/api/v1/asks", tag = "asks", params(AsksQuery), responses((status = 200, body = Vec<AskInfo>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn list_asks(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -584,6 +726,7 @@ async fn list_asks(
     Ok(Json(asks).into_response())
 }
 
+#[utoipa::path(get, path = "/api/v1/asks/{id}", tag = "asks", params(("id" = i64, Path)), responses((status = 200, body = AskInfo), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn show_ask(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -593,7 +736,7 @@ async fn show_ask(
 }
 
 /// 依頼への答え。`allow`、`deny`、`answer` のどれか一つを書く。
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct AnswerBody {
     #[serde(default)]
@@ -605,6 +748,7 @@ struct AnswerBody {
     answer: Option<String>,
 }
 
+#[utoipa::path(post, path = "/api/v1/asks/{id}/answer", tag = "asks", params(("id" = i64, Path)), request_body = AnswerBody, responses((status = 200, body = AskInfo), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn answer_ask(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -624,6 +768,7 @@ async fn answer_ask(
     Ok(Json(ops::answer_ask(&shared, &caller.login, id, reply).await?).into_response())
 }
 
+#[utoipa::path(get, path = "/api/v1/workspace-policies/{name}", tag = "policies", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), responses((status = 200, description = "ワークスペースの規則", body = Object), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn show_workspace_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -638,6 +783,7 @@ async fn show_workspace_policy(
     }
 }
 
+#[utoipa::path(put, path = "/api/v1/workspace-policies/{name}", tag = "policies", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), request_body(content = Object, description = "ワークスペースの規則"), responses((status = 200, body = UpdatedRunners), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn set_workspace_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -650,9 +796,13 @@ async fn set_workspace_policy(
     let policy: WorkspacePolicy = serde_json::from_slice(&body)
         .map_err(|e| ops::Error::Invalid(format!("invalid rules: {e}")))?;
     let updated = ops::set_workspace_policy(&shared, &caller.login, &ws, &policy).await?;
-    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
+    Ok(Json(UpdatedRunners {
+        updated_runners: updated,
+    })
+    .into_response())
 }
 
+#[utoipa::path(delete, path = "/api/v1/workspace-policies/{name}", tag = "policies", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), responses((status = 200, body = UpdatedRunners), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn remove_workspace_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -660,9 +810,13 @@ async fn remove_workspace_policy(
 ) -> Result<Response, ops::Error> {
     let ws = ops::find_workspace(&shared, &caller.login, &name).await?;
     let updated = ops::remove_workspace_policy(&shared, &caller.login, &ws).await?;
-    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
+    Ok(Json(UpdatedRunners {
+        updated_runners: updated,
+    })
+    .into_response())
 }
 
+#[utoipa::path(get, path = "/api/v1/policy", tag = "policies", responses((status = 200, description = "個人の設定", body = Object), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn show_own_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -670,6 +824,7 @@ async fn show_own_policy(
     respond_policy(&shared, &caller, personal(&caller.login)).await
 }
 
+#[utoipa::path(put, path = "/api/v1/policy", tag = "policies", request_body(content = Object, description = "個人の設定"), responses((status = 200, body = UpdatedRunners), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn set_own_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -678,6 +833,7 @@ async fn set_own_policy(
     save_policy(&shared, &caller, personal(&caller.login), &body).await
 }
 
+#[utoipa::path(delete, path = "/api/v1/policy", tag = "policies", responses((status = 200, body = UpdatedRunners), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn remove_own_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -710,7 +866,10 @@ async fn save_policy(
     let layer: PolicyLayer = serde_json::from_slice(body)
         .map_err(|e| ops::Error::Invalid(format!("invalid settings: {e}")))?;
     let updated = ops::set_policy(shared, &caller.login, &owner, &layer).await?;
-    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
+    Ok(Json(UpdatedRunners {
+        updated_runners: updated,
+    })
+    .into_response())
 }
 
 async fn drop_policy(
@@ -719,9 +878,13 @@ async fn drop_policy(
     owner: Owner,
 ) -> Result<Response, ops::Error> {
     let updated = ops::remove_policy(shared, &caller.login, &owner).await?;
-    Ok(Json(serde_json::json!({ "updated_runners": updated })).into_response())
+    Ok(Json(UpdatedRunners {
+        updated_runners: updated,
+    })
+    .into_response())
 }
 
+#[utoipa::path(get, path = "/api/v1/tokens", tag = "tokens", responses((status = 200, body = Vec<ApiToken>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn list_tokens(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -729,7 +892,7 @@ async fn list_tokens(
     Ok(Json(ops::list_tokens(&shared, &caller.login).await?).into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct CreateToken {
     name: String,
@@ -738,6 +901,7 @@ struct CreateToken {
     expires: Option<String>,
 }
 
+#[utoipa::path(post, path = "/api/v1/tokens", tag = "tokens", description = "Web の画面のセッションからは使えない。", request_body = CreateToken, responses((status = 201, body = CreatedToken), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn create_token(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -751,13 +915,10 @@ async fn create_token(
         .map(ops::parse_duration)
         .transpose()?;
     let (id, token) = ops::create_token(&shared, &caller.login, &body.name, ttl).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": id, "token": token })),
-    )
-        .into_response())
+    Ok((StatusCode::CREATED, Json(CreatedToken { id, token })).into_response())
 }
 
+#[utoipa::path(delete, path = "/api/v1/tokens/{id}", tag = "tokens", params(("id" = i64, Path)), responses((status = 204, description = "失効させた"), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn revoke_token(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -765,4 +926,18 @@ async fn revoke_token(
 ) -> Result<Response, ops::Error> {
     ops::revoke_token(&shared, &caller.login, id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    /// リポジトリに置いたスペック (画面の型の元) が、コードと同じか。
+    #[test]
+    fn openapi_spec_is_up_to_date() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/openapi.json");
+        let saved = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            saved.trim_end() == super::openapi_json(),
+            "web/openapi.json is out of date; run `cargo run -p chloe-gateway -- openapi > web/openapi.json`"
+        );
+    }
 }

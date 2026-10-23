@@ -783,7 +783,7 @@ fn new_placeholder(template: &str) -> String {
 }
 
 /// 管理 API のトークン (値は含まない)。時刻は UNIX 時刻の秒。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub struct ApiToken {
     pub id: i64,
     pub login: String,

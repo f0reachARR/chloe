@@ -35,7 +35,7 @@ const MAX_METHODS: usize = 10;
 const MAX_ANSWER: usize = 4000;
 
 /// 依頼の中身。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum AskBody {
     /// 宛先への通信の許可。メソッドとパスは空ならすべて。
@@ -84,7 +84,7 @@ impl AskBody {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AskStatus {
     Pending,
@@ -127,7 +127,7 @@ impl std::fmt::Display for AskStatus {
 }
 
 /// 依頼。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct Ask {
     pub id: i64,
     #[serde(skip)]

@@ -59,6 +59,7 @@ tower-http = { version = "0.6.11", features = ["fs", "set-header"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 tui-input = "0.15.5"
+utoipa = "6.0.0"
 x509-parser = "0.18"
 
 [workspace.lints.rust]

@@ -27,11 +27,12 @@ use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use chloe_controller::store::random_token;
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
+use utoipa::ToSchema;
 
-use crate::api::error;
+use crate::api::{ErrorBody, error};
 use crate::config::ApiConfig;
 use crate::session::Shared;
 
@@ -197,9 +198,19 @@ async fn static_headers(request: Request, next: Next) -> Response {
     response
 }
 
-async fn methods(State(shared): State<Arc<Shared>>) -> Response {
+/// 使えるログインの方法。
+#[derive(Serialize, ToSchema)]
+pub(crate) struct AuthMethods {
+    /// GitHub のログイン (`/api/auth/github`) を使えるか。
+    github: bool,
+    /// `chloe web login` の URL でログインできるか (いつも使える)。
+    link: bool,
+}
+
+#[utoipa::path(get, path = "/api/auth/methods", tag = "auth", security(()), responses((status = 200, body = AuthMethods)))]
+pub(crate) async fn methods(State(shared): State<Arc<Shared>>) -> Response {
     let github = shared.github.as_ref().is_some_and(|g| g.has_web_flow());
-    Json(serde_json::json!({ "github": github, "link": true })).into_response()
+    Json(AuthMethods { github, link: true }).into_response()
 }
 
 /// ログインの画面に戻して、失敗を伝える。
@@ -246,7 +257,8 @@ fn github_unavailable() -> Response {
     error(StatusCode::NOT_FOUND, "GitHub sign-in is not set up")
 }
 
-async fn github_start(State(shared): State<Arc<Shared>>) -> Response {
+#[utoipa::path(get, path = "/api/auth/github", tag = "auth", security(()), description = "ブラウザで開く。GitHub の承認へ送り、戻ったら `/api/auth/github/callback` がログインして `/` へ送る (失敗は `/login?error=...`)。", responses((status = 303, description = "GitHub の承認へ送る"), (status = "4XX", description = "誤り", body = ErrorBody)))]
+pub(crate) async fn github_start(State(shared): State<Arc<Shared>>) -> Response {
     let (Some(web), Some(github)) = (WebConfig::of(&shared), shared.github.as_ref()) else {
         return github_unavailable();
     };
@@ -317,14 +329,15 @@ async fn github_callback(
     response
 }
 
-#[derive(Deserialize)]
-struct LinkCode {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct LinkCode {
     code: String,
 }
 
 /// `chloe web login` のコードでログインする。画面は、コードの付いた URL を開いただけでは
 /// 呼ばず、ボタンを押してから呼ぶ (リンクのプレビューを作るボットに使い切られないように)。
-async fn link(
+#[utoipa::path(post, path = "/api/auth/link", tag = "auth", security(()), request_body = LinkCode, responses((status = 204, description = "ログインした (セッションの cookie を渡す)"), (status = "4XX", description = "誤り", body = ErrorBody)))]
+pub(crate) async fn link(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
     Json(body): Json<LinkCode>,
@@ -359,7 +372,8 @@ async fn link(
     }
 }
 
-async fn logout(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+#[utoipa::path(post, path = "/api/auth/logout", tag = "auth", responses((status = 204, description = "ログアウトした"), (status = "4XX", description = "誤り", body = ErrorBody)))]
+pub(crate) async fn logout(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
     let Some(web) = WebConfig::of(&shared) else {
         return StatusCode::NOT_FOUND.into_response();
     };

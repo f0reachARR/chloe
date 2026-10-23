@@ -72,7 +72,7 @@ impl From<chloe_secrets::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct WorkspaceInfo {
     pub name: String,
     pub root: RootMode,
@@ -89,9 +89,10 @@ pub struct WorkspaceInfo {
     pub idle_timeout_secs: Option<u64>,
     /// 答えを待つ、エージェントからの依頼の数。
     pub pending_asks: usize,
-    /// 作業中のエージェントの印。尋ねたときだけ (`Some`) 返す。止まっていれば空、VM が
-    /// 答えなければ `Some(None)` (JSON の `null`)。
+    /// 作業中のエージェントの印。VM に尋ねたとき (`status=true`) だけ返す。止まっていれば空、
+    /// VM が答えなければ `null`。
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Vec<String>>, nullable)]
     pub busy: Option<Option<Vec<String>>>,
 }
 
@@ -420,11 +421,13 @@ pub async fn check_secret_manager(shared: &Shared, login: &str, owner: &Owner) -
 }
 
 /// 登録したシークレットの定義。組み込みの種類なら `builtin` が真になる。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SecretView {
     pub name: String,
     pub owner: String,
     pub builtin: bool,
+    /// シークレットの定義 (`chloe secret set --spec` と同じ形を JSON にしたもの。値は含まない)。
+    #[schema(value_type = Object)]
     pub spec: SecretSpec,
 }
 
@@ -1119,7 +1122,7 @@ pub async fn remove_ssh_key(shared: &Shared, login: &str, fingerprint: &str) -> 
 }
 
 /// エージェントからの依頼と、そのワークスペース。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AskInfo {
     pub workspace: String,
     #[serde(flatten)]

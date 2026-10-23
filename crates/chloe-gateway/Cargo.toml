@@ -38,3 +38,4 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tui-input.workspace = true
+utoipa.workspace = true
