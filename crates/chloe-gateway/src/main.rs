@@ -14,6 +14,7 @@ mod device_flow;
 mod github_token;
 mod internal;
 mod ops;
+mod proxy;
 mod session;
 mod terminal;
 mod tui;
@@ -323,6 +324,10 @@ async fn build_controller(
     )
     .with_disks(config.disks)
     .with_machine(config.machine);
+    let controller = match config.api.as_ref().and_then(|a| a.proxy_url.as_deref()) {
+        Some(url) => controller.with_proxy_base(chloe_controller::ports::ProxyBase::parse(url)?),
+        None => controller,
+    };
     Ok((controller, secrets, cluster))
 }
 
@@ -330,7 +335,13 @@ async fn build_controller(
 async fn start_api(shared: Arc<Shared>, config: &config::ApiConfig) -> Result<()> {
     web::WebConfig::check(config)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    let router = api::router(shared.clone()).merge(web::router(shared));
+    // プロキシのホストへの要求は、管理 API と画面の経路より先に引き取る。
+    let router = axum::Router::new()
+        .fallback_service(api::router(shared.clone()).merge(web::router(shared.clone())))
+        .layer(axum::middleware::from_fn_with_state(
+            shared,
+            proxy::dispatch,
+        ));
     match (&config.tls_cert, &config.tls_key) {
         (Some(cert), Some(key)) => {
             let tls = chloe_mtls::tls_server_config(
