@@ -231,8 +231,14 @@ Firecracker はホストの CPU とメモリを超えて VM に割り当てら�
 
 | 項目 | 既定 | 内容 |
 | --- | --- | --- |
-| `listen` | （必須） | 管理 API の待ち受け |
+| `listen` | （必須） | 管理 API と Web の画面の待ち受け |
 | `tls_cert`、`tls_key` | なし | TLS の証明書と鍵（PEM）。どちらも書けば HTTPS、どちらもなければ HTTP |
+| `public_url` | なし | Web の画面をブラウザで開く URL（`https://chloe.example.com`。リバースプロキシを置くならその URL）。書くと Web の画面のログインを受け付ける。パスは書けない |
+| `web_root` | なし | Web の画面のファイル（deb では `/usr/share/chloe/web`）。なければ画面のファイルは出さず、`/api` だけを受ける |
+| `session_ttl_secs` | `1209600`（14 日） | Web の画面のセッションの有効期間 |
+
+`public_url` は、GitHub のログインのコールバックの URL と、Web の画面のセッションで来た要求の `Origin` の確認に使う。
+`https://` なら cookie に `Secure` を付ける。
 
 ### `[ban]`
 
@@ -270,6 +276,7 @@ ban したことは監査ログに残る。ban の状態はメモリにだけ置
 | `app_id` | （必須） | App ID |
 | `client_id` | （必須） | Client ID（Device Flow に使う） |
 | `private_key` | （必須） | 秘密鍵の参照（`file:/path/to/key.pem`、`env:NAME`、`op://vault/item/field`） |
+| `client_secret` | なし | client secret の参照。書くと、Web の画面に GitHub でログインできる（[GitHub App の準備](github-app.md#登録後に控える情報)） |
 | `organizations` | なし | 使う Organization を限る。書かなければ、アプリをインストールしたすべての Organization を使う |
 | `organization` | なし | `organizations` を一つだけ書くときの書き方 |
 | `api_url`、`web_url` | `https://api.github.com`、`https://github.com` | GitHub の API と Web の URL |
@@ -320,7 +327,7 @@ permissions = { contents = "write", pull_requests = "write" }   # 省くとイ�
 ## ワークスペースの規則
 
 `chloe ws policy set acme/web` で、規則だけを TOML で標準入力から渡す。
-管理 API では `/v1/workspace-policies/{name}` に JSON で渡す。
+管理 API では `/api/v1/workspace-policies/{name}` に JSON で渡す。
 管理の画面では、Rules タブでワークスペースを選んで編集する。
 
 ```toml

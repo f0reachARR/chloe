@@ -274,6 +274,30 @@ listen = "127.0.0.1:8080"
 
 使い方は [管理 API](api.md) にある。
 
+## Web の画面を有効にする
+
+Web の画面は、管理 API と同じ待ち受けで出す。
+`[api]` に、ブラウザで開く URL（`public_url`）と、画面のファイルの置き場所（`web_root`）を書く。
+画面のファイルは chloe-gateway の deb に入っている。
+
+```toml
+[api]
+listen = "127.0.0.1:8080"
+public_url = "https://chloe.example.com"
+web_root = "/usr/share/chloe/web"
+```
+
+TLS を終端するリバースプロキシの後ろに置くときは、`public_url` をリバースプロキシの URL にする。
+画面は `/` から置くので、`public_url` にパスは書けない（`https://example.com/chloe` のようにはできない）。
+依頼の出来事は `/api/v1/events` から SSE で流すので、リバースプロキシで応答を溜めないようにし、待ち時間を長くする（nginx なら `proxy_buffering off;` と `proxy_read_timeout 1h;`。ゲートウェイは `X-Accel-Buffering: no` も返す）。
+
+ログインは二通りある。
+
+- **GitHub**：GitHub App の `client_secret` を書き、App の設定の Callback URL を `<public_url>/api/auth/github/callback` にする（[GitHub App の準備](github-app.md)）。
+- **SSH から**：`ssh -t chloe@host chloe web login` が、5 分だけ一度使える URL と QR コードを出す。GitHub App がなくても使える。
+
+使い方は [使い方](usage.md#web-の画面) にある。
+
 ## 更新
 
 新しく作った deb を、入れたときと同じく `apt install` で入れる。

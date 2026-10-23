@@ -14,6 +14,32 @@ cargo test --workspace
 `cargo test` は VM を使わずに数秒で終わる。
 ゲストのバイナリ（`chloe-guest-agent`）は、`images/guest/rootfs/build.sh` が musl でビルドしてルートファイルシステムに入れる。
 
+## Web の画面
+
+Web の画面は `web/` にある（React、Mantine、Vite、pnpm）。
+Node.js と pnpm は mise などで入れる（版は `web/package.json` の `packageManager`）。
+
+```sh
+cd web
+pnpm install
+pnpm dev          # http://localhost:5173 。/api はゲートウェイ (CHLOE_API、既定 http://127.0.0.1:8080) へ中継する
+pnpm typecheck
+pnpm build        # web/dist に書き出す
+```
+
+開発では、ゲートウェイの `[api]` の `public_url` を Vite の URL（`http://localhost:5173`）にし、`web_root` は書かない。
+GitHub のログインのコールバックも Vite を通ってゲートウェイに届き、cookie と `Origin` の確認もそのまま働く。
+GitHub App を使わないときは、`chloe web login` が出す URL でログインする。
+
+画面の API の型は、ゲートウェイが出す OpenAPI のスペック（`web/openapi.json`）から作る。
+管理 API を変えたら、スペックを書き出し直して型を作り直す。
+`cargo test` は、`web/openapi.json` がコードとずれていると失敗する。
+
+```sh
+cargo run -p chloe-gateway -- openapi > web/openapi.json
+(cd web && pnpm api)
+```
+
 ## 確認の二層
 
 - **Rust のテスト**：判断の中身を確かめる。controller の停止の予約、作業中のエージェントを待つ停止、reconcile、問い合わせへの答え、方針の層の重ね方、相互 TLS の役割の判定などは、偽のランナーと偽の guest-agent、偽の GitHub を相手に確かめる。
