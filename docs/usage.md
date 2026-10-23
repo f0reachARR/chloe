@@ -452,7 +452,8 @@ URL を開くと、Web の画面のログインを通ってから、VM の中の
 - **`Host` は `localhost:<ポート>` になる**：開発用のサーバーが知らない `Host` を断らないよう、VM の中で開いたときと同じにする。元のホストは `X-Forwarded-Host` と `X-Forwarded-Proto` で届く。アプリが `Host` から自分の URL を組み立てると、`localhost` の URL になる。
 - **chloe の認証は VM に届かない**：プロキシのホストの cookie（`chloe_proxy`）と、chloe のトークンを付けた `Authorization` は、VM の中のサーバーに渡す前に除く。アプリが自分で付けた cookie はそのまま届く。
 - **ポートごとに別のオリジン**：ホスト名はポートとワークスペースごとに違うので、あるポートのページから、ほかのポートや Web の画面の cookie は読めない。
-- **WebSocket も通る**：開発用のサーバーの HMR なども使える。
+- **WebSocket も通る**：ただし、Vite などの開発用のサーバーは、HMR の WebSocket の `Origin` を確かめることがある。`Origin` はブラウザが開いたホスト（`https://5173-ws-12.…`）のまま届くので、断られたら、サーバーの許すホストにプロキシのドメインを足す（Vite なら `server.allowedHosts` に `.chloe-preview.example.net`）。
+- **`/__chloe/` はアプリに届かない**：プロキシのホストのログインに `/__chloe/auth` を使う。
 
 Claude Code と Codex には、同じ操作を MCP のツール（`publish_port`）として登録してある。
 エージェントにサーバーを起動させたら、公開して URL を教えるように頼める。
