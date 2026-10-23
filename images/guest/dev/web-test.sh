@@ -12,8 +12,8 @@ state="$root/build/dev/web"
 logs="$state/logs"
 work="$(mktemp -d)"
 prefix=chloe-web-
-ssh_port=2224
-keys_port=18902
+ssh_port=2229
+keys_port=18905
 api_port=18921
 
 cleanup() {
