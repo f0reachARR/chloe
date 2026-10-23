@@ -16,7 +16,7 @@ chloe は一つの GitHub App を、次の三つの用途に使う。
 | 項目 | 設定 |
 | --- | --- |
 | GitHub App name、Homepage URL | 任意 |
-| Callback URL | 空のまま（Device Flow だけを使うので要らない） |
+| Callback URL | Web の画面に GitHub でログインするなら `<public_url>/api/auth/github/callback`（`https://chloe.example.com/api/auth/github/callback` など）。使わなければ空のまま |
 | Expire user authorization tokens | 有効（ユーザートークンを 8 時間で失効させ、リフレッシュトークンで更新する） |
 | Request user authorization (OAuth) during installation | 無効 |
 | Enable Device Flow | 有効 |
@@ -55,8 +55,10 @@ Workflows を No access にすると、`.github/workflows` 以下を変更する
 | 秘密鍵（`.pem`） | アプリの設定画面の Private keys → Generate a private key | **秘密** |
 | インストール先の Organization 名 | アプリをインストールした Organization | 秘密ではない |
 
-Client secret は要らない。
+SSH のログイン（Device Flow）だけなら、client secret は要らない。
 Device Flow で得たユーザートークンは、client secret なしで更新できる。
+Web の画面に GitHub でログインする（OAuth の Web のフロー）ときだけ、アプリの設定画面の Client secrets → Generate a new client secret で作り、秘密鍵と同じく**秘密**として扱う。
+client secret がなくても、Web の画面には SSH の `chloe web login` が出す URL でログインできる。
 
 アプリは Organization にインストールし、chloe で扱うリポジトリを選ぶ（Only select repositories）。
 インストール ID は chloe がアプリの秘密鍵で API から調べるので、控えなくてよい。
@@ -71,6 +73,8 @@ Device Flow で得たユーザートークンは、client secret なしで更新
 
 ```sh
 sudo install -m 640 -g chloe ~/Downloads/<app-name>.*.private-key.pem /etc/chloe/github-app.pem
+# Web の画面に GitHub でログインするときだけ
+sudo install -m 640 -g chloe /dev/stdin /etc/chloe/github-app-client-secret <<< '<client secret>'
 ```
 
 `/etc/chloe/github-app.toml`：
@@ -79,12 +83,14 @@ sudo install -m 640 -g chloe ~/Downloads/<app-name>.*.private-key.pem /etc/chloe
 app_id = 123456
 client_id = "Iv23liXXXXXXXXXXXXXX"
 private_key = "file:/etc/chloe/github-app.pem"
+# Web の画面に GitHub でログインするときだけ書く。
+# client_secret = "file:/etc/chloe/github-app-client-secret"
 # 使う Organization を限るときに書く。書かなければ、アプリをインストールしたすべての
 # Organization を使う。
 # organizations = ["ForteFibre"]
 ```
 
-`private_key` はシークレットの参照として読む。
+`private_key` と `client_secret` はシークレットの参照として読む。
 1Password Connect を使うようになったら、`op://<vault>/<item>/<field>` の形の参照に書き換え、秘密鍵のファイルは消す。
 
 ゲートウェイの設定（`/etc/chloe/gateway.toml`）にこのパスを書く。

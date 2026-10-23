@@ -168,7 +168,7 @@ async fn perform(
         let shown = |e: ops::Error| e.to_string();
         Ok(match action {
             Action::LoadWorkspaces => {
-                Outcome::Workspaces(ops::list_workspaces(shared, login).await.map_err(shown)?)
+                Outcome::Workspaces(ops::list_workspaces(shared, login, false).await.map_err(shown)?)
             }
             Action::CreateWorkspace { name, options } => {
                 let ws = ops::create_workspace(shared, login, &name, options)

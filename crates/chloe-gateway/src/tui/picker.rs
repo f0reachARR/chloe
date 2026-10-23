@@ -186,6 +186,8 @@ mod tests {
             vcpus: 4,
             memory_mib: 4096,
             idle_timeout_secs: Some(1800),
+            pending_asks: 0,
+            busy: None,
         }
     }
 

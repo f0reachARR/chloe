@@ -80,6 +80,7 @@ async fn app(url: &str) -> GitHubApp {
         organization: None,
         organizations: None,
         private_key: format!("file:{key}"),
+        client_secret: None,
         api_url: url.into(),
         web_url: url.into(),
     };
@@ -239,6 +240,7 @@ async fn organization_setting_limits_installations() {
         organization: Some("acme".into()),
         organizations: None,
         private_key: format!("file:{key}"),
+        client_secret: None,
         api_url: url.clone(),
         web_url: url,
     };
@@ -257,6 +259,7 @@ fn organizations_setting() {
         organization: organization.map(Into::into),
         organizations: organizations.map(|o| o.into_iter().map(Into::into).collect()),
         private_key: "file:/dev/null".into(),
+        client_secret: None,
         api_url: String::new(),
         web_url: String::new(),
     };
@@ -323,6 +326,62 @@ async fn device_flow_and_refresh() {
         .unwrap();
     assert_eq!(refreshed.access_token, "ghu_2");
     assert_eq!(refreshed.refresh_token.as_deref(), Some("ghr_2"));
+}
+
+#[tokio::test]
+async fn web_flow_exchanges_a_code() {
+    let url = stub(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("POST", "/login/oauth/access_token") => {
+            assert!(req.body.contains("client_id=Iv-test"));
+            assert!(req.body.contains("client_secret=s3cret"));
+            assert!(req.body.contains("redirect_uri=https%3A%2F%2Fchloe.example.com%2Fauth%2Fgithub%2Fcallback"));
+            if req.body.contains("code=good") {
+                (200, r#"{"access_token":"ghu_web","expires_in":28800}"#.into())
+            } else {
+                (200, r#"{"error":"bad_verification_code","error_description":"The code passed is incorrect or expired."}"#.into())
+            }
+        }
+        _ => (404, "{}".into()),
+    })
+    .await;
+    let key = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/test-app-key.pem");
+    let secret = std::env::temp_dir().join(format!("chloe-github-secret-{}", std::process::id()));
+    std::fs::write(&secret, "s3cret").unwrap();
+    let config = AppConfig {
+        app_id: 123,
+        client_id: "Iv-test".into(),
+        organization: None,
+        organizations: None,
+        private_key: format!("file:{key}"),
+        client_secret: Some(format!("file:{}", secret.display())),
+        api_url: url.clone(),
+        web_url: url.clone(),
+    };
+    let web = GitHubApp::new(config, &Resolver { connect: None })
+        .await
+        .unwrap();
+    std::fs::remove_file(&secret).unwrap();
+    assert!(web.has_web_flow());
+    let callback = "https://chloe.example.com/auth/github/callback";
+    let authorize = web.authorize_url(callback, "st&ate").unwrap();
+    assert_eq!(
+        authorize,
+        format!(
+            "{url}/login/oauth/authorize?client_id=Iv-test&redirect_uri=https%3A%2F%2Fchloe.example.com%2Fauth%2Fgithub%2Fcallback&state=st%26ate"
+        )
+    );
+    let token = web.exchange_code("good", callback).await.unwrap();
+    assert_eq!(token.access_token, "ghu_web");
+    let error = web.exchange_code("bad", callback).await.err().unwrap();
+    assert!(
+        error.to_string().contains("incorrect or expired"),
+        "{error}"
+    );
+
+    // client secret がなければ Web のフローは使えない。
+    let without = app(&url).await;
+    assert!(!without.has_web_flow());
+    assert!(without.exchange_code("good", callback).await.is_err());
 }
 
 #[test]

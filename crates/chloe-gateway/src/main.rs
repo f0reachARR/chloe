@@ -16,6 +16,7 @@ mod internal;
 mod ops;
 mod session;
 mod tui;
+mod web;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,7 +43,7 @@ use crate::session::{Connection, Shared};
 struct Cli {
     /// 設定ファイル (TOML)。
     #[arg(long, env = "CHLOE_GATEWAY_CONFIG")]
-    config: PathBuf,
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -54,6 +55,8 @@ enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
+    /// 管理 API の OpenAPI のスペック (JSON) を標準出力に書く。設定ファイルは読まない。
+    Openapi,
 }
 
 #[derive(clap::Subcommand)]
@@ -75,9 +78,15 @@ enum NodeCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Openapi) = cli.command {
+        println!("{}", api::openapi_json());
+        return Ok(());
+    }
+    let path = cli
+        .config
+        .context("pass the configuration file with --config or CHLOE_GATEWAY_CONFIG")?;
     let config: Config = toml::from_str(
-        &std::fs::read_to_string(&cli.config)
-            .with_context(|| format!("read {}", cli.config.display()))?,
+        &std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
     )?;
     config
         .policy
@@ -318,8 +327,9 @@ async fn build_controller(
 
 /// HTTP(S) の管理 API で待ち受ける。
 async fn start_api(shared: Arc<Shared>, config: &config::ApiConfig) -> Result<()> {
+    web::WebConfig::check(config)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    let router = api::router(shared);
+    let router = api::router(shared.clone()).merge(web::router(shared));
     match (&config.tls_cert, &config.tls_key) {
         (Some(cert), Some(key)) => {
             let tls = chloe_mtls::tls_server_config(

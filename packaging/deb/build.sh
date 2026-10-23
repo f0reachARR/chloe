@@ -3,7 +3,7 @@
 #
 #   packaging/deb/build.sh [--guest]
 #
-# Ubuntu 24.04 のコンテナの中で、ゲートウェイ、chloe-node、chloe-egress をビルドし、
+# Ubuntu 24.04 のコンテナの中で、ゲートウェイ、chloe-node、chloe-egress と Web の画面をビルドし、
 # chloe-common、chloe-gateway、chloe-node を作る。--guest を付けると、build/guest の
 # ゲストのイメージから chloe-guest も作る (先に images/guest/kernel/build.sh と
 # images/guest/rootfs/build.sh を実行しておく)。
@@ -43,11 +43,17 @@ docker run --rm --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
     -e CARGO_HOME=/src/build/deb/cache/cargo \
     -e CARGO_TARGET_DIR=/src/build/deb/target \
+    -e npm_config_store_dir=/src/build/deb/cache/pnpm \
     -e SOURCE_DATE_EPOCH="$(git -C "$root" log -1 --format=%ct)" \
     -e DEB_MAINTAINER="${DEB_MAINTAINER:-}" \
     chloe-deb-builder bash -c '
         set -e
         cargo build --release --locked -p chloe-gateway -p chloe-node -p chloe-egress
+        # 手元の web/node_modules を使わないよう、写したものでビルドする。
+        rm -rf /tmp/web /src/build/deb/web && mkdir /tmp/web
+        tar -C web --exclude=node_modules --exclude=dist -cf - . | tar -C /tmp/web -xf -
+        (cd /tmp/web && pnpm install --frozen-lockfile && pnpm build)
+        cp -r /tmp/web/dist /src/build/deb/web
         packaging/deb/package.sh "$0" /src/build/deb/target/release /src/build/deb "${@}"
         lintian --suppress-tags-from-file packaging/deb/lintian-suppress /src/build/deb/*.deb || true
     ' "$version" "${guest_args[@]}"

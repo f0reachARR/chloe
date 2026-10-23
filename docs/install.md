@@ -274,6 +274,30 @@ listen = "127.0.0.1:8080"
 
 使い方は [管理 API](api.md) にある。
 
+## Web の画面を有効にする
+
+Web の画面は、管理 API と同じ待ち受けで出す。
+`[api]` に、ブラウザで開く URL（`public_url`）と、画面のファイルの置き場所（`web_root`）を書く。
+画面のファイルは chloe-gateway の deb に入っている。
+
+```toml
+[api]
+listen = "127.0.0.1:8080"
+public_url = "https://chloe.example.com"
+web_root = "/usr/share/chloe/web"
+```
+
+TLS を終端するリバースプロキシの後ろに置くときは、`public_url` をリバースプロキシの URL にする。
+画面は `/` から置くので、`public_url` にパスは書けない（`https://example.com/chloe` のようにはできない）。
+依頼の出来事は `/api/v1/events` から SSE で流すので、リバースプロキシで応答を溜めないようにし、待ち時間を長くする（nginx なら `proxy_buffering off;` と `proxy_read_timeout 1h;`。ゲートウェイは `X-Accel-Buffering: no` も返す）。
+
+ログインは二通りある。
+
+- **GitHub**：GitHub App の `client_secret` を書き、App の設定の Callback URL を `<public_url>/api/auth/github/callback` にする（[GitHub App の準備](github-app.md)）。
+- **SSH から**：`ssh chloe@host chloe web login` が、5 分だけ一度使える URL と QR コードを出す。GitHub App がなくても使える。
+
+使い方は [使い方](usage.md#web-の画面) にある。
+
 ## 更新
 
 新しく作った deb を、入れたときと同じく `apt install` で入れる。
@@ -311,6 +335,7 @@ Ubuntu 以外のディストリビューションや、開発中のものを試�
   ```
 
 - **Docker**：カーネルとルートファイルシステムは Docker のコンテナの中でビルドする。
+- **Node.js と pnpm**：Web の画面を出すときだけ要る（版は `web/package.json` の `packageManager`）。
 
 ### ビルドする
 
@@ -318,6 +343,7 @@ Ubuntu 以外のディストリビューションや、開発中のものを試�
 images/guest/kernel/build.sh
 images/guest/rootfs/build.sh
 cargo build --release -p chloe-gateway -p chloe-egress -p chloe-node
+(cd web && pnpm install --frozen-lockfile && pnpm build)   # Web の画面を出すときだけ
 ```
 
 ### ホストに要るもの
@@ -356,6 +382,8 @@ sudo install -d -m 755 /etc/chloe
 sudo install -m 644 deploy/runner.env deploy/gateway.toml /etc/chloe/   # chloe-node のホストでは node.toml
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/chloe.conf
 sudo systemctl daemon-reload
+# Web の画面を出すときだけ (古いファイルを消してから置く)
+sudo rm -rf /usr/local/share/chloe/web && sudo install -d -m 755 /usr/local/share/chloe && sudo cp -r web/dist /usr/local/share/chloe/web
 ```
 
 利用者 `chloe` は `kvm` のグループに入れる（Firecracker が `/dev/kvm` を開くため）。

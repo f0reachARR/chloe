@@ -1,0 +1,6 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "singleQuote": true,
+  "ignorePatterns": ["src/routeTree.gen.ts", "src/shared/api/schema.d.ts", "openapi.json", "dist"]
+}

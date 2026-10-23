@@ -17,6 +17,7 @@ user@chloe:/workspace$ claude
 systemd の実装では、root で動くのはネットワークの準備だけで、Firecracker とプロキシは専用の利用者で動く。
 jailer による Firecracker の隔離と Kubernetes への配置はまだない。
 ホストに配置するための設定の例と systemd の unit は `deploy/` にあるが、まだ実際のホストで確かめていない。
+Web の画面の GitHub のログインは、GitHub の代わりのスタブを相手にしか確かめていない。
 実装の順序と各段階の結果は [実装手順](docs/implementation-steps.md) にある。
 
 ## できること
@@ -27,7 +28,8 @@ jailer による Firecracker の隔離と Kubernetes への配置はまだない
 - **通信の制限**：許可リストにない宛先への通信を遮断し、名前の解決も外に問い合わせない。宛先、メソッド、パスの規則で、API の使い方も絞れる。
 - **管理**：SSH の `chloe` コマンド、`ssh -t <host> chloe` で開く管理の画面（TUI）、HTTP(S) の API で、ワークスペース、シークレット、外への通信の規則（個人、Organization、team、ワークスペースごと）を扱う。
 - **複数のホスト**：ランナーを複数の物理サーバーに置ける（`chloe-node`）。コントロールプレーンとホストのあいだは相互 TLS でつなぐ。
-- **エージェントからの依頼**：VM の中のエージェントは、`chloe-ask`（CLI と MCP のツール）で、遮断された宛先への通信の許可や質問を人に出し、答えを待てる。人は管理の画面、`chloe inbox`、管理 API で答える。無人で動かしていても、エージェントは止まらずに答えを待てる。
+- **Web の画面**：ブラウザ（スマートフォンでも、PWA としても）から、エージェントからの依頼に答え、ワークスペースでエージェントが作業中かを見る。GitHub か、SSH の `chloe web login` が出す URL でログインする。
+- **エージェントからの依頼**：VM の中のエージェントは、`chloe-ask`（CLI と MCP のツール）で、遮断された宛先への通信の許可や質問を人に出し、答えを待てる。人は Web の画面、管理の画面、`chloe inbox`、管理 API で答える。無人で動かしていても、エージェントは止まらずに答えを待てる。
 - **監査**：ログイン、セッション、ポート転送、管理の操作、シークレットの問い合わせを JSON Lines で記録する。HTTP の通信は、ワークスペースごとにメタデータだけを記録し、利用者は `chloe ws log` と管理の画面で見られる。
 
 ## 構成
@@ -96,6 +98,7 @@ ssh -p 2222 <GitHub のログイン名>@127.0.0.1
 | [管理 API](docs/api.md) | HTTP(S) の API とトークン |
 | [GitHub App の準備](docs/github-app.md) | アプリの登録と権限 |
 | [開発](docs/development.md) | クレートの構成と確認の回し方 |
+| [Web の画面の方針](docs/web.md) | Web の画面の技術、構成、依存の向き、安全のための決まり |
 | [調査と計画](docs/research-and-plan.md) | 設計の前提と、ほかの選択肢の比較 |
 | [OpenShell の調査](docs/research-openshell.md) | NVIDIA OpenShell に委ねられる範囲と、取り入れる候補 |
 | [実装手順](docs/implementation-steps.md) | 段階ごとの計画と結果 |
@@ -121,6 +124,7 @@ images/guest/
   rootfs/            ゲストのルートファイルシステムのビルド
   runner/            ランナーの起動のスクリプト (開発用のコンテナと systemd の unit で共通)
   dev/               開発用のランナーのコンテナ、開発用の設定の例、VM を使う確認
+web/                 Web の画面 (React、Mantine、TanStack Router と Query。型は web/openapi.json から作る)
 deploy/              ホストに配置するための設定の例、systemd の unit、polkit の規則
 migrations/          データベースのマイグレーション
 docs/                文書

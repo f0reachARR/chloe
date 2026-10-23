@@ -3,6 +3,8 @@
 #
 #   package.sh <版> <バイナリのディレクトリ> <出力先> [--guest <ゲストのイメージのディレクトリ>]
 #
+# Web の画面は、先に <出力先>/web にビルドしておく (build.sh が pnpm build を実行する)。
+#
 # deploy/ の unit と設定の例は、手で置くときの配置 (/usr/local) で書いてあるので、パスを
 # パッケージの配置に書き換えて入れる。
 set -euo pipefail
@@ -31,6 +33,7 @@ deb_paths() {
         -e 's|/usr/local/lib/chloe/runner/|/usr/libexec/chloe/|g' \
         -e 's|/usr/local/lib/chloe/chloe-egress|/usr/libexec/chloe/chloe-egress|g' \
         -e 's|/usr/local/lib/chloe/guest|/usr/lib/chloe/guest|g' \
+        -e 's|/usr/local/share/chloe/web|/usr/share/chloe/web|g' \
         "$1" > "$2"
 }
 
@@ -145,6 +148,10 @@ t="$work/gateway"
 install_bin "$bin/chloe-gateway" "$t/usr/bin/chloe-gateway"
 deb_paths "$root/deploy/systemd/chloe-gateway.service" "$t/usr/lib/systemd/system/chloe-gateway.service" 644
 deb_paths "$root/deploy/gateway.toml" "$t/etc/chloe/gateway.toml" 644
+# Web の画面 (`[api] web_root`)。
+mkdir -p "$t/usr/share/chloe/web"
+cp -r "$out/web/." "$t/usr/share/chloe/web/"
+find "$t/usr/share/chloe/web" -type d -exec chmod 755 {} + -o -type f -exec chmod 644 {} +
 for f in "$root"/deploy/secrets/*.toml; do
     install -D -m 644 "$f" "$t/usr/share/doc/chloe-gateway/examples/secrets/${f##*/}"
 done

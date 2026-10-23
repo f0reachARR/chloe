@@ -70,6 +70,11 @@ action = "allow"
 
 [runner]
 kind = "systemd"
+
+[api]
+listen = "0.0.0.0:8080"
+public_url = "http://chloe.test:8080"
+web_root = "/usr/share/chloe/web"
 EOF
 
 docker build -q --build-arg UBUNTU="$ubuntu" -t "chloe-deb-test-host:$ubuntu" -f "$here/test-host.Dockerfile" "$here" >/dev/null
@@ -104,13 +109,17 @@ in_host systemd-run --quiet --unit keys python3 -m http.server --bind 127.0.0.1 
 in_host systemctl enable --now chloe-gateway
 wait_until 20 bash -c "exec 3<>/dev/tcp/$host_ip/2222"
 check shell "hello" as 'echo hello'
+# deb に入れた Web の画面を、ゲートウェイが出す。
+check web-ui '<div id="root">' curl -s "http://$host_ip:8080/inbox"
+check web-manifest '"name":"chloe"' curl -s "http://$host_ip:8080/manifest.webmanifest"
 ssh "${ssh_opts[@]}" "alice@$host_ip" 'sleep 300' &
 hold=$!
 key="$(in_host ls /var/lib/chloe/workspaces | head -1)"
 check runner "active" in_host systemctl is-active "chloe-runner@$key"
 check users "chloe" in_host sh -c 'ps -o user= -C firecracker,chloe-egress,dnsmasq | sort -u'
 check allowed-host "200" as "curl -s -o /dev/null -w '%{http_code}' https://httpbin.org/get"
-check blocked-host "blocked" as "curl -s --max-time 10 https://example.com >/dev/null && echo reached || echo blocked"
+# 許可リストにない名前はプロキシのアドレスに引け、プロキシが 403 で断る (段階 19)。
+check blocked-host "403" as "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com"
 
 section "upgrade"
 runner_pid="$(main_pid "chloe-runner@$key")"

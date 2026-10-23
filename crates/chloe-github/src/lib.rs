@@ -53,6 +53,10 @@ pub struct AppConfig {
     pub organizations: Option<Vec<String>>,
     /// 秘密鍵 (PEM) への参照 (`file:`、`op://` など)。
     pub private_key: String,
+    /// client secret への参照 (`file:`、`env:`、`op://` など)。Web の画面のログイン (OAuth の
+    /// Web のフロー) に使う。なければ Web のフローを使わない (Device Flow には要らない)。
+    #[serde(default)]
+    pub client_secret: Option<String>,
     #[serde(default = "default_api_url")]
     pub api_url: String,
     #[serde(default = "default_web_url")]
@@ -136,6 +140,7 @@ pub struct GitHubApp {
     http: reqwest::Client,
     config: AppConfig,
     key: EncodingKey,
+    client_secret: Option<SecretString>,
     /// アプリをインストールした Organization (小文字) とインストールの ID、調べた時刻。
     installations: Mutex<Option<(HashMap<String, u64>, Instant)>>,
     /// インストールと範囲ごとのインストールトークンと、その期限。
@@ -224,6 +229,10 @@ impl GitHubApp {
         let pem = resolver.resolve(&config.private_key).await?;
         let key = EncodingKey::from_rsa_pem(pem.expose_secret().as_bytes())
             .map_err(|e| Error::Config(format!("private key: {e}")))?;
+        let client_secret = match &config.client_secret {
+            Some(reference) => Some(resolver.resolve(reference).await?),
+            None => None,
+        };
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
@@ -231,6 +240,7 @@ impl GitHubApp {
                 .build()?,
             config,
             key,
+            client_secret,
             installations: Mutex::new(None),
             tokens: Mutex::new(HashMap::new()),
             memberships: Mutex::new(HashMap::new()),
@@ -474,6 +484,49 @@ impl GitHubApp {
             .await?;
         if let Some(error) = response.error {
             return Err(Error::Api("refresh".into(), error));
+        }
+        user_token(response)
+    }
+
+    /// Web のフローを使えるか (client secret があるか)。
+    pub fn has_web_flow(&self) -> bool {
+        self.client_secret.is_some()
+    }
+
+    /// Web のフローで利用者を送る GitHub の承認の URL。`redirect_uri` は App の設定の
+    /// Callback URL と一致しなければならない。
+    pub fn authorize_url(&self, redirect_uri: &str, state: &str) -> Result<String, Error> {
+        let url = reqwest::Url::parse_with_params(
+            &format!("{}/login/oauth/authorize", self.config.web_url),
+            &[
+                ("client_id", self.config.client_id.as_str()),
+                ("redirect_uri", redirect_uri),
+                ("state", state),
+            ],
+        )
+        .map_err(|e| Error::Config(format!("web_url: {e}")))?;
+        Ok(url.into())
+    }
+
+    /// Web のフローのコールバックで受けたコードを、ユーザートークンに換える。
+    pub async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<UserToken, Error> {
+        let secret = self
+            .client_secret
+            .as_ref()
+            .ok_or_else(|| Error::Config("no client_secret for the web sign-in".into()))?;
+        let response = self
+            .token_request(&[
+                ("client_id", self.config.client_id.as_str()),
+                ("client_secret", secret.expose_secret()),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+            ])
+            .await?;
+        if let Some(error) = response.error {
+            return Err(Error::Api(
+                "code".into(),
+                response.error_description.unwrap_or(error),
+            ));
         }
         user_token(response)
     }

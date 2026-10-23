@@ -496,6 +496,111 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Web の画面のセッションを作り、(ID, セッションの値) を返す。値は cookie にだけ置く。
+    pub async fn create_web_session(
+        &self,
+        login: &str,
+        ttl_secs: i64,
+    ) -> Result<(i64, String), Error> {
+        let session = random_token();
+        let row = sqlx::query(
+            "INSERT INTO web_sessions (login, session_hash, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4) RETURNING id",
+        )
+        .bind(login)
+        .bind(token_hash(&session))
+        .bind(now())
+        .bind(now() + ttl_secs)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((row.try_get("id")?, session))
+    }
+
+    /// 期限内のセッションを返し、使った時刻を記録する。
+    pub async fn authenticate_web_session(
+        &self,
+        session: &str,
+    ) -> Result<Option<WebSession>, Error> {
+        let row = sqlx::query(
+            "UPDATE web_sessions SET last_used_at = ?2
+             WHERE session_hash = ?1 AND expires_at > ?2
+             RETURNING id, login, created_at, expires_at, last_used_at",
+        )
+        .bind(token_hash(session))
+        .bind(now())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| web_session(&row)).transpose()
+    }
+
+    /// 利用者の、期限内のセッションの一覧。
+    pub async fn web_sessions(&self, login: &str) -> Result<Vec<WebSession>, Error> {
+        let rows = sqlx::query(
+            "SELECT id, login, created_at, expires_at, last_used_at FROM web_sessions
+             WHERE login = ?1 AND expires_at > ?2 ORDER BY id",
+        )
+        .bind(login)
+        .bind(now())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(web_session).collect()
+    }
+
+    /// 利用者のセッションを消す。消したら `true`。
+    pub async fn revoke_web_session(&self, login: &str, id: i64) -> Result<bool, Error> {
+        let result = sqlx::query("DELETE FROM web_sessions WHERE id = ?1 AND login = ?2")
+            .bind(id)
+            .bind(login)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// セッションの値で消す (ログアウト)。期限の切れたセッションもここで片付ける。
+    pub async fn end_web_session(&self, session: &str) -> Result<(), Error> {
+        sqlx::query("DELETE FROM web_sessions WHERE session_hash = ?1 OR expires_at <= ?2")
+            .bind(token_hash(session))
+            .bind(now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 一度だけ使えるログインのコードを作る。
+    pub async fn create_web_login_link(&self, login: &str, ttl_secs: i64) -> Result<String, Error> {
+        let code = random_token();
+        sqlx::query("DELETE FROM web_login_links WHERE expires_at <= ?1")
+            .bind(now())
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO web_login_links (code_hash, login, expires_at) VALUES (?1, ?2, ?3)",
+        )
+        .bind(token_hash(&code))
+        .bind(login)
+        .bind(now() + ttl_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(code)
+    }
+
+    /// ログインのコードを使い、期限内なら利用者を返す。使ったコードは消すので、二度は使えない。
+    pub async fn redeem_web_login_link(&self, code: &str) -> Result<Option<String>, Error> {
+        let row = sqlx::query(
+            "DELETE FROM web_login_links WHERE code_hash = ?1 RETURNING login, expires_at",
+        )
+        .bind(token_hash(code))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let expires_at: i64 = row.try_get("expires_at")?;
+        Ok((expires_at > now())
+            .then(|| row.try_get("login"))
+            .transpose()?)
+    }
+
     /// SSH の公開鍵を利用者に結び付け、鍵が結び付いている利用者を返す。すでにほかの利用者に
     /// 結び付いていれば、結び付け直さずにその利用者を返す。
     pub async fn bind_ssh_key(
@@ -678,7 +783,7 @@ fn new_placeholder(template: &str) -> String {
 }
 
 /// 管理 API のトークン (値は含まない)。時刻は UNIX 時刻の秒。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub struct ApiToken {
     pub id: i64,
     pub login: String,
@@ -686,6 +791,26 @@ pub struct ApiToken {
     pub created_at: i64,
     pub expires_at: Option<i64>,
     pub last_used_at: Option<i64>,
+}
+
+/// Web の画面のセッション (値は含まない)。時刻は UNIX 時刻の秒。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WebSession {
+    pub id: i64,
+    pub login: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+fn web_session(row: &sqlx::sqlite::SqliteRow) -> Result<WebSession, Error> {
+    Ok(WebSession {
+        id: row.try_get("id")?,
+        login: row.try_get("login")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        last_used_at: row.try_get("last_used_at")?,
+    })
 }
 
 /// 利用者に結び付いた SSH の公開鍵。時刻は UNIX 時刻の秒。
@@ -887,6 +1012,52 @@ pub(crate) mod tests {
         assert!(store.revoke_api_token("alice", id).await.unwrap());
         assert_eq!(store.authenticate_api_token(&token).await.unwrap(), None);
         assert_eq!(store.api_tokens("alice").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn web_sessions_expire_and_revoke() {
+        let store = Store::new(pool().await);
+        let (id, session) = store.create_web_session("alice", 3600).await.unwrap();
+        let found = store
+            .authenticate_web_session(&session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((found.id, found.login.as_str()), (id, "alice"));
+        assert!(found.last_used_at.is_some());
+        assert_eq!(store.authenticate_web_session("wrong").await.unwrap(), None);
+        let (_, expired) = store.create_web_session("alice", -1).await.unwrap();
+        assert_eq!(
+            store.authenticate_web_session(&expired).await.unwrap(),
+            None
+        );
+        assert_eq!(store.web_sessions("alice").await.unwrap().len(), 1);
+
+        assert!(!store.revoke_web_session("bob", id).await.unwrap());
+        assert!(store.revoke_web_session("alice", id).await.unwrap());
+        assert_eq!(
+            store.authenticate_web_session(&session).await.unwrap(),
+            None
+        );
+
+        let (_, other) = store.create_web_session("alice", 3600).await.unwrap();
+        store.end_web_session(&other).await.unwrap();
+        assert_eq!(store.authenticate_web_session(&other).await.unwrap(), None);
+        assert!(store.web_sessions("alice").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn web_login_links_work_once() {
+        let store = Store::new(pool().await);
+        let code = store.create_web_login_link("alice", 300).await.unwrap();
+        assert_eq!(store.redeem_web_login_link("wrong").await.unwrap(), None);
+        assert_eq!(
+            store.redeem_web_login_link(&code).await.unwrap().as_deref(),
+            Some("alice")
+        );
+        assert_eq!(store.redeem_web_login_link(&code).await.unwrap(), None);
+        let expired = store.create_web_login_link("alice", -1).await.unwrap();
+        assert_eq!(store.redeem_web_login_link(&expired).await.unwrap(), None);
     }
 
     #[tokio::test]

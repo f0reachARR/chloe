@@ -36,6 +36,9 @@ done
 cp "$work/alice.pub" "$work/keys/alice.keys"
 cp "$work/bob.pub" "$work/keys/bob.keys"
 cp "$work/carol.pub" "$work/keys/carol.keys"
+# Web の画面の代わりの index.html (画面のビルドを待たずに、ファイルの出し方を確かめる)。
+mkdir -p "$work/web/assets"
+echo '<div id="root">stub</div>' > "$work/web/index.html"
 python3 -m http.server --bind 127.0.0.1 --directory "$work/keys" "$keys_port" >/dev/null 2>&1 &
 keys_pid=$!
 
@@ -52,6 +55,8 @@ admins = ["alice"]
 
 [api]
 listen = "127.0.0.1:$api_port"
+public_url = "http://127.0.0.1:$api_port"
+web_root = "$work/web"
 
 [memberships]
 "org:acme" = ["alice"]
@@ -318,6 +323,53 @@ check ask-registered-codex "[mcp_servers.chloe]" as alice+acme/proj 'cat ~/.code
 check ask-mcp-tools "\"name\":\"request_network_access\"" as alice+acme/proj \
     "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}' | timeout 5 chloe-ask mcp"
 
+section "web UI"
+web="http://127.0.0.1:$api_port"
+check web-index '<div id="root">' curl -s "$web/inbox"
+check web-missing-asset "404" curl -s -o /dev/null -w '%{http_code}' "$web/assets/old.js"
+check web-api-404 '"error":"no such API path"' curl -s "$web/api/nope"
+# chloe web login のコードでセッションを作る。Origin のない要求と、二度目は断る。
+link_body() { echo "{\"code\":\"$1\"}"; }
+web_code="$(as alice chloe web login | tail -1 | sed 's/.*code=//')"
+check web-link-no-origin "403" curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'content-type: application/json' -d "$(link_body "$web_code")" "$web/api/auth/link"
+web_session() {
+    curl -s -D - -o /dev/null -X POST -H "Origin: $web" -H 'content-type: application/json' \
+        -d "$(link_body "$1")" "$web/api/auth/link" | sed -n 's/^set-cookie: \(chloe_session=[^;]*\).*/\1/ip'
+}
+alice_cookie="$(web_session "$web_code")"
+bob_cookie="$(web_session "$(as bob chloe web login | tail -1 | sed 's/.*code=//')")"
+check web-link-once "already used" curl -s -X POST -H "Origin: $web" -H 'content-type: application/json' \
+    -d "$(link_body "$web_code")" "$web/api/auth/link"
+web_api() {
+    local cookie="$1" method="$2" path="$3"; shift 3
+    curl -s -w ' %{http_code}' -X "$method" -H "Cookie: $cookie" -H "Origin: $web" \
+        -H 'content-type: application/json' "$web$path" "$@"
+}
+check web-me '"login":"alice","session":' web_api "$alice_cookie" GET /api/v1/me
+check web-sessions "signed in" as alice chloe web sessions
+check web-no-token "not allowed from the web UI" web_api "$alice_cookie" POST /api/v1/tokens -d '{"name":"x"}'
+busy_of() { web_api "$alice_cookie" GET '/api/v1/workspaces?status=true' | grep -o '"name":"acme/proj"[^}]*"busy":\[' | head -1; }
+check web-busy '"name":"acme/proj"' busy_of
+# 依頼の出来事は、入れるワークスペースのものだけが届く。
+curl -sN -H "Cookie: $alice_cookie" "$web/api/v1/events" > "$work/alice-events" &
+alice_events=$!
+curl -sN -H "Cookie: $bob_cookie" "$web/api/v1/events" > "$work/bob-events" &
+bob_events=$!
+sleep 1
+web_ask="$(as alice+acme/proj 'chloe-ask question "Answer from the web?" --no-wait')"
+event_arrived() { grep -q "\"type\":\"created\",\"id\":$web_ask," "$work/alice-events"; }
+event_waited() { wait_until 10 event_arrived && echo yes; }
+check web-event "yes" event_waited
+check web-event-not-member "count=0" sh -c 'echo "count=$(grep -c "\"id\":$1," "$0")"' "$work/bob-events" "$web_ask"
+check web-answer-no-origin "403" curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: $alice_cookie" \
+    -H 'content-type: application/json' -d '{"answer":"x"}' "$web/api/v1/asks/$web_ask/answer"
+check web-answer '"status":"answered"' web_api "$alice_cookie" POST "/api/v1/asks/$web_ask/answer" -d '{"answer":"yes from the web"}'
+check web-answer-printed "yes from the web" as alice+acme/proj "chloe-ask wait $web_ask"
+kill "$alice_events" "$bob_events" 2>/dev/null || true
+check web-logout "204" web_api "$alice_cookie" POST /api/auth/logout
+check web-logged-out "401" web_api "$alice_cookie" GET /api/v1/me
+
 section "authentication"
 check wrong-key "Permission denied" ssh "${ssh_opts[@]}" -i "$work/stranger" alice@127.0.0.1 true
 check not-allowed-user "Permission denied" as carol true
@@ -366,47 +418,47 @@ api() {
 alice_token="$(as alice chloe token create ci --expires 1d | head -1)"
 bob_token="$(as bob chloe token create bob-ci | head -1)"
 check api-token-shown "chloe_" sh -c 'echo "$0" | grep -o "^chloe_"' "$alice_token"
-check api-no-token "401" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/v1/me"
-check api-wrong-token "401" api chloe_wrong GET /v1/me
-check api-me '"login":"alice"' api "$alice_token" GET /v1/me
-check api-list '"name":"default"' api "$alice_token" GET /v1/workspaces
-check api-create '"name":"acme/from-api","root":"ephemeral","running":false,"workspace_disk_gib":20,"docker_disk_gib":40,"vcpus":4,"memory_mib":4096,"idle_timeout_secs":5} 201' \
-    api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
+check api-no-token "401" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/api/v1/me"
+check api-wrong-token "401" api chloe_wrong GET /api/v1/me
+check api-me '"login":"alice"' api "$alice_token" GET /api/v1/me
+check api-list '"name":"default"' api "$alice_token" GET /api/v1/workspaces
+check api-create '"name":"acme/from-api","root":"ephemeral","running":false,"workspace_disk_gib":20,"docker_disk_gib":40,"vcpus":4,"memory_mib":4096,"idle_timeout_secs":5,"pending_asks":0} 201' \
+    api "$alice_token" POST /api/v1/workspaces -d '{"name":"acme/from-api"}'
 check api-create-visible-by-ssh "acme/from-api" as alice chloe ws list
-check api-create-not-member "not a member of org:acme" api "$bob_token" POST /v1/workspaces -d '{"name":"acme/bob"}'
-check api-create-duplicate "409" api "$alice_token" POST /v1/workspaces -d '{"name":"acme/from-api"}'
-check api-patch-root '"root":"persistent"' api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"root":"persistent"}'
-check api-patch-machine '"vcpus":2,"memory_mib":8192,"idle_timeout_secs":null} 200' \
-    api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"vcpus":2,"memory_mib":8192,"idle_timeout":"never"}'
-check api-patch-idle '"vcpus":2,"memory_mib":8192,"idle_timeout_secs":7200} 200' \
-    api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"idle_timeout":"2h"}'
-check api-patch-bad-idle "invalid idle timeout: 2x" api "$alice_token" PATCH /v1/workspaces/acme/from-api -d '{"idle_timeout":"2x"}'
-check api-show-other "404" api "$bob_token" GET /v1/workspaces/acme/from-api
-check api-requests '"event":"request"' api "$alice_token" GET '/v1/workspace-requests/default?lines=5'
-check api-requests-lines "between 1 and 2000" api "$alice_token" GET '/v1/workspace-requests/default?lines=0'
-check api-requests-other "404" api "$bob_token" GET /v1/workspace-requests/acme/proj
-check api-asks '"workspace":"acme/proj","id":' api "$alice_token" GET '/v1/asks?all=true'
-check api-asks-other "[] 200" api "$bob_token" GET '/v1/asks?all=true'
-check api-ask-answer-invalid "write one of allow" api "$alice_token" POST "/v1/asks/$ask_id/answer" -d '{"allow":true,"answer":"x"}'
-check api-ask-answered "409" api "$alice_token" POST "/v1/asks/$ask_id/answer" -d '{"deny":true}'
-check api-secret-set "204" api "$alice_token" PUT /v1/secrets/openai_api_key \
+check api-create-not-member "not a member of org:acme" api "$bob_token" POST /api/v1/workspaces -d '{"name":"acme/bob"}'
+check api-create-duplicate "409" api "$alice_token" POST /api/v1/workspaces -d '{"name":"acme/from-api"}'
+check api-patch-root '"root":"persistent"' api "$alice_token" PATCH /api/v1/workspaces/acme/from-api -d '{"root":"persistent"}'
+check api-patch-machine '"vcpus":2,"memory_mib":8192,"idle_timeout_secs":null,"pending_asks":0} 200' \
+    api "$alice_token" PATCH /api/v1/workspaces/acme/from-api -d '{"vcpus":2,"memory_mib":8192,"idle_timeout":"never"}'
+check api-patch-idle '"vcpus":2,"memory_mib":8192,"idle_timeout_secs":7200,"pending_asks":0} 200' \
+    api "$alice_token" PATCH /api/v1/workspaces/acme/from-api -d '{"idle_timeout":"2h"}'
+check api-patch-bad-idle "invalid idle timeout: 2x" api "$alice_token" PATCH /api/v1/workspaces/acme/from-api -d '{"idle_timeout":"2x"}'
+check api-show-other "404" api "$bob_token" GET /api/v1/workspaces/acme/from-api
+check api-requests '"event":"request"' api "$alice_token" GET '/api/v1/workspace-requests/default?lines=5'
+check api-requests-lines "between 1 and 2000" api "$alice_token" GET '/api/v1/workspace-requests/default?lines=0'
+check api-requests-other "404" api "$bob_token" GET /api/v1/workspace-requests/acme/proj
+check api-asks '"workspace":"acme/proj","id":' api "$alice_token" GET '/api/v1/asks?all=true'
+check api-asks-other "[] 200" api "$bob_token" GET '/api/v1/asks?all=true'
+check api-ask-answer-invalid "write one of allow" api "$alice_token" POST "/api/v1/asks/$ask_id/answer" -d '{"allow":true,"answer":"x"}'
+check api-ask-answered "409" api "$alice_token" POST "/api/v1/asks/$ask_id/answer" -d '{"deny":true}'
+check api-secret-set "204" api "$alice_token" PUT /api/v1/secrets/openai_api_key \
     -d '{"value":"real-api-secret","env":["OPENAI_API_KEY"],"placeholder":"sk-proj-{id}","inject":[{"hosts":["api.openai.com"],"header":"authorization"}]}'
-check api-secret-show '"placeholder":"sk-proj-{id}"' api "$alice_token" GET /v1/secrets/openai_api_key
-check api-secret-list '"names":["anthropic_api_key","openai_api_key"]' api "$alice_token" GET /v1/secrets
+check api-secret-show '"placeholder":"sk-proj-{id}"' api "$alice_token" GET /api/v1/secrets/openai_api_key
+check api-secret-list '"names":["anthropic_api_key","openai_api_key"]' api "$alice_token" GET /api/v1/secrets
 check api-secret-ssh "openai_api_key" as alice chloe secret list
-check api-org-secret-denied "403" api "$bob_token" PUT '/v1/secrets/openai_api_key?owner=acme' -d '{"value":"x"}'
-check api-policy-set '"updated_runners":' api "$alice_token" PUT /v1/policies/acme -d '{"rules":[{"hosts":["api.example"],"action":"allow"}]}'
-check api-policy-show '{"rules":[{"hosts":["api.example"],"action":"allow"}]} 200' api "$alice_token" GET /v1/policies/acme
+check api-org-secret-denied "403" api "$bob_token" PUT '/api/v1/secrets/openai_api_key?owner=acme' -d '{"value":"x"}'
+check api-policy-set '"updated_runners":' api "$alice_token" PUT /api/v1/policies/acme -d '{"rules":[{"hosts":["api.example"],"action":"allow"}]}'
+check api-policy-show '{"rules":[{"hosts":["api.example"],"action":"allow"}]} 200' api "$alice_token" GET /api/v1/policies/acme
 check api-policy-ssh "api.example" as alice chloe policy show acme
-check api-policy-denied "only the administrators" api "$bob_token" PUT /v1/policies/acme -d '{"rules":[]}'
-check api-policy-invalid "overlaps" api "$alice_token" PUT /v1/policies/acme -d '{"rules":[{"hosts":["hub.docker.com"],"action":"deny"}]}'
-check api-delete "204" api "$alice_token" DELETE /v1/workspaces/acme/from-api
-check api-deleted "404" api "$alice_token" GET /v1/workspaces/acme/from-api
-check api-token-list '"name":"ci"' api "$alice_token" GET /v1/tokens
-alice_token_id="$(api "$alice_token" GET /v1/me | sed 's/.*"token":\([0-9]*\).*/\1/')"
-check api-bob-cannot-revoke "404" api "$bob_token" DELETE "/v1/tokens/$alice_token_id"
-check api-revoke "204" api "$alice_token" DELETE "/v1/tokens/$alice_token_id"
-check api-revoked "401" api "$alice_token" GET /v1/me
+check api-policy-denied "only the administrators" api "$bob_token" PUT /api/v1/policies/acme -d '{"rules":[]}'
+check api-policy-invalid "overlaps" api "$alice_token" PUT /api/v1/policies/acme -d '{"rules":[{"hosts":["hub.docker.com"],"action":"deny"}]}'
+check api-delete "204" api "$alice_token" DELETE /api/v1/workspaces/acme/from-api
+check api-deleted "404" api "$alice_token" GET /api/v1/workspaces/acme/from-api
+check api-token-list '"name":"ci"' api "$alice_token" GET /api/v1/tokens
+alice_token_id="$(api "$alice_token" GET /api/v1/me | sed 's/.*"token":\([0-9]*\).*/\1/')"
+check api-bob-cannot-revoke "404" api "$bob_token" DELETE "/api/v1/tokens/$alice_token_id"
+check api-revoke "204" api "$alice_token" DELETE "/api/v1/tokens/$alice_token_id"
+check api-revoked "401" api "$alice_token" GET /api/v1/me
 check api-audited 'via="api"' sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep "management command" | grep -o "via=\"api\"" | tail -1' "$logs/gateway.log"
 check api-secret-not-logged "clean" sh -c '! grep -q "real-api-secret" "$0" && echo clean' "$logs/gateway.log"
 check api-token-not-logged "clean" sh -c '! grep -q "$1" "$0" && echo clean' "$logs/gateway.log" "$alice_token"

@@ -119,9 +119,12 @@ kind = "systemd"
 # server_names = ["cp.example.com"]  # chloe-node がつなぐ名前 (証明書に入れる)
 # pki_dir = "/var/lib/chloe/pki"     # CA の証明書と鍵
 
-# HTTP(S) の管理 API。chloe token create で作ったトークンを Bearer で渡す。
+# HTTP(S) の管理 API と Web の画面。管理 API には chloe token create で作ったトークンを Bearer で渡す。
 # tls_cert と tls_key を書けば HTTPS、なければ HTTP (リバースプロキシの後ろかローカル向け)。
+# public_url を書くと Web の画面を出す (ブラウザで開く URL。リバースプロキシを置くならその URL)。
 # [api]
 # listen = "127.0.0.1:8080"
 # tls_cert = "/etc/chloe/api.crt"
 # tls_key = "/etc/chloe/api.key"
+# public_url = "https://chloe.example.com"
+# web_root = "/usr/local/share/chloe/web"

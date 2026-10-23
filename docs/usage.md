@@ -400,7 +400,7 @@ Claude Code と Codex には、同じ操作を MCP のツール（`request_netwo
 ツールの呼び出し一回は 55 分まで待ち、それまでに答えがなければ ID を返し、エージェントは `wait_for_answer` で待ち直す。
 プロキシが遮断したときの 403 の本文にも、`chloe-ask network` で許可を頼めることが書いてある。
 
-人は、ワークスペースに入れれば依頼を見られ、管理の画面の Inbox タブ、`chloe inbox`、[管理 API](api.md) で答える。
+人は、ワークスペースに入れれば依頼を見られ、[Web の画面](#web-の画面)、管理の画面の Inbox タブ、`chloe inbox`、[管理 API](api.md) で答える。
 
 ```sh
 ssh chloe@chloe.example.com chloe inbox                 # 答えを待つ依頼 (--all なら答えたものも)
@@ -429,6 +429,27 @@ ssh -N -L 8080:127.0.0.1:3000 chloe@chloe.example.com
 `-L` の接続先は、VM の中から見た宛先である。
 手元から VM の外へ抜ける経路にはならない（VM の中からつなげる宛先にしかつながらない）。
 リモートの転送（`-R`）はまだできない。
+
+## Web の画面
+
+ゲートウェイで Web の画面を有効にしていれば（[インストール](install.md#web-の画面を有効にする)）、ブラウザから、エージェントからの依頼に答え、ワークスペースの状態を見られる。
+SSH の端末がなくても、スマートフォンから使える。
+ホーム画面に置けば（PWA）、アプリのように開ける。
+
+ログインは、GitHub のログインのボタンか、SSH で出す一度だけの URL で行う。
+
+```sh
+ssh chloe@chloe.example.com chloe web login     # 5 分だけ一度使える URL と QR コード
+ssh chloe@chloe.example.com chloe web sessions  # ログインしているセッションの一覧
+ssh chloe@chloe.example.com chloe web revoke 3  # セッションを消す
+```
+
+- **Inbox**：答えを待つ依頼が出ると、開いている画面にすぐ出て知らせる。通信の許可は承認か拒否、質問は選択肢か文で答える。
+- **Workspaces**：ワークスペースごとに、動いているか、エージェントが作業中か、答えを待つ依頼の数を出す。作業中かは、開いたときと読み直したときに VM に尋ねる。
+
+セッションの有効期間は既定で 14 日で、権限は SSH と同じである。
+Web の画面からは、API のトークンを作ることとシークレットを登録することはできない（画面に悪いスクリプトが紛れ込んでも、期限のないトークンやシークレットを持ち出させないため）。
+これらは `chloe` コマンドか管理の画面で行う。
 
 ## 管理の画面
 
@@ -519,6 +540,9 @@ chloe inbox show ID
 chloe inbox allow ID                            通信を許可する (ワークスペースの規則に足す)
 chloe inbox deny ID [MESSAGE]
 chloe inbox answer ID [TEXT]                    選択肢の番号か答え。TEXT を省くと標準入力から読む
+chloe web login                                 Web の画面に一度だけログインできる URL と QR コード
+chloe web sessions                              Web の画面のセッションの一覧
+chloe web revoke ID
 ```
 
 NAME は SSH のユーザー名の `+` のあとと同じ書き方、OWNER は Organization（`acme`）か team（`acme/dev`）。
