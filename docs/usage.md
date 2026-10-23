@@ -436,7 +436,7 @@ ssh -N -L 8080:127.0.0.1:3000 chloe@chloe.example.com
 開けるのは、VM の中で公開したポートだけである。
 
 ```sh
-chloe-ask port publish 5173            # URL を出す (https://5173-ws-12.chloe-preview.example.net/)
+chloe-ask port publish 5173            # URL を出す (https://k3x7q2m5vbtd.chloe-preview.example.net/)
 chloe-ask port publish 8443 --https    # サーバーが HTTPS で話すとき (証明書は確かめない)
 chloe-ask port list
 chloe-ask port unpublish 5173
@@ -451,8 +451,8 @@ URL を開くと、Web の画面のログインを通ってから、VM の中の
 - **`localhost` だけで待ち受けてよい**：ゲートウェイは VM の中から `localhost:<ポート>` につなぐ。`0.0.0.0` で待ち受ける必要はない。
 - **`Host` は `localhost:<ポート>` になる**：開発用のサーバーが知らない `Host` を断らないよう、VM の中で開いたときと同じにする。元のホストは `X-Forwarded-Host` と `X-Forwarded-Proto` で届く。アプリが `Host` から自分の URL を組み立てると、`localhost` の URL になる。
 - **chloe の認証は VM に届かない**：プロキシのホストの cookie（`chloe_proxy`）と、chloe のトークンを付けた `Authorization` は、VM の中のサーバーに渡す前に除く。アプリが自分で付けた cookie はそのまま届く。
-- **ポートごとに別のオリジン**：ホスト名はポートとワークスペースごとに違うので、あるポートのページから、ほかのポートや Web の画面の cookie は読めない。
-- **WebSocket も通る**：ただし、Vite などの開発用のサーバーは、HMR の WebSocket の `Origin` を確かめることがある。`Origin` はブラウザが開いたホスト（`https://5173-ws-12.…`）のまま届くので、断られたら、サーバーの許すホストにプロキシのドメインを足す（Vite なら `server.allowedHosts` に `.chloe-preview.example.net`）。
+- **ポートごとに別のオリジン**：ホスト名は公開したポートごとのランダムな名前（12 文字）で、ワークスペースもポートも含まない。あるポートのページから、ほかのポートや Web の画面の cookie は読めない。公開し直して `--https` を変えても名前は変わらず、取り消してから公開すると新しい名前になる（前の URL は開けなくなる）。
+- **WebSocket も通る**：ただし、Vite などの開発用のサーバーは、HMR の WebSocket の `Origin` を確かめることがある。`Origin` はブラウザが開いたホスト（`https://k3x7q2m5vbtd.…`）のまま届くので、断られたら、サーバーの許すホストにプロキシのドメインを足す（Vite なら `server.allowedHosts` に `.chloe-preview.example.net`）。
 - **`/__chloe/` はアプリに届かない**：プロキシのホストのログインに `/__chloe/auth` を使う。
 
 Claude Code と Codex には、同じ操作を MCP のツール（`publish_port`）として登録してある。

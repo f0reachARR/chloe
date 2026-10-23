@@ -247,7 +247,7 @@ VM の中で `chloe-ask port publish` で公開したポートは、`url` をブ
 
 ```sh
 api /api/v1/workspace-ports/acme%2Fweb
-# [{"port":5173,"scheme":"http","url":"https://5173-ws-12.chloe-preview.example.net/","created_at":1792152059}]
+# [{"port":5173,"scheme":"http","url":"https://k3x7q2m5vbtd.chloe-preview.example.net/","created_at":1792152059}]
 api '/api/v1/workspace-ports/acme%2Fweb?port=5173' -X DELETE   # 204
 ```
 
@@ -255,7 +255,7 @@ api '/api/v1/workspace-ports/acme%2Fweb?port=5173' -X DELETE   # 204
 トークンは VM の中のサーバーに渡さない。
 
 ```sh
-curl -H "Authorization: Bearer $CHLOE_TOKEN" https://5173-ws-12.chloe-preview.example.net/
+curl -H "Authorization: Bearer $CHLOE_TOKEN" https://k3x7q2m5vbtd.chloe-preview.example.net/
 ```
 
 ブラウザで開くと、プロキシのホストは Web の画面の `/api/auth/proxy` へ送り、Web の画面のセッションで一度だけ使えるコードを作って、プロキシのホストの `/__chloe/auth` へ戻す。

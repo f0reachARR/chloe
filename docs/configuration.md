@@ -236,7 +236,7 @@ Firecracker はホストの CPU とメモリを超えて VM に割り当てら�
 | `public_url` | なし | Web の画面をブラウザで開く URL（`https://chloe.example.com`。リバースプロキシを置くならその URL）。書くと Web の画面のログインを受け付ける。パスは書けない |
 | `web_root` | なし | Web の画面のファイル（deb では `/usr/share/chloe/web`）。なければ画面のファイルは出さず、`/api` だけを受ける |
 | `session_ttl_secs` | `1209600`（14 日） | Web の画面のセッションの有効期間 |
-| `proxy_url` | なし | VM の中で公開したポートを開くプロキシのホストの元（`https://preview.example.com`）。公開したポートごとに `<ポート>-ws-<ワークスペースの ID>.<ドメイン>` のホストを割り当てる。書くには `public_url` も要る（ログインに Web の画面を使う）。パスは書けず、ホストは IP アドレスにできない |
+| `proxy_url` | なし | VM の中で公開したポートを開くプロキシのホストの元（`https://preview.example.com`）。公開したポートごとに、ランダムな名前の `<名前>.<ドメイン>` のホストを割り当てる。書くには `public_url` も要る（ログインに Web の画面を使う）。パスは書けず、ホストは IP アドレスにできない |
 
 `public_url` は、GitHub のログインのコールバックの URL と、Web の画面のセッションで来た要求の `Origin` の確認に使う。
 `https://` なら cookie に `Secure` を付ける。
