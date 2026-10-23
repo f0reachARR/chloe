@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# 段階 9 の確認。一台のマシンで chloe-node を二つ (n1、n2) 動かし、コントロールプレーン
+# 段階 9 と 22 の確認。一台のマシンで chloe-node を二つ (n1、n2) 動かし、コントロールプレーン
 # (ゲートウェイ) から二つのホストにワークスペースを置く。
 #
 # - chloe-node は参加用のトークンで証明書を受け取り、トークンは一度しか使えない。
+# - chloe-node は待ち受けず、コントロールプレーンにトンネルを張る。頼みと中継はすべて
+#   トンネルの上で流れる。
 # - ワークスペースは置いたワークスペースが少ないホストに置かれ、どちらのホストでも端末、
 #   ポート転送、シークレットの差し替えが動く。
-# - chloe-node の API はコントロールプレーンの証明書でしか使えず、ほかのホストに置いた
-#   ランナーの本物の値は問い合わせられない。
-# - つながらないホストのランナーを、reconcile は片づけない。
+# - トンネルは登録したホストの証明書でしか張れず、ほかのホストに置いたランナーの本物の値は
+#   問い合わせられない。
+# - つながらないホストのランナーを、reconcile は片づけない。ホストやゲートウェイを起動し直すと、
+#   ホストがトンネルを張り直して元に戻る。
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +22,6 @@ ssh_port=2227
 keys_port=18911
 internal_port=18910
 forward_port=18914
-declare -A node_port=([n1]=18912 [n2]=18913)
 declare -A node_pid=()
 
 cleanup() {
@@ -70,10 +72,13 @@ start_gateway() {
     gateway_pid=$!
     wait_until 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$ssh_port"
 }
+# node_state 名前: node list のそのホストの状態 (connected since ...、disconnected など)。
+node_state() { "$gateway" --config "$work/gateway.toml" node list | awk -F'\t' -v n="$1" '$1 == n { print $2 }'; }
+connected() { node_state "$1" | grep -q '^connected'; }
 start_node() {
     "$root/target/debug/chloe-node" run --config "$work/$1.toml" >> "$logs/$1.log" 2>&1 &
     node_pid[$1]=$!
-    wait_until 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/${node_port[$1]}"
+    wait_until 10 connected "$1"
 }
 start_gateway
 
@@ -81,7 +86,7 @@ ssh_opts=(-p "$ssh_port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/
     -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o LogLevel=ERROR)
 as() { local user="$1"; shift; ssh "${ssh_opts[@]}" -i "$work/$user" "$user@127.0.0.1" "$@"; }
 tls() { echo "$state/$1/tls"; }
-# 証明書を指定して内部 API や chloe-node の API を呼ぶ。
+# 証明書を指定して内部 API を呼ぶ。
 curl_as() {
     local who="$1"; shift
     curl -s --cacert "$(tls n1)/ca.pem" --cert "$(tls "$who")/cert.pem" --key "$(tls "$who")/key.pem" "$@"
@@ -90,12 +95,10 @@ container_of() { docker ps --format '{{.Names}}' --filter "name=^chloe-n[12]-$1\
 
 section "joining"
 for node in n1 n2; do
-    "$gateway" --config "$work/gateway.toml" node add "$node" --url "https://127.0.0.1:${node_port[$node]}" \
-        > "$work/$node.token" 2>/dev/null
+    "$gateway" --config "$work/gateway.toml" node add "$node" > "$work/$node.token" 2>/dev/null
     check "join-$node" "joined as $node" "$root/target/debug/chloe-node" join \
         --server "https://127.0.0.1:$internal_port" --token "$(cat "$work/$node.token")" --dir "$(tls "$node")"
     cat > "$work/$node.toml" <<EOF
-listen = "127.0.0.1:${node_port[$node]}"
 credentials = "$(tls "$node")"
 control_plane = "https://127.0.0.1:$internal_port"
 
@@ -112,7 +115,9 @@ check token-once "refused to join" sh -c '"$0" join --server "https://127.0.0.1:
 wrong_fp="$(cut -d. -f1 "$work/n1.token").$(printf '0%.0s' $(seq 64))"
 check wrong-ca "does not match" sh -c '"$0" join --server "https://127.0.0.1:$1" --token "$2" --dir "$3" 2>&1 || true' \
     "$root/target/debug/chloe-node" "$internal_port" "$wrong_fp" "$work/again"
-check node-list "n2	https://127.0.0.1:${node_port[n2]}	joined" "$gateway" --config "$work/gateway.toml" node list
+check node-list "n2	connected since" "$gateway" --config "$work/gateway.toml" node list
+check node-dialed "connected to the control plane" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep -o "connected to the control plane" | tail -1' "$logs/n1.log"
+check node-no-listen "none" sh -c 'ss -Htlnp | grep -q "pid=$0," && echo listening || echo none' "${node_pid[n1]}"
 
 section "placement"
 example_secret anthropic_api_key real-secret-A | as alice chloe secret set anthropic_api_key --spec >/dev/null
@@ -157,9 +162,16 @@ check disk-grown-n1 "30G" as alice 'df -BG --output=size /workspace | tail -1'
 check disk-same-node "chloe-n1-ws-1" container_of ws-1
 
 section "mutual TLS"
-check node-api-no-cert "000" sh -c 'curl -s -o /dev/null -w "%{http_code}" --cacert "$0" "$1" || true' \
-    "$(tls n1)/ca.pem" "https://127.0.0.1:${node_port[n1]}/v1/runners"
-check node-api-other-node "403" curl_as n2 -o /dev/null -w '%{http_code}' "https://127.0.0.1:${node_port[n1]}/v1/runners"
+tunnel_url="https://127.0.0.1:$internal_port/internal/v1/tunnel"
+check tunnel-no-cert "403" sh -c 'curl -s -o /dev/null -w "%{http_code}" --cacert "$0" -H "connection: upgrade" -H "upgrade: chloe-tunnel" "$1"' \
+    "$(tls n1)/ca.pem" "$tunnel_url"
+# 登録を消したホストの証明書では、トンネルを張れない。
+"$gateway" --config "$work/gateway.toml" node add n3 > "$work/n3.token" 2>/dev/null
+"$root/target/debug/chloe-node" join --server "https://127.0.0.1:$internal_port" --token "$(cat "$work/n3.token")" \
+    --dir "$(tls n3)" >/dev/null
+"$gateway" --config "$work/gateway.toml" node rm n3 >/dev/null
+check tunnel-removed-node "403" curl_as n3 -o /dev/null -w '%{http_code}' -H 'connection: upgrade' -H 'upgrade: chloe-tunnel' "$tunnel_url"
+check tunnel-refusal-audited "refused a tunnel from an unregistered node" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep -o "refused a tunnel from an unregistered node" | tail -1' "$logs/gateway.log"
 question='{"key":"ws-1","question":"{\"secret\":\"CHLOE_SECRET_ANTHROPIC_API_KEY\"}"}'
 check broker-other-node "403" curl_as n2 -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
     -d "$question" "https://127.0.0.1:$internal_port/internal/v1/broker"
@@ -177,6 +189,8 @@ wait_until 20 count_at_least 1 "$logs/gateway.log" "not reachable; keeping its r
 check unreachable-logged "keeping its runners" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep -o "not reachable; keeping its runners" | tail -1' "$logs/gateway.log"
 check not-cleared "0" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep -c "a runner stopped without the controller" || true' "$logs/gateway.log"
 check other-node-fine "user" as alice 'id -un'
+check disconnected-n2 "disconnected" node_state n2
+check unreachable-session "not reachable" sh -c '"$@" 2>&1 || true' _ ssh "${ssh_opts[@]}" -i "$work/bob" bob@127.0.0.1 true
 start_node n2
 check back-again "user" as bob 'id -un'
 
@@ -189,6 +203,9 @@ check node-rm-refused "placed on n1" sh -c '"$0" --config "$1" node rm n1 2>&1 |
 section "gateway restart"
 kill "$gateway_pid"; wait "$gateway_pid" 2>/dev/null || true
 start_gateway
+wait_until 40 connected n1 || true
+wait_until 40 connected n2 || true
+check redialed "connected since" node_state n2
 wait_until 10 count_at_least 2 "$logs/gateway.log" "adopted a running runner" || true
 check adopted-both "2" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep -c "adopted a running runner"' "$logs/gateway.log"
 check secret-after-restart "401" anthropic bob
