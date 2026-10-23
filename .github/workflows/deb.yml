@@ -1,5 +1,6 @@
 # deb (chloe-common、chloe-gateway、chloe-node) を作り、成果物として置く。
-# chloe-guest はゲストのイメージが要るので作らない。入れて確かめる packaging/deb/test.sh は手元で回す。
+# タグと手動の実行では、ゲストのカーネルとルートファイルシステムをビルドして chloe-guest も作る。
+# 入れて確かめる packaging/deb/test.sh は KVM が要るので、手元で回す。
 name: deb
 
 on:
@@ -7,6 +8,11 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      guest:
+        description: chloe-guest も作る
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -14,8 +20,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    env:
+      GUEST: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.guest) }}
     steps:
-      # build.sh は作業ツリーに変更があると版に +dirty を付けるので、ほかのことをせずに作る。
+      # build.sh は作業ツリーに変更があると版に +dirty を付ける。ビルドの出力は build/ と target/
+      # (どちらも .gitignore にある) にだけ書く。
       - uses: actions/checkout@v7
       # crate と pnpm の取得物、Firecracker のリリースのバイナリ。
       - uses: actions/cache@v6
@@ -23,7 +32,26 @@ jobs:
           path: build/deb/cache
           key: deb-${{ hashFiles('Cargo.lock', 'web/pnpm-lock.yaml', 'images/guest/dev/runner.Dockerfile') }}
           restore-keys: deb-
-      - run: packaging/deb/build.sh
+
+      # カーネルは、版と設定が同じならキャッシュのものを使う。
+      - if: env.GUEST == 'true'
+        id: kernel
+        uses: actions/cache@v6
+        with:
+          path: build/guest/kernel
+          key: guest-kernel-${{ hashFiles('images/guest/kernel/**', 'images/guest/build-lib.sh') }}
+      - if: env.GUEST == 'true' && steps.kernel.outputs.cache-hit != 'true'
+        run: |
+          images/guest/kernel/build.sh
+          # ソースとビルドの途中のファイル (約 2GB) は、あとの手順のために消す。
+          rm -rf build/cache/kernel-*
+      # ルートファイルシステムの guest-agent と chloe-ask を musl でビルドする (rust-toolchain.toml の版)。
+      - if: env.GUEST == 'true'
+        run: rustup toolchain install && rustup show
+      - if: env.GUEST == 'true'
+        run: images/guest/rootfs/build.sh
+
+      - run: packaging/deb/build.sh ${{ env.GUEST == 'true' && '--guest' || '' }}
       - uses: actions/upload-artifact@v7
         with:
           name: deb
