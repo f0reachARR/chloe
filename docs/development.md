@@ -54,6 +54,14 @@ cargo run -p chloe-gateway -- openapi > web/openapi.json
 テストの偽の API は `web/src/test/msw.ts` の `http` で書く。
 スペックにないパスや、型の合わない応答は `pnpm typecheck` で落ちる。
 
+### E2E
+
+本物のゲートウェイと VM を相手にする画面の確認は `web/e2e` に Playwright で書き、`images/guest/dev/test-all.sh web` で回す（下の「VM を使う確認」）。
+スクリプトがゲートウェイを起動し、`chloe web login` の URL（`CHLOE_E2E_LOGIN`）と画面の URL（`CHLOE_E2E_URL`）を渡して `pnpm e2e` を実行する。
+初めは `pnpm exec playwright install chromium` でブラウザを入れる。
+コンソールに誤り（CSP の違反など）が出ると、テストは落ちる。
+`CHLOE_E2E_SCREENSHOTS=1` を付けると、すべてのテストの終わりの画面を `build/dev/web/playwright` に撮るので、見た目を確かめられる。
+
 ## 確認の二層
 
 - **Rust のテスト**：判断の中身を確かめる。controller の停止の予約、作業中のエージェントを待つ停止、reconcile、問い合わせへの答え、方針の層の重ね方、相互 TLS の役割の判定などは、偽のランナーと偽の guest-agent、偽の GitHub を相手に確かめる。
@@ -80,6 +88,7 @@ images/guest/dev/test-all.sh mvp node   # 名前を指定して実行する
 | `root` | ランナーが渡す環境変数、ルートの使い捨てと保持 |
 | `disk` | 指定した大きさでディスクを作ること、次の起動で中身を残して広げること、縮めないこと |
 | `mvp` | 二人の利用者、シークレット、動いたままの更新、HTTP の要求の記録、エージェントからの依頼、ワークスペース、停止、管理 API |
+| `web` | Web の画面の E2E（`web/e2e`）。ビルドした画面を出すゲートウェイを相手に、Playwright の Chromium で、スマートフォンの幅と広い画面の両方で、端末、キーの列、Inbox で答えることを確かめる |
 | `github` | GitHub App（GitHub のふりをするサーバー）、Device Flow を必須にしたログイン、共通のユーザー名と鍵の結び付け、二つの Organization、設定とシークレットの権限、管理の TUI |
 | `lifecycle` | 作業中のエージェントを待つ停止、ゲートウェイの再起動、ポート転送、監査ログ |
 | `machine` | ワークスペースごとの VM の vCPU の数とメモリ、止めるまでの時間（止めないことを含む） |

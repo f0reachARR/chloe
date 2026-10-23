@@ -112,7 +112,7 @@ API を変えたら、スペックと型を作り直す（`cargo test` は、ス
 
 - **部品と画面**：Vitest と Testing Library で、MSW の偽の API を相手に確かめる。偽の API の手続きは `openapi-msw` で書き、スペックの型に合わせる。
 - **出来事の配り方のような、画面のない仕組み**：偽の EventSource などを渡して確かめる。
-- **本物のゲートウェイを相手にする確認**：`mvp-test.sh`（cookie を付けた curl）で行う。ブラウザでの見た目は、Playwright などで手で確かめる。
+- **本物のゲートウェイを相手にする確認**：API の決まり（cookie、`Origin`、権限）は `mvp-test.sh`（cookie を付けた curl と Node の WebSocket）で、画面の動きは `web/e2e` の Playwright（`web-test.sh`）で確かめる。E2E は、利用者が通る道（ログイン、端末、依頼に答える）を、スマートフォンの幅と広い画面の両方で通す。細かな場合分けは Vitest に置く。
 
 ## まだ決めていないこと
 
