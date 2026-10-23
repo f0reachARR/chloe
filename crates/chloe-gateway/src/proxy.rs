@@ -156,6 +156,15 @@ async fn handle(shared: Arc<Shared>, base: ProxyBase, name: &str, request: Reque
         Ok(None) => return to_login(&shared, name, &request),
         Err(response) => return *response,
     };
+    if let Via::Session(session) = caller.via
+        && let Some(reason) = cross_site(request.method(), request.headers(), &base.origin(name))
+    {
+        warn!(target: "audit", via = "web", login = caller.login, session, workspace_id = target.workspace_id, port = target.port, method = %request.method(), "refused a proxy request from another site: {reason}");
+        return text(
+            StatusCode::FORBIDDEN,
+            format!("refused a request from another site ({reason})"),
+        );
+    }
     let workspace = match authorize(&shared, &caller, target).await {
         Ok(workspace) => workspace,
         Err(response) => return *response,
@@ -232,6 +241,36 @@ async fn authenticate(
         };
         (caller, false)
     }))
+}
+
+/// cookie で来た要求が、ほかのサイトのページから送らせたものなら、その理由を返す。
+///
+/// プロキシのホストはどれも同じドメインの下にあり、ブラウザから見ると互いに同じサイトなので、
+/// `SameSite=Lax` の cookie は、ほかのワークスペースの VM の中のページからの要求にも付く。
+/// WebSocket には CORS がなく、ほかのページからでも中身を読めてしまう。そこで、
+///
+/// - ほかのオリジンからの要求 (`Sec-Fetch-Site` が `same-site` か `cross-site`) は、ページを開く
+///   GET (`Sec-Fetch-Mode: navigate`) だけを通す。読み込み、`fetch`、WebSocket は断る。
+/// - WebSocket の切り替えと、GET と HEAD のほかの要求は、`Origin` があればこのホストのものに限る
+///   (`Sec-Fetch-*` を送らないブラウザのため)。
+///
+/// `Origin` も `Sec-Fetch-Site` もない要求は、ブラウザでないものとして通す。
+fn cross_site(method: &Method, headers: &HeaderMap, own_origin: &str) -> Option<String> {
+    let value = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let navigation = matches!(*method, Method::GET | Method::HEAD)
+        && value("sec-fetch-mode") == Some("navigate")
+        && !headers.contains_key(header::UPGRADE);
+    if let Some(site @ ("same-site" | "cross-site")) = value("sec-fetch-site")
+        && !navigation
+    {
+        return Some(format!("Sec-Fetch-Site: {site}"));
+    }
+    let unsafe_request =
+        !matches!(*method, Method::GET | Method::HEAD) || headers.contains_key(header::UPGRADE);
+    match value("origin") {
+        Some(origin) if unsafe_request && origin != own_origin => Some(format!("Origin: {origin}")),
+        _ => None,
+    }
 }
 
 /// 利用者がまだログインでき、公開したポートのワークスペースに入れるかを確かめる。
@@ -901,6 +940,91 @@ mod tests {
         let switching = downstream_response(switching);
         assert_eq!(switching.headers()["upgrade"], "websocket");
         assert_eq!(switching.headers()["connection"], "upgrade");
+    }
+
+    #[test]
+    fn refuses_requests_from_other_sites() {
+        let own = "https://k3x7q2m5vbtd.preview.example.com";
+        let other = "https://p4rz6wq2hnma.preview.example.com";
+        let check = |method: Method, pairs: &[(&'static str, &str)]| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(*name, value.parse().unwrap());
+            }
+            cross_site(&method, &headers, own)
+        };
+        fn ws<'a>(origin: &'a str, site: &'a str) -> [(&'static str, &'a str); 4] {
+            [
+                ("upgrade", "websocket"),
+                ("origin", origin),
+                ("sec-fetch-site", site),
+                ("sec-fetch-mode", "websocket"),
+            ]
+        }
+        // 自分のページからの WebSocket、fetch、フォームは通す。
+        assert_eq!(check(Method::GET, &ws(own, "same-origin")), None);
+        assert_eq!(
+            check(
+                Method::POST,
+                &[("origin", own), ("sec-fetch-site", "same-origin")]
+            ),
+            None
+        );
+        // ほかのプロキシのホストからは断る。
+        assert!(check(Method::GET, &ws(other, "same-site")).is_some());
+        assert!(
+            check(
+                Method::POST,
+                &[("origin", other), ("sec-fetch-site", "same-site")]
+            )
+            .is_some()
+        );
+        assert!(
+            check(
+                Method::GET,
+                &[
+                    ("sec-fetch-site", "same-site"),
+                    ("sec-fetch-mode", "no-cors")
+                ]
+            )
+            .is_some()
+        );
+        assert!(
+            check(
+                Method::GET,
+                &[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "cors")]
+            )
+            .is_some()
+        );
+        // Sec-Fetch-* を送らないブラウザでも、Origin で断る。
+        assert!(check(Method::GET, &[("upgrade", "websocket"), ("origin", other)]).is_some());
+        assert!(check(Method::DELETE, &[("origin", "null")]).is_some());
+        // ほかのサイトのリンクからページを開くのは通す (Web の画面のリンクなど)。
+        assert_eq!(
+            check(
+                Method::GET,
+                &[
+                    ("sec-fetch-site", "cross-site"),
+                    ("sec-fetch-mode", "navigate")
+                ]
+            ),
+            None
+        );
+        // ほかのサイトのフォームから送らせる POST は断る。
+        assert!(
+            check(
+                Method::POST,
+                &[
+                    ("origin", other),
+                    ("sec-fetch-site", "same-site"),
+                    ("sec-fetch-mode", "navigate")
+                ]
+            )
+            .is_some()
+        );
+        // ブラウザでないもの (Origin も Sec-Fetch-* もない) は通す。
+        assert_eq!(check(Method::POST, &[]), None);
+        assert_eq!(check(Method::GET, &[("upgrade", "websocket")]), None);
     }
 
     #[test]
