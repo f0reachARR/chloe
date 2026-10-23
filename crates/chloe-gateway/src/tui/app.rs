@@ -913,6 +913,8 @@ pub(crate) mod tests {
             vcpus: 4,
             memory_mib: 4096,
             idle_timeout_secs: Some(1800),
+            pending_asks: 0,
+            busy: None,
         }]));
         let more = app.apply(Outcome::Owners(vec![
             Owner::User("alice".into()),

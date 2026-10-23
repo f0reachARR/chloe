@@ -99,6 +99,22 @@ pub struct ApiConfig {
     pub tls_cert: Option<PathBuf>,
     #[serde(default)]
     pub tls_key: Option<PathBuf>,
+    /// Web の画面を開く URL (`https://chloe.example.com:8080` など。リバースプロキシを置くなら
+    /// その URL)。あれば Web の画面を出す。GitHub のログインのコールバックと、cookie で来た
+    /// 要求の `Origin` の確認に使う。`https://` なら cookie に `Secure` を付ける。
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// Web の画面のビルドしたファイル (`index.html` のあるディレクトリ)。deb では
+    /// `/usr/share/chloe/web`。なければ画面のファイルは出さない (開発で Vite から出すとき)。
+    #[serde(default)]
+    pub web_root: Option<PathBuf>,
+    /// Web の画面のセッションの有効期間 (秒)。
+    #[serde(default = "default_session_ttl")]
+    pub session_ttl_secs: i64,
+}
+
+fn default_session_ttl() -> i64 {
+    14 * 24 * 60 * 60
 }
 
 /// 複数のホストにランナーを置くときの、コントロールプレーンの設定。

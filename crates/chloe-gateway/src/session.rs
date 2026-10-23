@@ -937,7 +937,7 @@ async fn choose_workspace(
     // 管理の TUI から戻ったあとは、default しかなくても選ぶ画面を出す。
     let mut managed = false;
     loop {
-        let workspaces = match ops::list_workspaces(&shared, login).await {
+        let workspaces = match ops::list_workspaces(&shared, login, false).await {
             Ok(workspaces) => workspaces,
             Err(error) => {
                 warn!("failed to list workspaces: {error}");

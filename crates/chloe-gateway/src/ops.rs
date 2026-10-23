@@ -8,7 +8,7 @@ use chloe_controller::catalog::{self, SecretInput, SecretSpec};
 use chloe_controller::runner::{
     PolicyLayer, RuleOrigin, WorkspacePolicy, label_rules, most_specific,
 };
-use chloe_controller::store::{ApiToken, SshKey};
+use chloe_controller::store::{ApiToken, SshKey, WebSession};
 use chloe_controller::workspace::{
     DiskSizes, IdleStop, MachineSize, RootMode, Workspace, WorkspaceRef,
 };
@@ -87,6 +87,12 @@ pub struct WorkspaceInfo {
     pub memory_mib: u32,
     /// 最後の接続が閉じてから止めるまでの秒数。既定を当てはめたもの。止めないなら `None`。
     pub idle_timeout_secs: Option<u64>,
+    /// 答えを待つ、エージェントからの依頼の数。
+    pub pending_asks: usize,
+    /// 作業中のエージェントの印。尋ねたときだけ (`Some`) 返す。止まっていれば空、VM が
+    /// 答えなければ `Some(None)` (JSON の `null`)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub busy: Option<Option<Vec<String>>>,
 }
 
 fn info(shared: &Shared, ws: &Workspace, running: bool) -> WorkspaceInfo {
@@ -104,7 +110,43 @@ fn info(shared: &Shared, ws: &Workspace, running: bool) -> WorkspaceInfo {
             .idle_stop
             .timeout(shared.controller.idle_timeout())
             .map(|d| d.as_secs()),
+        pending_asks: 0,
+        busy: None,
     }
+}
+
+/// VM に作業中かを尋ねて待つ長さ。一覧を返すのを遅らせすぎないよう、停止の判断より短くする。
+const STATUS_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 答えを待つ依頼の数を入れ、`status` なら動いているワークスペースの VM に作業中かを尋ねる
+/// (まとめて尋ね、それぞれ [`STATUS_WAIT`] まで待つ)。
+async fn fill_status(
+    shared: &Shared,
+    workspaces: &[Workspace],
+    infos: &mut [WorkspaceInfo],
+    status: bool,
+) -> Result<()> {
+    let ids: Vec<i64> = workspaces.iter().map(|ws| ws.id).collect();
+    let pending = shared.controller.asks().list(&ids, true).await?;
+    for (ws, info) in workspaces.iter().zip(infos.iter_mut()) {
+        info.pending_asks = pending.iter().filter(|a| a.workspace_id == ws.id).count();
+    }
+    if status {
+        let busy = futures::future::join_all(workspaces.iter().zip(infos.iter()).map(
+            |(ws, info)| async move {
+                if info.running {
+                    shared.controller.agent_activity(ws.id, STATUS_WAIT).await
+                } else {
+                    Some(vec![])
+                }
+            },
+        ))
+        .await;
+        for (info, busy) in infos.iter_mut().zip(busy) {
+            info.busy = Some(busy);
+        }
+    }
+    Ok(())
 }
 
 /// 作るワークスペースの設定。書かなかったものは既定を使う。
@@ -117,17 +159,24 @@ pub struct NewWorkspace {
     pub idle_stop: IdleStop,
 }
 
-pub async fn list_workspaces(shared: &Shared, login: &str) -> Result<Vec<WorkspaceInfo>> {
+/// 入れるワークスペースの一覧。`status` なら、動いているものの VM に作業中かを尋ねる。
+pub async fn list_workspaces(
+    shared: &Shared,
+    login: &str,
+    status: bool,
+) -> Result<Vec<WorkspaceInfo>> {
     let workspaces = shared
         .controller
         .store()
         .list(&shared.owners_for(login).await?)
         .await?;
     let running = shared.controller.running().await?;
-    Ok(workspaces
+    let mut infos: Vec<WorkspaceInfo> = workspaces
         .iter()
         .map(|ws| info(shared, ws, running.iter().any(|r| r.id == ws.id)))
-        .collect())
+        .collect();
+    fill_status(shared, &workspaces, &mut infos, status).await?;
+    Ok(infos)
 }
 
 /// ワークスペースを作る。書かなかった設定は、ルートの扱いなら持ち主 (個人、Organization と
@@ -185,9 +234,22 @@ pub async fn find_workspace(shared: &Shared, login: &str, name: &str) -> Result<
 }
 
 pub async fn workspace_info(shared: &Shared, login: &str, name: &str) -> Result<WorkspaceInfo> {
+    workspace_status(shared, login, name, false).await
+}
+
+/// ワークスペース。`status` なら、動いていれば VM に作業中かを尋ねる。
+pub async fn workspace_status(
+    shared: &Shared,
+    login: &str,
+    name: &str,
+    status: bool,
+) -> Result<WorkspaceInfo> {
     let ws = find_workspace(shared, login, name).await?;
     let running = shared.controller.running().await?;
-    Ok(info(shared, &ws, running.iter().any(|r| r.id == ws.id)))
+    let mut infos = [info(shared, &ws, running.iter().any(|r| r.id == ws.id))];
+    fill_status(shared, std::slice::from_ref(&ws), &mut infos, status).await?;
+    let [info] = infos;
+    Ok(info)
 }
 
 pub async fn set_root(
@@ -998,6 +1060,42 @@ pub async fn revoke_token(shared: &Shared, login: &str, id: i64) -> Result<()> {
         Ok(())
     } else {
         Err(Error::NotFound(format!("no such token: {id}")))
+    }
+}
+
+/// `chloe web login` の URL を使える長さ (秒)。
+const LOGIN_LINK_TTL_SECS: i64 = 5 * 60;
+
+/// Web の画面に一度だけログインできる URL を作る。
+pub async fn create_login_link(shared: &Shared, login: &str) -> Result<String> {
+    if crate::web::WebConfig::of(shared).is_none() {
+        return Err(Error::Invalid(
+            "the web UI is not enabled on this server (api.public_url is not set)".into(),
+        ));
+    }
+    let code = shared
+        .controller
+        .store()
+        .create_web_login_link(login, LOGIN_LINK_TTL_SECS)
+        .await?;
+    crate::web::login_link(shared, &code)
+        .ok_or_else(|| Error::Internal("the web UI is not enabled".into()))
+}
+
+pub async fn list_web_sessions(shared: &Shared, login: &str) -> Result<Vec<WebSession>> {
+    Ok(shared.controller.store().web_sessions(login).await?)
+}
+
+pub async fn revoke_web_session(shared: &Shared, login: &str, id: i64) -> Result<()> {
+    if shared
+        .controller
+        .store()
+        .revoke_web_session(login, id)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(Error::NotFound(format!("no such session: {id}")))
     }
 }
 

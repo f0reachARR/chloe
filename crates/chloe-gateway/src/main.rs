@@ -16,6 +16,7 @@ mod internal;
 mod ops;
 mod session;
 mod tui;
+mod web;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -318,8 +319,9 @@ async fn build_controller(
 
 /// HTTP(S) の管理 API で待ち受ける。
 async fn start_api(shared: Arc<Shared>, config: &config::ApiConfig) -> Result<()> {
+    web::WebConfig::check(config)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    let router = api::router(shared);
+    let router = api::router(shared.clone()).merge(web::router(shared));
     match (&config.tls_cert, &config.tls_key) {
         (Some(cert), Some(key)) => {
             let tls = chloe_mtls::tls_server_config(

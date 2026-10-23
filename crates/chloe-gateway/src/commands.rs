@@ -32,6 +32,9 @@
 //! chloe inbox allow ID       (通信の許可を承認し、ワークスペースの規則に足す)
 //! chloe inbox deny ID [MESSAGE]
 //! chloe inbox answer ID [TEXT]   (TEXT を省くと標準入力から読む。選択肢の番号でもよい)
+//! chloe web login            (Web の画面に一度だけログインできる URL と QR コード。5 分で切れる)
+//! chloe web sessions         (Web の画面のセッションの一覧)
+//! chloe web revoke ID
 //! ```
 //!
 //! ワークスペースの NAME は SSH と同じ書き方 (`name`、`org/name`、`org/team/name`)。
@@ -180,6 +183,9 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
             inbox_answer(shared, login, id, text).await
         }
         ["inbox", "answer", id, text @ ..] => inbox_answer(shared, login, id, text.join(" ")).await,
+        ["web", "login"] => web_login(shared, login).await,
+        ["web", "sessions"] => web_sessions(shared, login).await,
+        ["web", "revoke", id] => web_revoke(shared, login, id).await,
         [] | ["help"] => Ok(help()),
         _ => Err(format!(
             "unknown command: chloe {}\n{}",
@@ -196,7 +202,7 @@ pub async fn run(shared: &Shared, login: &str, args: &[String], stdin: &[u8]) ->
 fn help() -> String {
     let kinds = catalog::PRESETS;
     format!(
-        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws log NAME [--lines N] [--blocked]   (shows the end of the HTTP request log)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\n  chloe inbox [--all]   (asks from the agents in your workspaces)\n  chloe inbox show ID\n  chloe inbox allow ID   (adds a rule for the host to the workspace)\n  chloe inbox deny ID [MESSAGE]\n  chloe inbox answer ID [TEXT]   (an option number or any text; reads stdin without TEXT)\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
+        "usage:\n  chloe whoami\n  chloe ws list\n  chloe ws create NAME [--root persistent|ephemeral] [--workspace SIZE] [--docker SIZE] [--cpus N] [--memory MEM] [--idle TIME]\n  chloe ws root NAME persistent|ephemeral\n  chloe ws disk NAME [--workspace SIZE] [--docker SIZE]   (grows the disks from the next start)\n  chloe ws machine NAME [--cpus N] [--memory MEM]   (resizes the VM from the next start)\n  chloe ws idle NAME [TIME]   (stops the VM TIME after the last connection closes)\n  chloe ws policy show NAME\n  chloe ws policy set NAME   (reads the rules as TOML from stdin)\n  chloe ws policy rm NAME\n  chloe ws log NAME [--lines N] [--blocked]   (shows the end of the HTTP request log)\n  chloe ws stop NAME\n  chloe ws rm NAME [--disks]   (--disks also deletes its disks)\n  chloe secret list [--owner OWNER]\n  chloe secret show [--owner OWNER] NAME\n  chloe secret set [--owner OWNER] NAME   (reads the value from stdin)\n  chloe secret set [--owner OWNER] NAME --spec   (reads the definition and values as TOML from stdin)\n  chloe secret rm [--owner OWNER] NAME\n  chloe policy show [OWNER]\n  chloe policy set [OWNER]   (reads TOML from stdin)\n  chloe policy rm [OWNER]\n  chloe token create NAME [--expires 30d]\n  chloe token list\n  chloe token revoke ID\n  chloe key list\n  chloe key rm FINGERPRINT\n  chloe github login|status|logout\n  chloe inbox [--all]   (asks from the agents in your workspaces)\n  chloe inbox show ID\n  chloe inbox allow ID   (adds a rule for the host to the workspace)\n  chloe inbox deny ID [MESSAGE]\n  chloe inbox answer ID [TEXT]   (an option number or any text; reads stdin without TEXT)\n  chloe web login   (a one-time URL and QR code to sign in to the web UI)\n  chloe web sessions\n  chloe web revoke ID\nOWNER is an organization (org) or a team (org/team). Without it, secrets and policy are your personal ones.\nSIZE is in GiB (50G or 50). MEM is like 8G or 512M.\nTIME is like 30m, 2h or 1d; never keeps the VM running, default uses the gateway's.\nbuilt-in secrets: {} (other names need a definition: --spec)\n",
         kinds.join(", ")
     )
 }
@@ -277,7 +283,9 @@ fn shown(error: ops::Error) -> String {
 }
 
 async fn ws_list(shared: &Shared, login: &str) -> Result<String, String> {
-    let workspaces = ops::list_workspaces(shared, login).await.map_err(shown)?;
+    let workspaces = ops::list_workspaces(shared, login, false)
+        .await
+        .map_err(shown)?;
     Ok(workspaces
         .iter()
         .map(|ws| {
@@ -835,6 +843,51 @@ async fn token_revoke(shared: &Shared, login: &str, id: &str) -> Result<String, 
     let id: i64 = id.parse().map_err(|_| format!("invalid token id: {id}"))?;
     ops::revoke_token(shared, login, id).await.map_err(shown)?;
     Ok(format!("revoked token {id}\n"))
+}
+
+async fn web_login(shared: &Shared, login: &str) -> Result<String, String> {
+    let url = ops::create_login_link(shared, login).await.map_err(shown)?;
+    let qr = qrcode::QrCode::new(url.as_bytes())
+        .map(|code| {
+            // 暗い背景の端末でも読めるよう、明るい側を黒地のブロックで描く。
+            code.render::<qrcode::render::unicode::Dense1x2>()
+                .dark_color(qrcode::render::unicode::Dense1x2::Light)
+                .light_color(qrcode::render::unicode::Dense1x2::Dark)
+                .build()
+        })
+        .unwrap_or_default();
+    Ok(format!(
+        "{qr}\nOpen this URL within 5 minutes to sign in to the web UI (it works once):\n{url}\n"
+    ))
+}
+
+async fn web_sessions(shared: &Shared, login: &str) -> Result<String, String> {
+    let sessions = ops::list_web_sessions(shared, login).await.map_err(shown)?;
+    Ok(sessions
+        .iter()
+        .map(|s| {
+            let used = s
+                .last_used_at
+                .map(|at| format!("last used {}", format_time_secs(at)))
+                .unwrap_or_else(|| "never used".into());
+            format!(
+                "{}\tsigned in {}\texpires {}\t{used}\n",
+                s.id,
+                format_time_secs(s.created_at),
+                format_time_secs(s.expires_at)
+            )
+        })
+        .collect())
+}
+
+async fn web_revoke(shared: &Shared, login: &str, id: &str) -> Result<String, String> {
+    let id: i64 = id
+        .parse()
+        .map_err(|_| format!("invalid session id: {id}"))?;
+    ops::revoke_web_session(shared, login, id)
+        .await
+        .map_err(shown)?;
+    Ok(format!("signed out session {id}\n"))
 }
 
 async fn key_list(shared: &Shared, login: &str) -> Result<String, String> {
