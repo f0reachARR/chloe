@@ -220,7 +220,7 @@ Firecracker はホストの CPU とメモリを超えて VM に割り当てら�
 
 | 項目 | 既定 | 内容 |
 | --- | --- | --- |
-| `listen` | （必須） | `chloe-node` から受ける内部 API（相互 TLS）の待ち受け |
+| `listen` | （必須） | `chloe-node` から受ける内部 API とトンネル（相互 TLS）の待ち受け |
 | `server_names` | （必須） | 内部 API の証明書に入れる名前。`chloe-node` がつなぐホスト名か IP アドレス |
 | `pki_dir` | （必須） | CA の証明書と鍵を置くディレクトリ。なければ作る |
 | `join_ttl_secs` | `3600` | `node add` で作る参加用のトークンの有効期間 |
@@ -262,11 +262,14 @@ ban したことは監査ログに残る。ban の状態はメモリにだけ置
 
 ## `chloe-node`
 
+`chloe-node` は待ち受けない。
+`control_plane` にトンネルを張り、その上でコントロールプレーンからの頼みを受ける。
+以前の設定の `listen` は、書いてあっても警告を出して使わない。
+
 | 項目 | 内容 |
 | --- | --- |
-| `listen` | コントロールプレーンからの API（相互 TLS）の待ち受け。`node add` の URL と同じポートにする |
 | `credentials` | `chloe-node join` で受け取った証明書と鍵のディレクトリ |
-| `control_plane` | コントロールプレーンの内部 API の URL（本物の値の問い合わせを中継する先） |
+| `control_plane` | コントロールプレーンの内部 API の URL（`https://cp.example.com:8444`）。ここにトンネルを張り、本物の値の問い合わせを中継する。ホスト名は `[cluster]` の `server_names` のどれかにする |
 | `[runner]` | ゲートウェイの `[runner]` と同じ |
 
 ## GitHub App
