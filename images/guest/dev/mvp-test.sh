@@ -431,6 +431,10 @@ proxy_headers() { proxied "$proxy_host" /headers -H "Authorization: Bearer $prox
 check proxy-host-rewritten '"host": "localhost:5173"' proxy_headers
 check proxy-forwarded-host "\"x-forwarded-host\": \"$proxy_host\"" proxy_headers
 check proxy-app-cookie '"cookie": "app=1"' proxy_headers
+# 利用者の IP アドレスは X-Forwarded-For の末尾に足す (手前のリバースプロキシが付けたものは残す)。
+check proxy-forwarded-for '"x-forwarded-for": "127.0.0.1"' proxy_headers
+check proxy-forwarded-for-appended '"x-forwarded-for": "198.51.100.1, 127.0.0.1"' proxied "$proxy_host" /headers \
+    -H "Authorization: Bearer $proxy_token" -H 'X-Forwarded-For: 198.51.100.1'
 # そのページ自身の Origin は localhost:<ポート> に書き換え、ほかのオリジンはそのまま渡す。
 check proxy-foreign-origin '"origin": "https://elsewhere.example.com"' proxied "$proxy_host" /headers \
     -H "Authorization: Bearer $proxy_token" -H 'Origin: https://elsewhere.example.com'
