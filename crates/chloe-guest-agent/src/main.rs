@@ -18,6 +18,8 @@ use tracing::{info, warn};
 
 /// 利用者を指定しない要求を実行する利用者。
 const DEFAULT_USER: &str = "user";
+/// コマンドを指定しない要求で起動するログインシェル。`SHELL` にも入れる。
+const LOGIN_SHELL: &str = "/bin/bash";
 /// ランナーが渡した環境変数 (プレースホルダーなど)。chloe-load-config が置く。
 const RUNNER_ENV: &str = "/run/chloe/env";
 /// 起動したときにランナーが渡したファイル ([`GuestFile`] の JSON)。chloe-load-config が置く。
@@ -179,7 +181,7 @@ fn command_line(request: &ExecRequest) -> (String, Vec<String>) {
     let user = request.user.as_deref().unwrap_or(DEFAULT_USER);
     let command = &request.command;
     match (command.is_empty(), user == "root") {
-        (true, true) => ("/bin/bash".into(), vec!["--login".into()]),
+        (true, true) => (LOGIN_SHELL.into(), vec!["--login".into()]),
         // runuser --login は環境を消すので使わない。ログインシェルで profile を読ませる。
         (true, false) => (
             "/usr/sbin/runuser".into(),
@@ -187,7 +189,7 @@ fn command_line(request: &ExecRequest) -> (String, Vec<String>) {
                 "-u".into(),
                 user.into(),
                 "--".into(),
-                "/bin/bash".into(),
+                LOGIN_SHELL.into(),
                 "--login".into(),
             ],
         ),
@@ -234,11 +236,14 @@ fn busy_markers(dir: &std::path::Path, ttl: std::time::Duration) -> Vec<String> 
     busy
 }
 
-/// 起動するプロセスの環境変数。ランナーの環境変数、CA の変数、要求の環境変数の順に重ねる。
+/// 起動するプロセスの環境変数。ランナーの環境変数、`SHELL` と CA の変数、要求の環境変数の
+/// 順に重ねる。bash は `SHELL` を export しないので、tmux やエージェントがシェルを
+/// 起動できるようここで渡す。
 fn process_env(request: &ExecRequest) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = std::fs::read_to_string(RUNNER_ENV)
         .map(|content| parse_env_file(&content))
         .unwrap_or_default();
+    env.push(("SHELL".into(), LOGIN_SHELL.into()));
     env.extend(
         CA_ENV
             .iter()
@@ -574,6 +579,12 @@ mod tests {
         let (program, args) = command_line(&request(&[], None));
         assert_eq!(program, "/usr/sbin/runuser");
         assert_eq!(args, ["-u", "user", "--", "/bin/bash", "--login"]);
+    }
+
+    #[test]
+    fn process_env_sets_shell() {
+        let env = process_env(&request(&[], None));
+        assert!(env.contains(&("SHELL".into(), LOGIN_SHELL.into())));
     }
 
     #[test]
