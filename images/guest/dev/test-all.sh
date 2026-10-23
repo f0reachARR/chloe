@@ -14,7 +14,7 @@ out="$root/build/dev/test-logs"
 mkdir -p "$out"
 
 names=("$@")
-[ ${#names[@]} -gt 0 ] || names=(smoke net root disk mvp github lifecycle machine node systemd)
+[ ${#names[@]} -gt 0 ] || names=(smoke net root disk mvp web github lifecycle machine node systemd)
 selected() { local n; for n in "${names[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
 # 並べて実行するスクリプトが同時にビルドしないよう、先にビルドしておく。
@@ -32,7 +32,7 @@ run() {
 
 start=$(date +%s)
 pids=()
-for name in smoke net root disk mvp github lifecycle machine node systemd; do
+for name in smoke net root disk mvp web github lifecycle machine node systemd; do
     if selected "$name"; then
         run "$name" &
         pids+=($!)

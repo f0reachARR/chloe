@@ -216,7 +216,7 @@ function TerminalSession({ workspace, onRestart }: { workspace: string; onRestar
         </Group>
         {ended && (
           <Button size="compact-sm" leftSection={<IconRefresh size={14} />} onClick={onRestart}>
-            New shell
+            {state.kind === 'failed' ? 'Retry' : 'New shell'}
           </Button>
         )}
       </Group>
@@ -231,7 +231,11 @@ function TerminalSession({ workspace, onRestart }: { workspace: string; onRestar
         mih={0}
         p={4}
         bg={themes[scheme].background}
-        style={{ borderRadius: 'var(--mantine-radius-md)', overflow: 'hidden' }}
+        style={{
+          border: '1px solid var(--mantine-color-default-border)',
+          borderRadius: 'var(--mantine-radius-md)',
+          overflow: 'hidden',
+        }}
       />
       <ScrollArea type="never">
         <Group gap={6} wrap="nowrap">
