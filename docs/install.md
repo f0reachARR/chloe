@@ -291,7 +291,7 @@ TLS を終端するリバースプロキシの後ろに置くときは、`public
 画面は `/` から置くので、`public_url` にパスは書けない（`https://example.com/chloe` のようにはできない）。
 依頼の出来事は `/api/v1/events` から SSE で流すので、リバースプロキシで応答を溜めないようにし、待ち時間を長くする（nginx なら `proxy_buffering off;` と `proxy_read_timeout 1h;`。ゲートウェイは `X-Accel-Buffering: no` も返す）。
 Web の端末は `/api/v1/workspace-terminal/` を WebSocket に切り替えるので、リバースプロキシで `Upgrade` と `Connection` のヘッダーを通す。
-端末は何も打たないあいだ黙っているので、待ち時間は長くする。
+端末は何も打たないあいだも、画面が 30 秒ごとに `ping` のフレームを送り、ゲートウェイが `pong` を返す。待ち時間はそれより長くする（nginx の既定の 60 秒でも切れない）。
 
 ```nginx
 # http の中

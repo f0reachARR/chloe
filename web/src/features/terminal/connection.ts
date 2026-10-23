@@ -1,10 +1,15 @@
 // 端末の WebSocket (`/api/v1/workspace-terminal/{name}`)。バイナリのフレームは端末の入力と出力、
 // テキストのフレームは JSON (送るのは ClientFrame、受けるのは ServerFrame)。
 // 切れたらシェルは終わるので (SSH と同じ)、つなぎ直しはしない。開き直すかは利用者が決める。
+// 何も打たないあいだに途中のリバースプロキシに切られないよう、ping のフレームを送り続ける
+// (ブラウザからは制御フレームの Ping を送れない)。
 import type { Schemas } from '@/shared/api/client';
 
 type ClientFrame = Schemas['ClientFrame'];
 type ServerFrame = Schemas['ServerFrame'];
+
+// ping のフレームを送る間隔。nginx などの既定の待ち時間 (60 秒) より短くする。
+export const PING_INTERVAL_MS = 30_000;
 
 export type TerminalState =
   | { kind: 'connecting' }
@@ -53,6 +58,17 @@ export function connectTerminal({
   const ended = () => state.kind === 'exited' || state.kind === 'failed' || state.kind === 'closed';
   onState(state);
 
+  let pinger: ReturnType<typeof setInterval> | undefined;
+  const stopPinging = () => clearInterval(pinger);
+  socket.addEventListener('open', () => {
+    pinger = setInterval(() => {
+      if (open()) {
+        const frame: ClientFrame = { type: 'ping' };
+        socket.send(JSON.stringify(frame));
+      }
+    }, PING_INTERVAL_MS);
+  });
+
   socket.addEventListener('message', (event: MessageEvent) => {
     if (typeof event.data !== 'string') {
       if (state.kind === 'starting' || state.kind === 'connecting') {
@@ -83,6 +99,7 @@ export function connectTerminal({
     }
   });
   socket.addEventListener('close', () => {
+    stopPinging();
     if (ended()) {
       return;
     }
@@ -113,6 +130,7 @@ export function connectTerminal({
       }
     },
     close() {
+      stopPinging();
       socket.close();
     },
   };

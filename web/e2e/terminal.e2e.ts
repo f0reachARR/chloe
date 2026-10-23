@@ -78,3 +78,25 @@ test('answers an ask from the inbox while the agent waits in the terminal', asyn
   await expect(inbox.getByText('Ship it from the web?')).toBeHidden();
   await expect(terminalText(page)).toContainText('ANSWER=ship-now');
 });
+
+test('keeps an idle terminal alive with ping and pong', async ({ page }) => {
+  // 画面の setInterval を早送りできるようにする (時計はふつうに進む)。
+  await page.clock.install();
+  const sent: string[] = [];
+  const received: string[] = [];
+  page.on('websocket', (socket) => {
+    socket.on('framesent', ({ payload }) => typeof payload === 'string' && sent.push(payload));
+    socket.on(
+      'framereceived',
+      ({ payload }) => typeof payload === 'string' && received.push(payload),
+    );
+  });
+  await openTerminal(page, workspace);
+  // ping を送る間隔 (30 秒) を二度過ぎるまで、何も打たない。
+  await page.clock.runFor(65_000);
+  await expect.poll(() => received.filter((frame) => frame === '{"type":"pong"}').length).toBe(2);
+  expect(sent.filter((frame) => frame === '{"type":"ping"}')).toHaveLength(2);
+  // 黙っていたあとも、同じシェルが使える。
+  await run(page, 'echo "ALIVE-$((6*7))"');
+  await expect(terminalText(page)).toContainText('ALIVE-42');
+});

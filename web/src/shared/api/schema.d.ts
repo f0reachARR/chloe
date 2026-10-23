@@ -430,6 +430,9 @@ export interface components {
             rows: number;
             /** @enum {string} */
             type: "resize";
+        } | {
+            /** @enum {string} */
+            type: "ping";
         };
         CreateToken: {
             /** @description `30d` や `12h`。なければ期限なし。 */
@@ -501,6 +504,9 @@ export interface components {
             message: string;
             /** @enum {string} */
             type: "error";
+        } | {
+            /** @enum {string} */
+            type: "pong";
         };
         UpdateWorkspace: {
             /** Format: int32 */
