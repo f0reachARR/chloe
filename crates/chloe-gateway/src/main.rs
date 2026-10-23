@@ -15,6 +15,7 @@ mod github_token;
 mod internal;
 mod ops;
 mod session;
+mod terminal;
 mod tui;
 mod web;
 
