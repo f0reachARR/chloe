@@ -33,7 +33,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        self.reply(200, f"posted {body.decode()}")
+        self.reply(200, f"posted {body[:40].decode()} ({len(body)} bytes)")
 
     def reply(self, status, body, cookie=None):
         data = body.encode()

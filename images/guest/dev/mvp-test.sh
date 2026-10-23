@@ -417,6 +417,10 @@ bob_proxy_token="$(as bob chloe token create proxy --expires 1d | head -1)"
 check proxy-token "hello from 5173" proxied "$proxy_host" / -H "Authorization: Bearer $proxy_token"
 check proxy-https "hello from 8443" proxied "$https_host" / -H "Authorization: Bearer $proxy_token"
 check proxy-post "posted body" proxied "$proxy_host" /submit -H "Authorization: Bearer $proxy_token" -d body
+# 本文は溜めずに流すので、管理 API の本文の上限 (2 MiB) は効かない。
+head -c 5000000 /dev/zero | tr '\0' a > "$work/large-body"
+check proxy-large-body "(5000000 bytes)" proxied "$proxy_host" /submit -H "Authorization: Bearer $proxy_token" \
+    --data-binary @"$work/large-body"
 check proxy-websocket "echo:hi" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" "$proxy_token" hi
 proxy_headers() { proxied "$proxy_host" /headers -H "Authorization: Bearer $proxy_token" -H 'Cookie: app=1; chloe_proxy=x'; }
 check proxy-host-rewritten '"host": "localhost:5173"' proxy_headers
