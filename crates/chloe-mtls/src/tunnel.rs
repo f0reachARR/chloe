@@ -13,9 +13,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::{Extension, Router};
@@ -40,13 +41,19 @@ pub const TUNNEL_PATH: &str = "/internal/v1/tunnel";
 /// トンネルの Upgrade で使うプロトコルの名前。
 pub const TUNNEL_UPGRADE: &str = "chloe-tunnel";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 一つのトンネルで同時に開いておけるストリームの数。端末、ポート転送の接続、API の要求が
+/// それぞれ一本ずつ使う。
+const MAX_OPEN_STREAMS: usize = 1024;
 
 fn yamux_config() -> yamux::Config {
     let mut config = yamux::Config::default();
-    // 相手が受信のウィンドウを広げさせて使わせられるメモリを、1 GiB から 256 MiB に抑える
+    // yamux は、ストリームの数が上限を超えるとトンネルごと閉じてしまう。こちらで数える上限
+    // ([`MAX_OPEN_STREAMS`]) より大きくして、閉じたあとに相手の応答を待っているストリームの
+    // ぶんの余裕を持たせる。
+    config.set_max_num_streams(2 * MAX_OPEN_STREAMS);
+    // 相手が受信のウィンドウを広げさせて使わせられるメモリを、1 GiB から 512 MiB に抑える
     // (ストリームの数の上限 × 256 KiB より小さくはできない)。
-    config.set_max_num_streams(1024);
-    config.set_max_connection_receive_window(Some(256 << 20));
+    config.set_max_connection_receive_window(Some(512 << 20));
     config
 }
 
@@ -59,22 +66,84 @@ type Opener = oneshot::Sender<yamux::Stream>;
 struct Handle {
     id: u64,
     open: mpsc::UnboundedSender<Opener>,
+    /// 開いているストリームの数。
+    active: Arc<AtomicUsize>,
+}
+
+/// トンネルの上のストリーム。落とすと、開いているストリームの数から外れる。
+pub struct TunnelStream {
+    stream: yamux::Stream,
+    _active: Active,
+}
+
+struct Active(Arc<AtomicUsize>);
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl futures::AsyncRead for TunnelStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl futures::AsyncWrite for TunnelStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_close(cx)
+    }
 }
 
 /// トンネルがつながった (`true`) か、切れた (`false`) か。ホストの名前と組にして送る。
 pub type TunnelEvent = (String, bool);
 
 /// コントロールプレーンの側。ホストの名前ごとに、張られたトンネルを持つ。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Tunnels {
     handles: Arc<Mutex<HashMap<String, Handle>>>,
     next_id: Arc<AtomicU64>,
     events: Option<mpsc::UnboundedSender<TunnelEvent>>,
+    max_open_streams: usize,
+}
+
+impl Default for Tunnels {
+    fn default() -> Self {
+        Self {
+            handles: Arc::default(),
+            next_id: Arc::default(),
+            events: None,
+            max_open_streams: MAX_OPEN_STREAMS,
+        }
+    }
 }
 
 impl Tunnels {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_max_open_streams(mut self, max: usize) -> Self {
+        self.max_open_streams = max;
+        self
     }
 
     /// つながったことと切れたことを、起きた順に受け取れるようにする。同じホストが張り直した
@@ -144,7 +213,8 @@ impl Tunnels {
             // 古い Handle を落とすと、古いトンネルは頼みを受けられなくなって閉じる。出来事は
             // 表を変えたときに錠を持ったまま送り、起きた順に届ける。
             let mut handles = self.handles.lock().unwrap();
-            handles.insert(name.to_string(), Handle { id, open });
+            let active = Arc::default();
+            handles.insert(name.to_string(), Handle { id, open, active });
             self.notify(name, true);
         }
         let connection = yamux::Connection::new(
@@ -163,17 +233,27 @@ impl Tunnels {
     }
 
     /// `name` のホストへのストリームを開く。トンネルがなければ [`Error::NotConnected`]。
-    pub async fn open(&self, name: &str) -> Result<yamux::Stream, Error> {
+    /// 開いているストリームが多すぎるときは、トンネルを閉じずにこのストリームだけを断る。
+    pub async fn open(&self, name: &str) -> Result<TunnelStream, Error> {
         let (tx, rx) = oneshot::channel();
-        self.handles
-            .lock()
-            .unwrap()
-            .get(name)
-            .ok_or(Error::NotConnected)?
-            .open
-            .send(tx)
-            .map_err(|_| Error::NotConnected)?;
-        rx.await.map_err(|_| Error::NotConnected)
+        let active = {
+            let handles = self.handles.lock().unwrap();
+            let handle = handles.get(name).ok_or(Error::NotConnected)?;
+            let active = Active(handle.active.clone());
+            if active.0.fetch_add(1, Ordering::Relaxed) >= self.max_open_streams {
+                return Err(Error::Tunnel(format!(
+                    "{} streams are already open",
+                    self.max_open_streams
+                )));
+            }
+            handle.open.send(tx).map_err(|_| Error::NotConnected)?;
+            active
+        };
+        let stream = rx.await.map_err(|_| Error::NotConnected)?;
+        Ok(TunnelStream {
+            stream,
+            _active: active,
+        })
     }
 
     /// `name` のホストの API に、新しいストリームで一つの要求を送る。`request` の URI はパス

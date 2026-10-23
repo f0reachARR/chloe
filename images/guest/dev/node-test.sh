@@ -117,7 +117,7 @@ check wrong-ca "does not match" sh -c '"$0" join --server "https://127.0.0.1:$1"
     "$root/target/debug/chloe-node" "$internal_port" "$wrong_fp" "$work/again"
 check node-list "n2	connected since" "$gateway" --config "$work/gateway.toml" node list
 check node-dialed "connected to the control plane" sh -c 'sed "s/\x1b\[[0-9;]*m//g" "$0" | grep -o "connected to the control plane" | tail -1' "$logs/n1.log"
-check node-no-listen "none" sh -c 'ss -Htlnp | grep -q "pid=$0," && echo listening || echo none' "${node_pid[n1]}"
+check node-no-listen "none" sh -c 'out="$(ss -Htlnp)" || exit 1; echo "$out" | grep -q "pid=$0," && echo listening || echo none' "${node_pid[n1]}"
 
 section "placement"
 example_secret anthropic_api_key real-secret-A | as alice chloe secret set anthropic_api_key --spec >/dev/null

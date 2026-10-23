@@ -324,3 +324,33 @@ async fn tunnels_need_the_right_certificates() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn too_many_streams_fail_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = Ca::load_or_create(dir.path()).unwrap();
+    let control = ca.issue(&Role::ControlPlane, &names()).unwrap();
+    let tunnels = tunnel::Tunnels::new().with_max_open_streams(2);
+    let url = start(
+        &control,
+        ClientAuth::Optional,
+        tunnel_router(tunnels.clone()),
+    )
+    .await;
+    let node = node_credentials(&ca, "n1");
+    let router = Router::new().route("/whoami", get(whoami));
+    tokio::spawn(async move { tunnel::dial(&url, &node, router, || {}).await });
+    wait_connected(&tunnels, "n1", true).await;
+
+    let first = tunnels.open("n1").await.unwrap();
+    let _second = tunnels.open("n1").await.unwrap();
+    // 上限を超えたストリームだけを断り、トンネルは閉じない。
+    assert!(matches!(tunnels.open("n1").await, Err(Error::Tunnel(_))));
+    assert!(tunnels.is_connected("n1"));
+    drop(first);
+    let request = hyper::Request::get("/whoami")
+        .body(http_body_util::Full::default())
+        .unwrap();
+    let response = tunnels.request("n1", request).await.unwrap();
+    assert_eq!(response.status(), 200);
+}
