@@ -6,6 +6,8 @@
 //!   [`Peer`] の役割を確かめる。
 //! - `chloe-node` は参加するとき、CA の証明書の指紋を含む参加用のトークンで、最初の接続の
 //!   相手を確かめる ([`fetch_ca`])。
+//! - コントロールプレーンから `chloe-node` へは接続を始めない。`chloe-node` が張ったトンネルの
+//!   上で、コントロールプレーンが `chloe-node` の API を呼ぶ ([`tunnel`])。
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -23,8 +25,10 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
+
+pub mod tunnel;
 
 const CA_COMMON_NAME: &str = "chloe CA";
 const CONTROL_PLANE_COMMON_NAME: &str = "chloe-control-plane";
@@ -43,6 +47,13 @@ pub enum Error {
     Tls(#[from] rustls::Error),
     #[error("HTTP: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("HTTP: {0}")]
+    Hyper(#[from] hyper::Error),
+    #[error("tunnel: {0}")]
+    Tunnel(String),
+    /// そのホストのトンネルがない (ホストがつながっていない)。
+    #[error("the node is not connected")]
+    NotConnected,
     #[error("{0}")]
     Invalid(String),
 }
@@ -256,27 +267,39 @@ pub enum ClientAuth {
     Optional,
 }
 
+fn roots(ca_pem: &str) -> Result<rustls::RootCertStore, Error> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
+        let cert = cert.map_err(|e| Error::Invalid(format!("CA PEM: {e}")))?;
+        roots.add(cert)?;
+    }
+    Ok(roots)
+}
+
+fn cert_and_key(
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Error> {
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| Error::Invalid(format!("certificate PEM: {e}")))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| Error::Invalid(format!("key PEM: {e}")))?;
+    Ok((certs, key))
+}
+
 /// 相互 TLS の待ち受けの設定。
 pub fn server_config(
     credentials: &Credentials,
     client_auth: ClientAuth,
 ) -> Result<Arc<rustls::ServerConfig>, Error> {
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in CertificateDer::pem_slice_iter(credentials.ca_pem.as_bytes()) {
-        let cert = cert.map_err(|e| Error::Invalid(format!("CA PEM: {e}")))?;
-        roots.add(cert)?;
-    }
-    let builder = WebPkiClientVerifier::builder(Arc::new(roots));
+    let builder = WebPkiClientVerifier::builder(Arc::new(roots(&credentials.ca_pem)?));
     let verifier = match client_auth {
         ClientAuth::Required => builder.build(),
         ClientAuth::Optional => builder.allow_unauthenticated().build(),
     }
     .map_err(|e| Error::Invalid(format!("client verifier: {e}")))?;
-    let certs = CertificateDer::pem_slice_iter(credentials.cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| Error::Invalid(format!("certificate PEM: {e}")))?;
-    let key = PrivateKeyDer::from_pem_slice(credentials.key_pem.as_bytes())
-        .map_err(|e| Error::Invalid(format!("key PEM: {e}")))?;
+    let (certs, key) = cert_and_key(&credentials.cert_pem, &credentials.key_pem)?;
     let mut config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)?;
@@ -285,16 +308,37 @@ pub fn server_config(
     Ok(Arc::new(config))
 }
 
+/// CA が発行した証明書の相手にだけ、自分の証明書でつなぐ TLS の設定 (トンネルを張るときに使う)。
+fn client_config(credentials: &Credentials) -> Result<Arc<rustls::ClientConfig>, Error> {
+    let (certs, key) = cert_and_key(&credentials.cert_pem, &credentials.key_pem)?;
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots(&credentials.ca_pem)?)
+        .with_client_auth_cert(certs, key)?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// 相手が黙って消えたとき (ネットワークが切れたとき) に、長く待たずに接続を切る。トンネルは
+/// 何も流れないあいだも張り続けるので、どちらの側でも設定する。
+fn keepalive(tcp: &TcpStream) -> Result<(), Error> {
+    let socket = socket2::SockRef::from(tcp);
+    socket.set_tcp_keepalive(
+        &socket2::TcpKeepalive::new()
+            .with_time(Duration::from_secs(15))
+            .with_interval(Duration::from_secs(5))
+            .with_retries(3),
+    )?;
+    // 送ったデータに応答がないまま、この時間が過ぎたら切る。
+    socket.set_tcp_user_timeout(Some(Duration::from_secs(30)))?;
+    Ok(())
+}
+
 /// クライアントの証明書を求めない TLS の待ち受けの設定 (利用者向けの管理 API など)。
 pub fn tls_server_config(
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<Arc<rustls::ServerConfig>, Error> {
-    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| Error::Invalid(format!("certificate PEM: {e}")))?;
-    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
-        .map_err(|e| Error::Invalid(format!("key PEM: {e}")))?;
+    let (certs, key) = cert_and_key(cert_pem, key_pem)?;
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
@@ -311,6 +355,9 @@ pub async fn serve(
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
     loop {
         let (tcp, addr) = listener.accept().await?;
+        if let Err(error) = keepalive(&tcp) {
+            debug!(%addr, "failed to set TCP keepalive: {error}");
+        }
         let acceptor = acceptor.clone();
         let router = router.clone();
         tokio::spawn(async move {

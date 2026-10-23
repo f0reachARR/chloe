@@ -26,6 +26,7 @@ bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 futures = "0.3.34"
 hmac = "0.12.1"
+http-body-util = "0.1.5"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "service"] }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "rust_crypto"] }
@@ -45,6 +46,7 @@ schemars = "1.2.3"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+socket2 = { version = "0.6.5", features = ["all"] }
 sha2 = "0.10"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tempfile = "3"
@@ -61,6 +63,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 tui-input = "0.15.5"
 utoipa = "6.0.0"
 x509-parser = "0.18"
+yamux = "0.14.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
