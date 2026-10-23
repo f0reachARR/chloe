@@ -1,0 +1,31 @@
+# deb (chloe-common、chloe-gateway、chloe-node) を作り、成果物として置く。
+# chloe-guest はゲストのイメージが要るので作らない。入れて確かめる packaging/deb/test.sh は手元で回す。
+name: deb
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      # build.sh は作業ツリーに変更があると版に +dirty を付けるので、ほかのことをせずに作る。
+      - uses: actions/checkout@v7
+      # crate と pnpm の取得物、Firecracker のリリースのバイナリ。
+      - uses: actions/cache@v6
+        with:
+          path: build/deb/cache
+          key: deb-${{ hashFiles('Cargo.lock', 'web/pnpm-lock.yaml', 'images/guest/dev/runner.Dockerfile') }}
+          restore-keys: deb-
+      - run: packaging/deb/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb
+          path: build/deb/*.deb
+          if-no-files-found: error
