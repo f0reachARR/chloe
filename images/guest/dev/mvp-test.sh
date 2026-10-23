@@ -420,6 +420,9 @@ proxy_token="$(as alice chloe token create proxy --expires 1d | head -1)"
 bob_proxy_token="$(as bob chloe token create proxy --expires 1d | head -1)"
 check proxy-token "hello from 5173" proxied "$proxy_host" / -H "Authorization: Bearer $proxy_token"
 check proxy-https "hello from 8443" proxied "$https_host" / -H "Authorization: Bearer $proxy_token"
+# X-Forwarded-Proto は、公開の URL (ここでは http) ではなく、VM の中のサーバーとの話し方に合わせる。
+check proxy-proto-http '"x-forwarded-proto": "http"' proxied "$proxy_host" /headers -H "Authorization: Bearer $proxy_token"
+check proxy-proto-https '"x-forwarded-proto": "https"' proxied "$https_host" /headers -H "Authorization: Bearer $proxy_token"
 check proxy-post "posted body" proxied "$proxy_host" /submit -H "Authorization: Bearer $proxy_token" -d body
 # 本文は溜めずに流すので、管理 API の本文の上限 (2 MiB) は効かない。
 head -c 5000000 /dev/zero | tr '\0' a > "$work/large-body"
