@@ -1,3 +1,5 @@
+import type { BrowserContext, Page } from '@playwright/test';
+
 import { expect, test } from './fixtures';
 
 // web-test.sh が acme/proj の VM の中で 5173 を公開し、"hello from 5173" を返すサーバーを動かす。
@@ -15,6 +17,45 @@ test('opens a published port through the web UI sign-in', async ({ page, context
   expect(cookies.find((c) => c.name === 'chloe_proxy')).toMatchObject({ httpOnly: true });
   // Web の画面のセッションの cookie は、プロキシのホストには付かない。
   expect(cookies.find((c) => c.name === 'chloe_session')).toBeUndefined();
+});
+
+// ワークスペースのカードのリンクから、公開したポートを新しいタブで開く (そのホストにログインする)。
+async function openPort(page: Page, context: BrowserContext, port: number) {
+  const [opened] = await Promise.all([
+    context.waitForEvent('page'),
+    page.getByRole('link', { name: new RegExp(String(port)) }).click(),
+  ]);
+  await expect(opened.locator('body')).toContainText(`hello from ${port}`);
+  return opened;
+}
+
+// ページの中で WebSocket を開き、送った文字列への返事を返す。開けなければ `refused`。
+function echo(from: Page, url: string) {
+  return from.evaluate(
+    (target) =>
+      new Promise<string>((resolve) => {
+        const socket = new WebSocket(target);
+        socket.addEventListener('open', () => socket.send('from-page'));
+        socket.addEventListener('message', (event) => {
+          resolve(String(event.data));
+          socket.close();
+        });
+        socket.addEventListener('error', () => resolve('refused'));
+      }),
+    url,
+  );
+}
+
+test('opens a WebSocket from the page but not from another port', async ({ page, context }) => {
+  await page.goto('/workspaces');
+  const own = await openPort(page, context, 5173);
+  const other = await openPort(page, context, 5174);
+  const url = new URL('/ws', own.url());
+  url.protocol = 'ws:';
+  // ブラウザは Sec-WebSocket-Accept を照合するので、切り替えの応答のヘッダーが届いていることも分かる。
+  expect(await echo(own, url.href)).toBe('echo:from-page');
+  // ほかのポートのページからは、5173 のホストの cookie が付いても断る (同じサイトなので付く)。
+  expect(await echo(other, url.href)).toBe('refused');
 });
 
 test.describe(() => {

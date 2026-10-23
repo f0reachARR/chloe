@@ -1,6 +1,8 @@
 // 公開したポートの WebSocket を、プロキシのホストを通して開き、一つ送って返ってきたものを出す。
 //
-//   node proxy-ws.mjs <ゲートウェイのアドレス:ポート> <プロキシのホスト> <トークン> <送る文字列>
+//   node proxy-ws.mjs <ゲートウェイのアドレス:ポート> <プロキシのホスト> <ヘッダー> <送る文字列> [Origin]
+//
+// ヘッダーは `Authorization: Bearer ...` や `Cookie: chloe_proxy=...` のように一行で渡す。
 //
 // プロキシのホストの名前を引かずに、ゲートウェイのアドレスへつないで `Host` で指す (curl の
 // --resolve と同じ)。ホストの *.localhost は ::1 に向くことがあり、確かめるゲートウェイは
@@ -8,7 +10,7 @@
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 
-const [address, host, token, text] = process.argv.slice(2);
+const [address, host, auth, text, origin] = process.argv.slice(2);
 const [ip, port] = address.split(':');
 
 const socket = connect(Number(port), ip);
@@ -20,7 +22,7 @@ socket.on('connect', () => {
   socket.write(
     `GET /ws HTTP/1.1\r\nHost: ${host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
       `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n` +
-      `Authorization: Bearer ${token}\r\n\r\n`,
+      `${auth}\r\n${origin ? `Origin: ${origin}\r\n` : ''}\r\n`,
   );
 });
 

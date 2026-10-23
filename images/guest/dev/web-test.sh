@@ -81,11 +81,14 @@ proxy_login="$(as alice chloe web login | grep -o 'http://[^ ]*' | tail -1)"
 # 公開したポートを開く確かめのために、VM の中でサーバーを動かして公開する。動かす接続が、
 # ワークスペースを止めずにおく。
 as alice+acme/proj 'cat > /tmp/proxy-server.py' < "$here/proxy-server.py"
-ssh "${ssh_opts[@]}" -i "$work/alice" alice+acme/proj@127.0.0.1 'python3 /tmp/proxy-server.py 5173' \
-    > "$work/server.out" 2>&1 &
+# 5174 は、ほかのポートのページから WebSocket を開けないことを確かめるのに使う。
+ssh "${ssh_opts[@]}" -i "$work/alice" alice+acme/proj@127.0.0.1 \
+    'python3 /tmp/proxy-server.py 5173 & python3 /tmp/proxy-server.py 5174 & wait' > "$work/server.out" 2>&1 &
 server_pid=$!
-wait_until 30 grep -q listening "$work/server.out" || true
+servers_up() { [ "$(grep -c listening "$work/server.out")" -ge 2 ]; }
+wait_until 30 servers_up || true
 proxy_url="$(as alice+acme/proj 'chloe-ask port publish 5173')"
+as alice+acme/proj 'chloe-ask port publish 5174' >/dev/null
 check port-published ".preview.localhost:" echo "$proxy_url"
 
 section "browser"

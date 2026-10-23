@@ -425,7 +425,8 @@ check proxy-post "posted body" proxied "$proxy_host" /submit -H "Authorization: 
 head -c 5000000 /dev/zero | tr '\0' a > "$work/large-body"
 check proxy-large-body "(5000000 bytes)" proxied "$proxy_host" /submit -H "Authorization: Bearer $proxy_token" \
     --data-binary @"$work/large-body"
-check proxy-websocket "echo:hi" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" "$proxy_token" hi
+check proxy-websocket "echo:hi" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
+    "Authorization: Bearer $proxy_token" hi
 proxy_headers() { proxied "$proxy_host" /headers -H "Authorization: Bearer $proxy_token" -H 'Cookie: app=1; chloe_proxy=x'; }
 check proxy-host-rewritten '"host": "localhost:5173"' proxy_headers
 check proxy-forwarded-host "\"x-forwarded-host\": \"$proxy_host\"" proxy_headers
@@ -447,6 +448,21 @@ check proxy-cookie "HttpOnly; SameSite=Lax" echo "$redeemed"
 proxy_cookie="$(echo "$redeemed" | sed -n 's/^set-cookie: \(chloe_proxy=[^;]*\).*/\1/ip')"
 check proxy-code-once "already used" proxied "$proxy_host" "/__chloe/auth?${code_url#*\?}"
 check proxy-cookie-works '"x-forwarded-proto": "http"' proxied "$proxy_host" /headers -H "Cookie: $proxy_cookie; app=2"
+# cookie で来た要求は、ほかのサイト (ほかのプロキシのホストを含む) のページから送らせたものを断る。
+own_origin="http://$proxy_host:$api_port"
+other_origin="http://$https_host:$api_port"
+check proxy-same-origin-post "posted x" proxied "$proxy_host" /submit -H "Cookie: $proxy_cookie" \
+    -H "Origin: $own_origin" -H 'Sec-Fetch-Site: same-origin' -d x
+check proxy-other-origin-post "refused a request from another site" proxied "$proxy_host" /submit \
+    -H "Cookie: $proxy_cookie" -H "Origin: $other_origin" -d x -w ' %{http_code}'
+check proxy-same-site-fetch "403" proxied "$proxy_host" / -o /dev/null -w '%{http_code}' -H "Cookie: $proxy_cookie" \
+    -H 'Sec-Fetch-Site: same-site' -H 'Sec-Fetch-Mode: no-cors'
+check proxy-same-site-navigate "hello from 5173" proxied "$proxy_host" / -H "Cookie: $proxy_cookie" \
+    -H 'Sec-Fetch-Site: same-site' -H 'Sec-Fetch-Mode: navigate'
+check proxy-cookie-websocket "echo:cookie" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
+    "Cookie: $proxy_cookie" cookie "$own_origin"
+check proxy-cross-site-websocket "403" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
+    "Cookie: $proxy_cookie" cookie "$other_origin"
 cookie_leaks() { if proxied "$proxy_host" /headers -H "Cookie: $proxy_cookie" | grep -q chloe_proxy; then echo leaked; else echo clean; fi; }
 check proxy-cookie-not-forwarded "clean" cookie_leaks
 check proxy-cookie-other-port "303" proxied "$https_host" / -o /dev/null -w '%{http_code}' -H "Cookie: $proxy_cookie"
