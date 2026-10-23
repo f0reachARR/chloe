@@ -367,6 +367,18 @@ check web-answer-no-origin "403" curl -s -o /dev/null -w '%{http_code}' -X POST 
 check web-answer '"status":"answered"' web_api "$alice_cookie" POST "/api/v1/asks/$web_ask/answer" -d '{"answer":"yes from the web"}'
 check web-answer-printed "yes from the web" as alice+acme/proj "chloe-ask wait $web_ask"
 kill "$alice_events" "$bob_events" 2>/dev/null || true
+# Web の端末は、SSH の端末と同じシェルを開く。ほかのサイトからの切り替えと、入れない
+# ワークスペースは断る。
+check web-terminal "TERM-OK xterm-256color user" sh -c 'echo "echo TERM-OK \$TERM \$(whoami)" | "$@"' _ \
+    node "$here/web-terminal.mjs" "$web" acme/proj "$alice_cookie"
+check web-terminal-exit "exit=0" sh -c 'echo true | "$@"' _ \
+    node "$here/web-terminal.mjs" "$web" acme/proj "$alice_cookie"
+check web-terminal-no-origin "refused" sh -c 'echo true | "$@"' _ \
+    node "$here/web-terminal.mjs" "$web" acme/proj "$alice_cookie" ''
+check web-terminal-other-origin "refused" sh -c 'echo true | "$@"' _ \
+    node "$here/web-terminal.mjs" "$web" acme/proj "$alice_cookie" https://evil.example.com
+check web-terminal-not-member "refused" sh -c 'echo true | "$@"' _ \
+    node "$here/web-terminal.mjs" "$web" acme/proj "$bob_cookie"
 check web-logout "204" web_api "$alice_cookie" POST /api/auth/logout
 check web-logged-out "401" web_api "$alice_cookie" GET /api/v1/me
 
