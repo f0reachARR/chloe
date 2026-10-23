@@ -1,8 +1,10 @@
 //! ランナーのホストに置く常駐プロセス。
 //!
-//! コントロールプレーンからの相互 TLS の API で、このホストのランナーの起動、停止、一覧、
-//! 方針の入れ替え、guest-agent への接続の中継を受ける。ランナーのプロキシからの本物の値の
-//! 問い合わせは、ランナーごとの Unix ソケットで受けてコントロールプレーンへ中継する。
+//! コントロールプレーンに相互 TLS でトンネルを張り、その上で、このホストのランナーの起動、
+//! 停止、一覧、方針の入れ替え、guest-agent への接続の中継を受ける。待ち受けはしないので、
+//! コントロールプレーンからこのホストへ届かなくてもよい。トンネルが切れたら張り直す。
+//! ランナーのプロキシからの本物の値の問い合わせは、ランナーごとの Unix ソケットで受けて
+//! コントロールプレーンへ中継する。
 //!
 //! ```text
 //! chloe-node join --server https://control-plane:8444 --token <参加用のトークン> --dir <証明書の置き場所>
@@ -15,14 +17,15 @@ mod relay;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chloe_controller::local::RunnerConfig;
 use chloe_controller::runner::RunnerBackend;
-use chloe_mtls::{ClientAuth, Credentials};
+use chloe_mtls::Credentials;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(about = "chloe のランナーのホストの常駐プロセス")]
@@ -45,7 +48,7 @@ enum Command {
         #[arg(long)]
         dir: PathBuf,
     },
-    /// API で待ち受ける。
+    /// コントロールプレーンにトンネルを張り、その上で頼みを受ける。
     Run {
         #[arg(long, env = "CHLOE_NODE_CONFIG")]
         config: PathBuf,
@@ -55,10 +58,13 @@ enum Command {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    listen: SocketAddr,
+    /// 段階 22 より前の設定 (コントロールプレーンからの API の待ち受け)。もう待ち受けないので、
+    /// 書いてあっても警告を出して使わない。
+    #[serde(default)]
+    listen: Option<SocketAddr>,
     /// `join` で受け取った証明書と鍵のディレクトリ。
     credentials: PathBuf,
-    /// コントロールプレーンの内部 API の URL (本物の値の問い合わせを中継する先)。
+    /// コントロールプレーンの内部 API の URL (トンネルを張り、本物の値の問い合わせを中継する先)。
     control_plane: String,
     runner: RunnerConfig,
 }
@@ -115,6 +121,10 @@ async fn join(server: &str, token: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// トンネルを張り直す間隔。張れないあいだは倍にしていき、張れたら最初に戻す。
+const MIN_RETRY: Duration = Duration::from_secs(1);
+const MAX_RETRY: Duration = Duration::from_secs(30);
+
 async fn run(path: &Path) -> Result<()> {
     let config: Config = toml::from_str(
         &std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
@@ -135,11 +145,38 @@ async fn run(path: &Path) -> Result<()> {
     for key in state.backend.list().await? {
         relay::start(&state, &key)?;
     }
-    let tls = chloe_mtls::server_config(&credentials, ClientAuth::Required)?;
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    info!(listen = %config.listen, "listening");
-    chloe_mtls::serve(listener, tls, api::router(state)).await?;
-    Ok(())
+    if let Some(listen) = config.listen {
+        warn!(
+            %listen,
+            "ignoring listen in the configuration: chloe-node connects to the control plane and no longer listens"
+        );
+    }
+    let router = api::router(state);
+    let mut retry = MIN_RETRY;
+    loop {
+        let mut connected = false;
+        let result =
+            chloe_mtls::tunnel::dial(&config.control_plane, &credentials, router.clone(), || {
+                info!(
+                    control_plane = config.control_plane,
+                    "connected to the control plane"
+                );
+                connected = true;
+            })
+            .await;
+        match result {
+            Ok(()) => warn!("the tunnel to the control plane closed"),
+            Err(error) => warn!(
+                control_plane = config.control_plane,
+                "the tunnel to the control plane failed: {error}"
+            ),
+        }
+        if connected {
+            retry = MIN_RETRY;
+        }
+        tokio::time::sleep(retry).await;
+        retry = (retry * 2).min(MAX_RETRY);
+    }
 }
 
 #[cfg(test)]

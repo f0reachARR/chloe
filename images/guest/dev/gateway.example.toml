@@ -111,10 +111,10 @@ egress_bin = "target/debug/chloe-egress"
 state_root = "build/dev/gateway/workspaces"
 
 # 複数のホストにランナーを置くときは、[runner] の代わりに [cluster] を書く (段階 9)。
-# chloe-gateway --config <this> node add <名前> --url https://<host>:<port> で参加用の
-# トークンを作り、そのホストで chloe-node join を実行する (deploy/node.toml)。
+# chloe-gateway --config <this> node add <名前> で参加用のトークンを作り、そのホストで
+# chloe-node join を実行する (deploy/node.toml)。ホストがこの内部 API にトンネルを張る。
 # [cluster]
-# listen = "0.0.0.0:8444"            # chloe-node から受ける内部 API (相互 TLS)
+# listen = "0.0.0.0:8444"            # chloe-node から受ける内部 API とトンネル (相互 TLS)
 # server_names = ["cp.example.com"]  # chloe-node がつなぐ名前 (証明書に入れる)
 # pki_dir = "build/dev/gateway/pki"  # CA の証明書と鍵
 

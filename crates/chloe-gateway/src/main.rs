@@ -62,17 +62,11 @@ enum Command {
 #[derive(clap::Subcommand)]
 enum NodeCommand {
     /// ホストを登録し、chloe-node join に渡す参加用のトークンを表示する。
-    Add {
-        name: String,
-        /// コントロールプレーンがこのホストの API を呼ぶ URL (https://host:port)。
-        #[arg(long)]
-        url: String,
-    },
+    Add { name: String },
+    /// ホストの一覧。参加したか、トンネルがつながっているかを出す。
     List,
     /// ホストの登録を消す。そのホストの証明書では、もう問い合わせに答えない。
-    Rm {
-        name: String,
-    },
+    Rm { name: String },
 }
 
 #[tokio::main]
@@ -170,10 +164,11 @@ async fn main() -> Result<()> {
         config,
     });
     // 複数のホストで動かすときは、chloe-node からの参加と問い合わせを受ける。
-    if let Some((cluster_config, ca, credentials)) = cluster {
+    if let Some((cluster_config, ca, credentials, tunnels)) = cluster {
         let state = Arc::new(internal::Internal {
             controller: shared.controller.clone(),
             ca,
+            tunnels,
         });
         let tls = chloe_mtls::server_config(&credentials, chloe_mtls::ClientAuth::Optional)?;
         let listener = tokio::net::TcpListener::bind(cluster_config.listen).await?;
@@ -263,11 +258,13 @@ async fn serve_ssh(
     }
 }
 
-/// 複数のホストで動かすときの、内部 API の設定、CA、コントロールプレーンの証明書。
+/// 複数のホストで動かすときの、内部 API の設定、CA、コントロールプレーンの証明書、
+/// ホストが張ったトンネル。
 type ClusterParts = (
     config::ClusterConfig,
     Arc<chloe_mtls::Ca>,
     chloe_mtls::Credentials,
+    chloe_mtls::tunnel::Tunnels,
 );
 
 async fn open_database(config: &Config) -> Result<sqlx::SqlitePool> {
@@ -300,10 +297,19 @@ async fn build_controller(
             let ca = Arc::new(chloe_mtls::Ca::load_or_create(&cluster.pki_dir)?);
             // 起動のたびにコントロールプレーンの証明書を発行し直す (鍵はファイルに置かない)。
             let credentials = ca.issue(&chloe_mtls::Role::ControlPlane, &cluster.server_names)?;
-            let client = chloe_mtls::client(&credentials)?;
+            // 前に動いていたときのトンネルは、もうない。ホストが張り直したら記録する。
+            Store::new(pool.clone()).clear_node_connections().await?;
+            let (tunnels, events) = chloe_mtls::tunnel::Tunnels::with_events();
+            tokio::spawn(internal::record_connections(
+                Store::new(pool.clone()),
+                events,
+            ));
             (
-                Backend::Cluster(ClusterBackend::new(Store::new(pool.clone()), client)),
-                Some((cluster.clone(), ca, credentials)),
+                Backend::Cluster(ClusterBackend::new(
+                    Store::new(pool.clone()),
+                    tunnels.clone(),
+                )),
+                Some((cluster.clone(), ca, credentials, tunnels)),
             )
         }
         _ => anyhow::bail!("write exactly one of [runner] and [cluster] in the configuration"),
@@ -365,18 +371,13 @@ async fn node_command(config: &Config, command: NodeCommand) -> Result<()> {
         .context("write [cluster] in the configuration to use nodes")?;
     let store = Store::new(open_database(config).await?);
     match command {
-        NodeCommand::Add { name, url } => {
+        NodeCommand::Add { name } => {
             anyhow::ensure!(
                 chloe_mtls::valid_node_name(&name),
                 "a node name is 1-63 letters, digits and hyphens"
             );
-            let parsed = reqwest::Url::parse(&url).context("invalid URL")?;
-            anyhow::ensure!(
-                parsed.scheme() == "https" && parsed.host_str().is_some(),
-                "the URL must be https://host:port"
-            );
             let ca = chloe_mtls::Ca::load_or_create(&cluster.pki_dir)?;
-            let secret = store.add_node(&name, &url, cluster.join_ttl_secs).await?;
+            let secret = store.add_node(&name, cluster.join_ttl_secs).await?;
             println!("{secret}.{}", ca.fingerprint());
             eprintln!(
                 "run on the node (the token works once, for {} seconds):\n  chloe-node join --server https://<control plane>:{} --token <the token above> --dir <dir>",
@@ -386,12 +387,12 @@ async fn node_command(config: &Config, command: NodeCommand) -> Result<()> {
         }
         NodeCommand::List => {
             for node in store.nodes().await? {
-                let state = if node.joined {
-                    "joined"
-                } else {
-                    "waiting to join"
+                let state = match (node.joined, node.connected_at) {
+                    (false, _) => "waiting to join".to_string(),
+                    (true, None) => "disconnected".to_string(),
+                    (true, Some(at)) => format!("connected since {}", ops::format_time_secs(at)),
                 };
-                println!("{}\t{}\t{state}", node.name, node.url);
+                println!("{}\t{state}", node.name);
             }
         }
         NodeCommand::Rm { name } => {

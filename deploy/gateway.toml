@@ -112,10 +112,11 @@ action = "passthrough"
 kind = "systemd"
 
 # 複数のホストにランナーを置くときは、[runner] の代わりに [cluster] を書く。
-# sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add <名前> --url https://<host>:8445
+# sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add <名前>
 # で参加用のトークンを作り、そのホストで chloe-node join を実行する (deploy/node.toml)。
+# コントロールプレーンからホストへはつながない。ホストがこの内部 API にトンネルを張る。
 # [cluster]
-# listen = "0.0.0.0:8444"            # chloe-node から受ける内部 API (相互 TLS)
+# listen = "0.0.0.0:8444"            # chloe-node から受ける内部 API とトンネル (相互 TLS)
 # server_names = ["cp.example.com"]  # chloe-node がつなぐ名前 (証明書に入れる)
 # pki_dir = "/var/lib/chloe/pki"     # CA の証明書と鍵
 

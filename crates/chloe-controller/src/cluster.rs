@@ -2,19 +2,25 @@
 //!
 //! ワークスペースは、最初に起動したホストに結びつける (ディスクがそのホストにあるので)。
 //! まだ置いていないワークスペースは、置いたワークスペースが少ないホストに置く。
-//! ホストへの頼みは相互 TLS の HTTPS で送る (`chloe-node` の API)。
+//! ホストへの頼みは、ホストが張ったトンネルの上の HTTP/1.1 で送る (`chloe-node` の API)。
+//! コントロールプレーンからホストへは接続を始めない ([`chloe_mtls::tunnel`])。
 //!
-//! つながらないホストのランナーは、止まったとはみなさない。止まったとみなすと、reconcile が
-//! そのホストで動いているランナーの把握と記録を消してしまうので、記録のとおり動いているものと
-//! して扱う。
+//! つながらないホスト (トンネルのないホスト) のランナーは、止まったとはみなさない。止まったと
+//! みなすと、reconcile がそのホストで動いているランナーの把握と記録を消してしまうので、記録の
+//! とおり動いているものとして扱う。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use reqwest::StatusCode;
-use serde::Deserialize;
+use bytes::Bytes;
+use chloe_mtls::tunnel::Tunnels;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::{Method, Request, Response, StatusCode, header};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tracing::warn;
 
 use crate::Error;
@@ -26,23 +32,23 @@ const AGENT_UPGRADE: &str = "chloe-agent";
 
 pub struct ClusterBackend {
     store: Store,
-    /// `chloe-node` への相互 TLS のクライアント (コントロールプレーンの証明書)。
-    client: reqwest::Client,
+    /// ホストが張ったトンネル。
+    tunnels: Tunnels,
     /// 最後の一覧で、ランナーを返したホスト。置き場所の記録がないランナー (持ち主のない
     /// ランナー) を止めるときに使う。
     seen: Mutex<HashMap<String, String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct Status {
     running: bool,
 }
 
 impl ClusterBackend {
-    pub fn new(store: Store, client: reqwest::Client) -> Self {
+    pub fn new(store: Store, tunnels: Tunnels) -> Self {
         Self {
             store,
-            client,
+            tunnels,
             seen: Mutex::new(HashMap::new()),
         }
     }
@@ -93,29 +99,48 @@ impl ClusterBackend {
         Ok(node)
     }
 
-    async fn call(
+    /// トンネルで要求を送る。トンネルがないか、途中で切れたら [`Error::Unreachable`]。
+    async fn send(
         &self,
         node: &Node,
-        request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, Error> {
-        let response = request
-            .send()
+        request: Request<Full<Bytes>>,
+    ) -> Result<Response<Incoming>, Error> {
+        self.tunnels
+            .request(&node.name, request)
             .await
-            .map_err(|e| Error::Unreachable(format!("{}: {e}", node.name)))?;
-        if response.status().is_success() {
-            return Ok(response);
-        }
+            .map_err(|e| Error::Unreachable(format!("{}: {e}", node.name)))
+    }
+
+    /// 要求を送り、成功した応答の本文を返す。
+    async fn call(&self, node: &Node, request: Request<Full<Bytes>>) -> Result<Bytes, Error> {
+        let response = self.send(node, request).await?;
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| Error::Unreachable(format!("{}: {e}", node.name)))?
+            .to_bytes();
+        if status.is_success() {
+            return Ok(body);
+        }
         Err(Error::Runner(format!(
             "{}: {status}: {}",
             node.name,
-            body.chars().take(300).collect::<String>()
+            String::from_utf8_lossy(&body)
+                .chars()
+                .take(300)
+                .collect::<String>()
         )))
     }
 
-    fn url(node: &Node, path: &str) -> String {
-        format!("{}{path}", node.url.trim_end_matches('/'))
+    async fn call_json<T: DeserializeOwned>(
+        &self,
+        node: &Node,
+        request: Request<Full<Bytes>>,
+    ) -> Result<T, Error> {
+        let body = self.call(node, request).await?;
+        serde_json::from_slice(&body).map_err(|e| Error::Runner(format!("{}: {e}", node.name)))
     }
 
     /// つながらないホストのランナーは、記録のとおり動いているものとして扱う。
@@ -129,14 +154,36 @@ impl ClusterBackend {
     }
 }
 
+fn request(method: Method, path: &str) -> Request<Full<Bytes>> {
+    with_body(method, path, Full::default())
+}
+
+fn with_json(
+    method: Method,
+    path: &str,
+    body: &impl Serialize,
+) -> Result<Request<Full<Bytes>>, Error> {
+    let body = serde_json::to_vec(body).map_err(|e| Error::Runner(e.to_string()))?;
+    let mut request = with_body(method, path, Full::new(body.into()));
+    request
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    Ok(request)
+}
+
+fn with_body(method: Method, path: &str, body: Full<Bytes>) -> Request<Full<Bytes>> {
+    let mut request = Request::new(body);
+    *request.method_mut() = method;
+    // パスはランナーの識別子 (ws-<番号>) と数だけで組むので、URI として読めないことはない。
+    *request.uri_mut() = path.parse().unwrap_or_default();
+    request
+}
+
 impl RunnerBackend for ClusterBackend {
     async fn start(&self, spec: RunnerSpec) -> Result<(), Error> {
         let node = self.place(&spec.key).await?;
-        let request = self
-            .client
-            .post(Self::url(&node, "/v1/runners"))
-            .json(&spec);
-        self.call(&node, request).await?;
+        self.call(&node, with_json(Method::POST, "/v1/runners", &spec)?)
+            .await?;
         Ok(())
     }
 
@@ -155,10 +202,11 @@ impl RunnerBackend for ClusterBackend {
                 }
             }
         };
-        let request = self
-            .client
-            .delete(Self::url(&node, &format!("/v1/runners/{key}")));
-        self.call(&node, request).await?;
+        self.call(
+            &node,
+            request(Method::DELETE, &format!("/v1/runners/{key}")),
+        )
+        .await?;
         Ok(())
     }
 
@@ -166,11 +214,11 @@ impl RunnerBackend for ClusterBackend {
         let Some(node) = self.placed(key).await? else {
             return Ok(false);
         };
-        let request = self
-            .client
-            .get(Self::url(&node, &format!("/v1/runners/{key}")));
-        match self.call(&node, request).await {
-            Ok(response) => Ok(response.json::<Status>().await.map_err(http)?.running),
+        let status = self
+            .call_json::<Status>(&node, request(Method::GET, &format!("/v1/runners/{key}")))
+            .await;
+        match status {
+            Ok(status) => Ok(status.running),
             Err(Error::Unreachable(message)) => {
                 warn!(key, "cannot tell whether the runner is running: {message}");
                 self.recorded_running(&node, key).await
@@ -184,48 +232,52 @@ impl RunnerBackend for ClusterBackend {
         let Some(node) = self.placed(key).await? else {
             return Ok(());
         };
-        let request = self
-            .client
-            .delete(Self::url(&node, &format!("/v1/runners/{key}/state")));
-        self.call(&node, request).await?;
+        let path = format!("/v1/runners/{key}/state");
+        self.call(&node, request(Method::DELETE, &path)).await?;
         Ok(())
     }
 
     async fn update(&self, spec: RunnerSpec) -> Result<(), Error> {
         let node = self.placed_or_error(&spec.key).await?;
-        let request = self
-            .client
-            .put(Self::url(&node, &format!("/v1/runners/{}", spec.key)))
-            .json(&spec);
-        self.call(&node, request).await?;
+        let path = format!("/v1/runners/{}", spec.key);
+        self.call(&node, with_json(Method::PUT, &path, &spec)?)
+            .await?;
         Ok(())
     }
 
     async fn connect_agent(&self, key: &str, wait: Duration) -> Result<AgentStream, Error> {
         let node = self.placed_or_error(key).await?;
-        let response = self
-            .client
-            .get(Self::url(
-                &node,
-                &format!("/v1/runners/{key}/agent?wait_ms={}", wait.as_millis()),
-            ))
-            .header(reqwest::header::CONNECTION, "upgrade")
-            .header(reqwest::header::UPGRADE, AGENT_UPGRADE)
-            // VM の起動を待つ時間に、余裕を足す。
-            .timeout(wait + Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| Error::Unreachable(format!("{}: {e}", node.name)))?;
+        let mut request = request(
+            Method::GET,
+            &format!("/v1/runners/{key}/agent?wait_ms={}", wait.as_millis()),
+        );
+        let headers = request.headers_mut();
+        headers.insert(header::CONNECTION, "upgrade".parse().unwrap());
+        headers.insert(header::UPGRADE, AGENT_UPGRADE.parse().unwrap());
+        // VM の起動を待つ時間に、余裕を足す。
+        let response =
+            tokio::time::timeout(wait + Duration::from_secs(10), self.send(&node, request))
+                .await
+                .map_err(|_| {
+                    Error::Unreachable(format!("{}: the agent connection timed out", node.name))
+                })??;
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map(|b| String::from_utf8_lossy(&b.to_bytes()).trim().to_string())
+                .unwrap_or_default();
             return Err(Error::Runner(format!(
-                "{}: the agent connection failed: {status}: {}",
+                "{}: the agent connection failed: {status}: {body}",
                 node.name,
-                body.trim()
             )));
         }
-        Ok(Box::new(response.upgrade().await.map_err(http)?))
+        let upgraded = hyper::upgrade::on(response)
+            .await
+            .map_err(|e| Error::Unreachable(format!("{}: {e}", node.name)))?;
+        Ok(Box::new(hyper_util::rt::TokioIo::new(upgraded)))
     }
 
     async fn tail_requests(
@@ -237,11 +289,8 @@ impl RunnerBackend for ClusterBackend {
         let Some(node) = self.placed(key).await? else {
             return Ok(Vec::new());
         };
-        let request = self.client.get(Self::url(
-            &node,
-            &format!("/v1/runners/{key}/requests?lines={lines}"),
-        ));
-        self.call(&node, request).await?.json().await.map_err(http)
+        let path = format!("/v1/runners/{key}/requests?lines={lines}");
+        self.call_json(&node, request(Method::GET, &path)).await
     }
 
     fn local_broker_socket(&self, _key: &str) -> Option<PathBuf> {
@@ -255,10 +304,11 @@ impl RunnerBackend for ClusterBackend {
             if !node.joined {
                 continue;
             }
-            let request = self.client.get(Self::url(&node, "/v1/runners"));
-            match self.call(&node, request).await {
-                Ok(response) => {
-                    let listed = response.json::<Vec<String>>().await.map_err(http)?;
+            let listed = self
+                .call_json::<Vec<String>>(&node, request(Method::GET, "/v1/runners"))
+                .await;
+            match listed {
+                Ok(listed) => {
                     let mut seen = self.seen.lock().unwrap();
                     for key in &listed {
                         seen.insert(key.clone(), node.name.clone());
@@ -288,8 +338,4 @@ impl RunnerBackend for ClusterBackend {
     async fn node_of(&self, key: &str) -> Result<String, Error> {
         Ok(self.placed_or_error(key).await?.name)
     }
-}
-
-fn http(error: reqwest::Error) -> Error {
-    Error::Runner(error.to_string())
 }

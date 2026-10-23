@@ -207,7 +207,7 @@ async fn the_control_plane_calls_a_node_through_its_tunnel() {
     let dir = tempfile::tempdir().unwrap();
     let ca = Ca::load_or_create(dir.path()).unwrap();
     let control = ca.issue(&Role::ControlPlane, &names()).unwrap();
-    let tunnels = tunnel::Tunnels::new();
+    let (tunnels, mut events) = tunnel::Tunnels::with_events();
     let url = start(
         &control,
         ClientAuth::Optional,
@@ -274,6 +274,13 @@ async fn the_control_plane_calls_a_node_through_its_tunnel() {
     again.abort();
     let _ = again.await;
     wait_connected(&tunnels, "n1", false).await;
+    // 張り直したときは、古いトンネルが閉じても切れたことにはしない。
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event);
+    }
+    let n1 = |connected| ("n1".to_string(), connected);
+    assert_eq!(seen, [n1(true), n1(true), n1(false)]);
     assert!(matches!(
         get_whoami(tunnels.clone()).await,
         Err(Error::NotConnected)

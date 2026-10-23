@@ -362,15 +362,15 @@ impl Store {
     }
 
     pub async fn nodes(&self) -> Result<Vec<Node>, Error> {
-        let rows = sqlx::query("SELECT name, url, joined_at FROM nodes ORDER BY name")
+        let rows = sqlx::query("SELECT name, joined_at, connected_at FROM nodes ORDER BY name")
             .fetch_all(&self.pool)
             .await?;
         rows.iter()
             .map(|row| {
                 Ok(Node {
                     name: row.try_get("name")?,
-                    url: row.try_get("url")?,
                     joined: row.try_get::<Option<i64>, _>("joined_at")?.is_some(),
+                    connected_at: row.try_get("connected_at")?,
                 })
             })
             .collect()
@@ -381,16 +381,12 @@ impl Store {
     }
 
     /// ホストを登録し、一度だけ使える参加用のトークン (の秘密の部分) を返す。登録済みなら
-    /// URL を変え、新しいトークンを作る (証明書を作り直すとき)。
-    pub async fn add_node(&self, name: &str, url: &str, ttl_secs: i64) -> Result<String, Error> {
-        sqlx::query(
-            "INSERT INTO nodes (name, url) VALUES (?1, ?2)
-             ON CONFLICT (name) DO UPDATE SET url = excluded.url",
-        )
-        .bind(name)
-        .bind(url)
-        .execute(&self.pool)
-        .await?;
+    /// 新しいトークンを作る (証明書を作り直すとき)。
+    pub async fn add_node(&self, name: &str, ttl_secs: i64) -> Result<String, Error> {
+        sqlx::query("INSERT INTO nodes (name) VALUES (?1) ON CONFLICT (name) DO NOTHING")
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
         let secret = random_token();
         sqlx::query("INSERT INTO node_joins (token_hash, name, expires_at) VALUES (?1, ?2, ?3)")
             .bind(token_hash(&secret))
@@ -422,6 +418,24 @@ impl Store {
             .execute(&self.pool)
             .await?;
         self.node(&name).await
+    }
+
+    /// ホストのトンネルがつながったか、切れたかを記録する (`node list` で出す)。
+    pub async fn set_node_connected(&self, name: &str, connected: bool) -> Result<(), Error> {
+        sqlx::query("UPDATE nodes SET connected_at = ?2 WHERE name = ?1")
+            .bind(name)
+            .bind(connected.then(now))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// すべてのホストを、つながっていないと記録する (ゲートウェイの起動のとき)。
+    pub async fn clear_node_connections(&self) -> Result<(), Error> {
+        sqlx::query("UPDATE nodes SET connected_at = NULL")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// ホストの登録を消す。消したホストの証明書では、もう問い合わせに答えない。
@@ -840,9 +854,10 @@ fn api_token(row: &sqlx::sqlite::SqliteRow) -> Result<ApiToken, Error> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     pub name: String,
-    pub url: String,
     /// 参加用のトークンで証明書を受け取ったか。
     pub joined: bool,
+    /// トンネルがつながった時刻 (UNIX 時刻の秒)。つながっていなければ `None`。
+    pub connected_at: Option<i64>,
 }
 
 /// 推測できないトークン (32 バイトの乱数の URL 向け Base64)。
@@ -1063,7 +1078,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn nodes_join_once_and_place_workspaces() {
         let store = Store::new(pool().await);
-        let secret = store.add_node("n1", "https://n1:8445", 600).await.unwrap();
+        let secret = store.add_node("n1", 600).await.unwrap();
         assert!(!store.nodes().await.unwrap()[0].joined);
         assert_eq!(store.consume_join("wrong").await.unwrap(), None);
         let node = store.consume_join(&secret).await.unwrap().unwrap();
@@ -1074,8 +1089,21 @@ pub(crate) mod tests {
             None,
             "used once"
         );
+        assert_eq!(node.connected_at, None);
+        store.set_node_connected("n1", true).await.unwrap();
+        assert!(
+            store
+                .node("n1")
+                .await
+                .unwrap()
+                .unwrap()
+                .connected_at
+                .is_some()
+        );
+        store.clear_node_connections().await.unwrap();
+        assert_eq!(store.node("n1").await.unwrap().unwrap().connected_at, None);
         // 期限の切れたトークンは使えない。
-        let expired = store.add_node("n2", "https://n2:8445", -1).await.unwrap();
+        let expired = store.add_node("n2", -1).await.unwrap();
         assert_eq!(store.consume_join(&expired).await.unwrap(), None);
 
         let ws = store

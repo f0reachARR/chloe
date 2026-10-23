@@ -121,7 +121,7 @@ fn default_session_ttl() -> i64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
-    /// chloe-node から受ける内部 API (相互 TLS) の待ち受け。
+    /// chloe-node から受ける内部 API とトンネル (相互 TLS) の待ち受け。
     pub listen: SocketAddr,
     /// 内部 API の証明書に入れる名前 (chloe-node がつなぐホスト名か IP アドレス)。
     pub server_names: Vec<String>,

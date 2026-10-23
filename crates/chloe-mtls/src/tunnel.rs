@@ -61,16 +61,37 @@ struct Handle {
     open: mpsc::UnboundedSender<Opener>,
 }
 
+/// トンネルがつながった (`true`) か、切れた (`false`) か。ホストの名前と組にして送る。
+pub type TunnelEvent = (String, bool);
+
 /// コントロールプレーンの側。ホストの名前ごとに、張られたトンネルを持つ。
 #[derive(Clone, Default)]
 pub struct Tunnels {
     handles: Arc<Mutex<HashMap<String, Handle>>>,
     next_id: Arc<AtomicU64>,
+    events: Option<mpsc::UnboundedSender<TunnelEvent>>,
 }
 
 impl Tunnels {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// つながったことと切れたことを、起きた順に受け取れるようにする。同じホストが張り直した
+    /// ときは、古いトンネルが閉じても切れたとは送らない。
+    pub fn with_events() -> (Self, mpsc::UnboundedReceiver<TunnelEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let tunnels = Self {
+            events: Some(tx),
+            ..Self::default()
+        };
+        (tunnels, rx)
+    }
+
+    fn notify(&self, name: &str, connected: bool) {
+        if let Some(events) = &self.events {
+            let _ = events.send((name.to_string(), connected));
+        }
     }
 
     pub fn is_connected(&self, name: &str) -> bool {
@@ -79,16 +100,14 @@ impl Tunnels {
 
     /// `name` のホストがトンネルを求めた要求に答える。`Upgrade: chloe-tunnel` がなければ 400 を
     /// 返す。あれば 101 を返し、Upgrade した接続を閉じるまでトンネルとして動かす future を
-    /// 添える。future は、閉じたときにまだこれが `name` のトンネルだったら `true` を返す
-    /// (`false` なら、ホストが張り直して新しいトンネルに替わっている)。同じホストの古い
-    /// トンネルは、新しいトンネルが動き始めたときに閉じる。
+    /// 添える。同じホストの古いトンネルは、新しいトンネルが動き始めたときに閉じる。
     pub fn accept(
         &self,
         name: &str,
         request: &mut axum::extract::Request,
     ) -> (
         axum::response::Response,
-        Option<impl Future<Output = bool> + Send + 'static>,
+        Option<impl Future<Output = ()> + Send + 'static>,
     ) {
         let wants_upgrade = request
             .headers()
@@ -106,10 +125,7 @@ impl Tunnels {
         let serving = async move {
             match upgrade.await {
                 Ok(upgraded) => tunnels.serve(&name, upgraded).await,
-                Err(error) => {
-                    debug!(node = name, "the tunnel upgrade failed: {error}");
-                    false
-                }
+                Err(error) => debug!(node = name, "the tunnel upgrade failed: {error}"),
             }
         };
         let response = Response::builder()
@@ -121,14 +137,16 @@ impl Tunnels {
         (response, Some(serving))
     }
 
-    async fn serve(&self, name: &str, upgraded: Upgraded) -> bool {
+    async fn serve(&self, name: &str, upgraded: Upgraded) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (open, opens) = mpsc::unbounded_channel();
-        // 古い Handle を落とすと、古いトンネルは頼みを受けられなくなって閉じる。
-        self.handles
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), Handle { id, open });
+        {
+            // 古い Handle を落とすと、古いトンネルは頼みを受けられなくなって閉じる。出来事は
+            // 表を変えたときに錠を持ったまま送り、起きた順に届ける。
+            let mut handles = self.handles.lock().unwrap();
+            handles.insert(name.to_string(), Handle { id, open });
+            self.notify(name, true);
+        }
         let connection = yamux::Connection::new(
             TokioIo::new(upgraded).compat(),
             yamux_config(),
@@ -140,9 +158,7 @@ impl Tunnels {
         let mut handles = self.handles.lock().unwrap();
         if handles.get(name).is_some_and(|h| h.id == id) {
             handles.remove(name);
-            true
-        } else {
-            false
+            self.notify(name, false);
         }
     }
 

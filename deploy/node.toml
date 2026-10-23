@@ -1,14 +1,14 @@
 # chloe-node の設定の例 (/etc/chloe/node.toml)。配置は docs/install.md の「配置」に合わせてある。
 #
-# 1. コントロールプレーンで: sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url https://<このホスト>:8445
+# 1. コントロールプレーンで: sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add n1
 # 2. このホストで:         sudo -u chloe chloe-node join --server https://<コントロールプレーン>:8444 --token <トークン> --dir /var/lib/chloe-node/tls
 # 3. このホストで:         sudo systemctl enable --now chloe-node
+#
+# chloe-node は待ち受けない。コントロールプレーンにトンネルを張り、その上で頼みを受ける。
 
-# コントロールプレーンからの API (相互 TLS) の待ち受け。node add の URL と同じポートにする。
-listen = "0.0.0.0:8445"
 # join で受け取った証明書と鍵。
 credentials = "/var/lib/chloe-node/tls"
-# 本物の値の問い合わせを中継する先 (コントロールプレーンの内部 API)。
+# コントロールプレーンの内部 API。トンネルを張り、本物の値の問い合わせを中継する。
 control_plane = "https://cp.example.com:8444"
 
 # ランナーを systemd の unit で動かす。パスは /etc/chloe/runner.env に書く。

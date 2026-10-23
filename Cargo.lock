@@ -722,13 +722,17 @@ name = "chloe-controller"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "chloe-agent-proto",
  "chloe-audit",
+ "chloe-mtls",
  "chloe-policy",
  "chloe-secrets",
  "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rand 0.10.3",
- "reqwest",
  "secrecy",
  "serde",
  "serde_json",
