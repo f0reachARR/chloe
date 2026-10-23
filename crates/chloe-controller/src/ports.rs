@@ -46,8 +46,13 @@ impl Scheme {
 /// 公開したポート。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct PublishedPort {
+    #[serde(skip)]
+    pub workspace_id: i64,
     pub port: u16,
     pub scheme: Scheme,
+    /// プロキシのホスト名に使うランダムな名前。
+    #[serde(skip)]
+    pub name: String,
     /// ブラウザで開く URL。ゲートウェイに `[api] proxy_url` がなければ出さない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -63,8 +68,27 @@ pub struct NewPort {
     pub scheme: Scheme,
 }
 
-/// プロキシのホストの元 (`[api] proxy_url`)。公開したポートごとに
-/// `<ポート>-ws-<ワークスペースの ID>.<ドメイン>` のホストを割り当てる。
+/// プロキシのホストの名前の長さ。英小文字と 2 から 7 の数字 (base32) で、60 ビットになる。
+const NAME_LEN: usize = 12;
+const NAME_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+/// 公開したポートのホストのランダムな名前。ホスト名からワークスペースやポートを推し量れず、
+/// 試して当てることもできないようにする。
+fn random_name() -> String {
+    let mut bytes = [0u8; NAME_LEN];
+    rand::fill(&mut bytes);
+    bytes
+        .iter()
+        .map(|b| NAME_ALPHABET[usize::from(b & 31)] as char)
+        .collect()
+}
+
+fn is_name(label: &str) -> bool {
+    label.len() == NAME_LEN && label.bytes().all(|b| NAME_ALPHABET.contains(&b))
+}
+
+/// プロキシのホストの元 (`[api] proxy_url`)。公開したポートごとに、ランダムな名前の
+/// `<名前>.<ドメイン>` のホストを割り当てる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyBase {
     scheme: String,
@@ -97,39 +121,29 @@ impl ProxyBase {
         &self.scheme
     }
 
-    /// ワークスペースのポートのホスト名 (ポートを付けない)。
-    pub fn host(&self, workspace_id: i64, port: u16) -> String {
-        format!("{port}-ws-{workspace_id}.{}", self.domain)
+    /// 公開したポートのホスト名 (ポートを付けない)。
+    pub fn host(&self, name: &str) -> String {
+        format!("{name}.{}", self.domain)
     }
 
-    /// ワークスペースのポートのオリジン (`https://3000-ws-12.preview.example.com`)。
-    pub fn origin(&self, workspace_id: i64, port: u16) -> String {
-        let host = self.host(workspace_id, port);
+    /// 公開したポートのオリジン (`https://k3x7q2m5vbtd.preview.example.com`)。
+    pub fn origin(&self, name: &str) -> String {
+        let host = self.host(name);
         match self.port {
             Some(p) => format!("{}://{host}:{p}", self.scheme),
             None => format!("{}://{host}", self.scheme),
         }
     }
 
-    /// 要求の `Host` (ポートが付いていてもよい) がプロキシのホストなら、
-    /// (ワークスペースの ID, ポート) を返す。
-    pub fn parse_host(&self, host: &str) -> Option<(i64, u16)> {
+    /// 要求の `Host` (ポートが付いていてもよい) がプロキシのホストなら、その名前を返す。
+    pub fn parse_host(&self, host: &str) -> Option<String> {
         let host = host.to_ascii_lowercase();
         let name = match host.rsplit_once(':') {
             Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
             _ => host.as_str(),
         };
-        let label = name
-            .strip_suffix(&self.domain)?
-            .strip_suffix('.')
-            .filter(|label| !label.contains('.'))?;
-        let (port, id) = label.split_once("-ws-")?;
-        let canonical =
-            |s: &str| !s.is_empty() && !s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit());
-        if !canonical(port) || !canonical(id) {
-            return None;
-        }
-        Some((id.parse().ok()?, port.parse().ok().filter(|&p| p != 0)?))
+        let label = name.strip_suffix(&self.domain)?.strip_suffix('.')?;
+        is_name(label).then(|| label.to_string())
     }
 }
 
@@ -148,26 +162,22 @@ impl Ports {
         self.base.as_ref()
     }
 
-    fn port(
-        &self,
-        workspace_id: i64,
-        row: &sqlx::sqlite::SqliteRow,
-    ) -> Result<PublishedPort, Error> {
+    fn port(&self, row: &sqlx::sqlite::SqliteRow) -> Result<PublishedPort, Error> {
         let port: i64 = row.try_get("port")?;
         let port =
             u16::try_from(port).map_err(|_| Error::Invalid(format!("invalid port {port}")))?;
+        let name: String = row.try_get("name")?;
         Ok(PublishedPort {
+            workspace_id: row.try_get("workspace_id")?,
             port,
             scheme: Scheme::parse(&row.try_get::<String, _>("scheme")?)?,
-            url: self
-                .base
-                .as_ref()
-                .map(|b| format!("{}/", b.origin(workspace_id, port))),
+            url: self.base.as_ref().map(|b| format!("{}/", b.origin(&name))),
+            name,
             created_at: row.try_get("created_at")?,
         })
     }
 
-    /// ポートを公開する。公開してあれば、話し方を変える。
+    /// ポートを公開する。公開してあれば、話し方だけを変える (ホストの名前は変えない)。
     pub async fn publish(
         &self,
         workspace: &Workspace,
@@ -182,44 +192,50 @@ impl Ports {
                 "at most {MAX_PORTS} ports can be published"
             )));
         }
-        let row = sqlx::query(
-            "INSERT INTO published_ports (workspace_id, port, scheme, created_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (workspace_id, port) DO UPDATE SET scheme = excluded.scheme
-             RETURNING port, scheme, created_at",
-        )
-        .bind(workspace.id)
-        .bind(i64::from(new.port))
-        .bind(new.scheme.as_str())
-        .bind(now())
-        .fetch_one(self.store.pool())
-        .await?;
+        // 名前がほかの公開とぶつかることはまずないが、ぶつかれば作り直す。
+        let mut attempts = 0;
+        let row = loop {
+            let result = sqlx::query(
+                "INSERT INTO published_ports (workspace_id, port, scheme, name, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (workspace_id, port) DO UPDATE SET scheme = excluded.scheme
+                 RETURNING workspace_id, port, scheme, name, created_at",
+            )
+            .bind(workspace.id)
+            .bind(i64::from(new.port))
+            .bind(new.scheme.as_str())
+            .bind(random_name())
+            .bind(now())
+            .fetch_one(self.store.pool())
+            .await;
+            match result {
+                Ok(row) => break row,
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() && attempts < 3 => {
+                    attempts += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
         info!(target: "audit", workspace = %workspace.display_name(), port = new.port, scheme = new.scheme.as_str(), "port published");
-        self.port(workspace.id, &row)
+        self.port(&row)
     }
 
     /// 公開したポートの一覧 (ポートの順)。
     pub async fn list(&self, workspace_id: i64) -> Result<Vec<PublishedPort>, Error> {
-        let rows = sqlx::query(
-            "SELECT port, scheme, created_at FROM published_ports WHERE workspace_id = ?1 ORDER BY port",
-        )
+        let rows = sqlx::query("SELECT workspace_id, port, scheme, name, created_at FROM published_ports WHERE workspace_id = ?1 ORDER BY port")
         .bind(workspace_id)
         .fetch_all(self.store.pool())
         .await?;
-        rows.iter()
-            .map(|row| self.port(workspace_id, row))
-            .collect()
+        rows.iter().map(|row| self.port(row)).collect()
     }
 
-    /// 公開したポート。公開していなければ `None`。
-    pub async fn get(&self, workspace_id: i64, port: u16) -> Result<Option<PublishedPort>, Error> {
-        let row = sqlx::query(
-            "SELECT port, scheme, created_at FROM published_ports WHERE workspace_id = ?1 AND port = ?2",
-        )
-        .bind(workspace_id)
-        .bind(i64::from(port))
+    /// プロキシのホストの名前で、公開したポートを探す。
+    pub async fn find(&self, name: &str) -> Result<Option<PublishedPort>, Error> {
+        let row = sqlx::query("SELECT workspace_id, port, scheme, name, created_at FROM published_ports WHERE name = ?1")
+        .bind(name)
         .fetch_optional(self.store.pool())
         .await?;
-        row.map(|row| self.port(workspace_id, &row)).transpose()
+        row.map(|row| self.port(&row)).transpose()
     }
 
     /// 公開を取り消す。取り消したら `true`。`by` は監査ログに残す (VM の中からなら `agent`)。
@@ -256,29 +272,33 @@ mod tests {
     #[test]
     fn builds_and_parses_hosts() {
         let base = base();
-        assert_eq!(base.host(12, 3000), "3000-ws-12.preview.example.com");
         assert_eq!(
-            base.origin(12, 3000),
-            "https://3000-ws-12.preview.example.com"
+            base.host("k3x7q2m5vbtd"),
+            "k3x7q2m5vbtd.preview.example.com"
         );
         assert_eq!(
-            base.parse_host("3000-ws-12.preview.example.com"),
-            Some((12, 3000))
+            base.origin("k3x7q2m5vbtd"),
+            "https://k3x7q2m5vbtd.preview.example.com"
         );
         assert_eq!(
-            base.parse_host("3000-WS-12.Preview.Example.COM:443"),
-            Some((12, 3000))
+            base.parse_host("k3x7q2m5vbtd.preview.example.com")
+                .as_deref(),
+            Some("k3x7q2m5vbtd")
+        );
+        assert_eq!(
+            base.parse_host("K3X7Q2M5VBTD.Preview.Example.COM:443")
+                .as_deref(),
+            Some("k3x7q2m5vbtd")
         );
         for host in [
             "preview.example.com",
-            "ws-12.preview.example.com",
-            "03000-ws-12.preview.example.com",
-            "3000-ws-012.preview.example.com",
-            "0-ws-12.preview.example.com",
-            "70000-ws-12.preview.example.com",
-            "x.3000-ws-12.preview.example.com",
-            "3000-ws-12.evilpreview.example.com",
-            "3000-ws-12.preview.example.com.evil.test",
+            "k3x7q2m5vbt.preview.example.com",
+            "k3x7q2m5vbtdd.preview.example.com",
+            "k3x7q2m5vbt1.preview.example.com",
+            "k3x7q2m5vbt-.preview.example.com",
+            "x.k3x7q2m5vbtd.preview.example.com",
+            "k3x7q2m5vbtd.evilpreview.example.com",
+            "k3x7q2m5vbtd.preview.example.com.evil.test",
             "chloe.example.com",
         ] {
             assert_eq!(base.parse_host(host), None, "{host}");
@@ -286,12 +306,14 @@ mod tests {
 
         let local = ProxyBase::parse("http://preview.localhost:8080").unwrap();
         assert_eq!(
-            local.origin(1, 5173),
-            "http://5173-ws-1.preview.localhost:8080"
+            local.origin("abcdefghijkl"),
+            "http://abcdefghijkl.preview.localhost:8080"
         );
         assert_eq!(
-            local.parse_host("5173-ws-1.preview.localhost:8080"),
-            Some((1, 5173))
+            local
+                .parse_host("abcdefghijkl.preview.localhost:8080")
+                .as_deref(),
+            Some("abcdefghijkl")
         );
 
         for bad in [
@@ -302,6 +324,13 @@ mod tests {
         ] {
             assert!(ProxyBase::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn names_are_random() {
+        let a = random_name();
+        assert!(is_name(&a), "{a}");
+        assert_ne!(a, random_name());
     }
 
     #[tokio::test]
@@ -329,12 +358,13 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(is_name(&p.name), "{}", p.name);
         assert_eq!(
             p.url.as_deref(),
-            Some(format!("https://5173-ws-{}.preview.example.com/", ws.id).as_str())
+            Some(format!("https://{}.preview.example.com/", p.name).as_str())
         );
-        // 公開し直すと、話し方だけが変わる。
-        ports
+        // 公開し直すと、話し方だけが変わる (ホストの名前は変わらない)。
+        let again = ports
             .publish(
                 &ws,
                 NewPort {
@@ -344,6 +374,18 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            (again.name.as_str(), again.scheme),
+            (p.name.as_str(), Scheme::Https)
+        );
+        assert_eq!(
+            ports
+                .find(&p.name)
+                .await
+                .unwrap()
+                .map(|f| (f.workspace_id, f.port)),
+            Some((ws.id, 5173))
+        );
         ports
             .publish(
                 &ws,
@@ -376,8 +418,20 @@ mod tests {
         );
         assert!(ports.unpublish(&ws, 5173, "alice").await.unwrap());
         assert!(!ports.unpublish(&ws, 5173, "alice").await.unwrap());
-        assert_eq!(ports.get(ws.id, 5173).await.unwrap(), None);
-        assert!(ports.get(ws.id, 3000).await.unwrap().is_some());
+        assert_eq!(ports.find(&p.name).await.unwrap(), None);
+        // 取り消してから公開すると、新しい名前になる。
+        let renewed = ports
+            .publish(
+                &ws,
+                NewPort {
+                    port: 5173,
+                    scheme: Scheme::Http,
+                },
+            )
+            .await
+            .unwrap();
+        assert_ne!(renewed.name, p.name);
+        assert!(ports.unpublish(&ws, 5173, "alice").await.unwrap());
 
         for port in 1..MAX_PORTS as u16 {
             ports

@@ -601,13 +601,12 @@ impl Store {
             .transpose()?)
     }
 
-    /// Web の画面のセッション `web_session_id` から、プロキシのホストへ戻すときの一度だけ使える
-    /// コードを作る。
+    /// Web の画面のセッション `web_session_id` から、プロキシのホスト (公開の名前 `name`) へ
+    /// 戻すときの一度だけ使えるコードを作る。
     pub async fn create_proxy_code(
         &self,
         web_session_id: i64,
-        workspace_id: i64,
-        port: u16,
+        name: &str,
         ttl_secs: i64,
     ) -> Result<String, Error> {
         let code = random_token();
@@ -616,32 +615,26 @@ impl Store {
             .execute(&self.pool)
             .await?;
         sqlx::query(
-            "INSERT INTO proxy_codes (code_hash, web_session_id, workspace_id, port, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO proxy_codes (code_hash, web_session_id, name, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
         )
         .bind(token_hash(&code))
         .bind(web_session_id)
-        .bind(workspace_id)
-        .bind(i64::from(port))
+        .bind(name)
         .bind(now() + ttl_secs)
         .execute(&self.pool)
         .await?;
         Ok(code)
     }
 
-    /// プロキシのホスト (`workspace_id` の `port`) で受けたコードを使い、そのホストのセッションを
+    /// プロキシのホスト (公開の名前 `name`) で受けたコードを使い、そのホストのセッションを
     /// 作って値を返す。コードが期限切れか、ほかのホストのものなら `None`。使ったコードは消す。
     /// セッションの期限は、元の Web の画面のセッションと同じにする。
-    pub async fn redeem_proxy_code(
-        &self,
-        code: &str,
-        workspace_id: i64,
-        port: u16,
-    ) -> Result<Option<String>, Error> {
+    pub async fn redeem_proxy_code(&self, code: &str, name: &str) -> Result<Option<String>, Error> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             "DELETE FROM proxy_codes WHERE code_hash = ?1
-             RETURNING web_session_id, workspace_id, port, expires_at",
+             RETURNING web_session_id, name, expires_at",
         )
         .bind(token_hash(code))
         .fetch_optional(&mut *tx)
@@ -649,8 +642,7 @@ impl Store {
         let Some(row) = row else {
             return Ok(None);
         };
-        let matches = row.try_get::<i64, _>("workspace_id")? == workspace_id
-            && row.try_get::<i64, _>("port")? == i64::from(port)
+        let matches = row.try_get::<String, _>("name")? == name
             && row.try_get::<i64, _>("expires_at")? > now();
         let web_session_id: i64 = row.try_get("web_session_id")?;
         let expires_at = sqlx::query_scalar::<_, i64>(
@@ -666,12 +658,11 @@ impl Store {
         };
         let session = random_token();
         sqlx::query(
-            "INSERT INTO proxy_sessions (web_session_id, workspace_id, port, session_hash, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO proxy_sessions (web_session_id, name, session_hash, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
         )
         .bind(web_session_id)
-        .bind(workspace_id)
-        .bind(i64::from(port))
+        .bind(name)
         .bind(token_hash(&session))
         .bind(expires_at)
         .execute(&mut *tx)
@@ -680,25 +671,23 @@ impl Store {
         Ok(Some(session))
     }
 
-    /// プロキシのホスト (`workspace_id` の `port`) の cookie のセッションを確かめ、元の Web の
-    /// 画面のセッションを返す。元のセッションが消えていれば (ログアウト、失効) `None`。
+    /// プロキシのホスト (公開の名前 `name`) の cookie のセッションを確かめ、元の Web の画面の
+    /// セッションを返す。元のセッションが消えていれば (ログアウト、失効) `None`。
     pub async fn authenticate_proxy_session(
         &self,
         session: &str,
-        workspace_id: i64,
-        port: u16,
+        name: &str,
     ) -> Result<Option<WebSession>, Error> {
         let row = sqlx::query(
-            "UPDATE web_sessions SET last_used_at = ?4
-             WHERE expires_at > ?4 AND id = (
+            "UPDATE web_sessions SET last_used_at = ?3
+             WHERE expires_at > ?3 AND id = (
                  SELECT web_session_id FROM proxy_sessions
-                 WHERE session_hash = ?1 AND workspace_id = ?2 AND port = ?3 AND expires_at > ?4
+                 WHERE session_hash = ?1 AND name = ?2 AND expires_at > ?3
              )
              RETURNING id, login, created_at, expires_at, last_used_at",
         )
         .bind(token_hash(session))
-        .bind(workspace_id)
-        .bind(i64::from(port))
+        .bind(name)
         .bind(now())
         .fetch_optional(&self.pool)
         .await?;
@@ -1152,6 +1141,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn proxy_codes_and_sessions_follow_the_web_session() {
+        use crate::ports::{NewPort, Ports, Scheme};
         let store = Store::new(pool().await);
         let ws = store
             .create(
@@ -1164,35 +1154,32 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
+        let ports = Ports::new(store.clone(), None);
+        let publish = |port| {
+            let (ports, ws) = (ports.clone(), ws.clone());
+            async move {
+                let scheme = Scheme::Http;
+                ports
+                    .publish(&ws, NewPort { port, scheme })
+                    .await
+                    .unwrap()
+                    .name
+            }
+        };
+        let (a, b) = (publish(3000).await, publish(5173).await);
         let (web, web_value) = store.create_web_session("alice", 3600).await.unwrap();
 
         // ほかのホストのコードは使えず、使ったコードは二度と使えない。
-        let code = store.create_proxy_code(web, ws.id, 3000, 60).await.unwrap();
-        assert_eq!(
-            store.redeem_proxy_code(&code, ws.id, 5173).await.unwrap(),
-            None
-        );
-        let code = store.create_proxy_code(web, ws.id, 3000, 60).await.unwrap();
-        let session = store
-            .redeem_proxy_code(&code, ws.id, 3000)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            store.redeem_proxy_code(&code, ws.id, 3000).await.unwrap(),
-            None
-        );
-        let expired = store.create_proxy_code(web, ws.id, 3000, -1).await.unwrap();
-        assert_eq!(
-            store
-                .redeem_proxy_code(&expired, ws.id, 3000)
-                .await
-                .unwrap(),
-            None
-        );
+        let code = store.create_proxy_code(web, &a, 60).await.unwrap();
+        assert_eq!(store.redeem_proxy_code(&code, &b).await.unwrap(), None);
+        let code = store.create_proxy_code(web, &a, 60).await.unwrap();
+        let session = store.redeem_proxy_code(&code, &a).await.unwrap().unwrap();
+        assert_eq!(store.redeem_proxy_code(&code, &a).await.unwrap(), None);
+        let expired = store.create_proxy_code(web, &a, -1).await.unwrap();
+        assert_eq!(store.redeem_proxy_code(&expired, &a).await.unwrap(), None);
 
         let found = store
-            .authenticate_proxy_session(&session, ws.id, 3000)
+            .authenticate_proxy_session(&session, &a)
             .await
             .unwrap()
             .unwrap();
@@ -1200,7 +1187,18 @@ pub(crate) mod tests {
         // cookie はホストごとなので、ほかのポートでは通らない。
         assert_eq!(
             store
-                .authenticate_proxy_session(&session, ws.id, 5173)
+                .authenticate_proxy_session(&session, &b)
+                .await
+                .unwrap(),
+            None
+        );
+        // 公開を取り消すと、そのホストのセッションも消える。公開し直しても新しい名前になる。
+        let code_b = store.create_proxy_code(web, &b, 60).await.unwrap();
+        let session_b = store.redeem_proxy_code(&code_b, &b).await.unwrap().unwrap();
+        assert!(ports.unpublish(&ws, 5173, "alice").await.unwrap());
+        assert_eq!(
+            store
+                .authenticate_proxy_session(&session_b, &b)
                 .await
                 .unwrap(),
             None
@@ -1209,7 +1207,7 @@ pub(crate) mod tests {
         store.end_web_session(&web_value).await.unwrap();
         assert_eq!(
             store
-                .authenticate_proxy_session(&session, ws.id, 3000)
+                .authenticate_proxy_session(&session, &a)
                 .await
                 .unwrap(),
             None

@@ -1,14 +1,14 @@
 //! VM の中で公開したポートの HTTP(S) のサーバーを、ブラウザからの要求に中継する。
 //!
-//! 公開したポートごとに、プロキシのホスト `<ポート>-ws-<ワークスペースの ID>.<ドメイン>`
-//! (`[api] proxy_url`) を割り当てる。VM の中のページはエージェントが書き換えられるので、Web の画面と
+//! 公開したポートごとに、ランダムな名前のプロキシのホスト `<名前>.<ドメイン>` (`[api] proxy_url`)
+//! を割り当てる。ホスト名からワークスペースやポートは分からず、試して当てることもできない。VM の中のページはエージェントが書き換えられるので、Web の画面と
 //! 同じオリジンには置かない。待ち受けは管理 API と同じで、`Host` でプロキシの要求を見分ける
 //! ([`dispatch`])。
 //!
 //! ```text
 //! (プロキシのホスト) GET /__chloe/auth?code=&next=   コードをセッションに替え、cookie を渡して next へ送る
 //! (プロキシのホスト) *   /*                          公開したポートへ中継する
-//! (Web の画面)       GET /api/auth/proxy?workspace=&port=&next=
+//! (Web の画面)       GET /api/auth/proxy?name=&next=
 //!                        Web の画面のセッションでコードを作り、プロキシのホストへ戻す
 //! (Web の画面)       GET /api/auth/continue          ログインのあと、ログインの前に開こうとしたポートへ戻す
 //! ```
@@ -77,7 +77,7 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-/// プロキシのホストが指す、ワークスペースのポート。
+/// プロキシのホストの名前が指す、ワークスペースのポート。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Target {
     workspace_id: i64,
@@ -98,11 +98,10 @@ pub(crate) async fn dispatch(
 ) -> Response {
     let target = shared.controller.ports().base().and_then(|base| {
         let host = request_host(&request)?;
-        let (workspace_id, port) = base.parse_host(&host)?;
-        Some((base.clone(), Target { workspace_id, port }))
+        Some((base.clone(), base.parse_host(&host)?))
     });
     match target {
-        Some((base, target)) => handle(shared, base, target, request).await,
+        Some((base, name)) => handle(shared, base, &name, request).await,
         None => next.run(request).await,
     }
 }
@@ -128,27 +127,41 @@ fn text(status: StatusCode, message: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
-async fn handle(
-    shared: Arc<Shared>,
-    base: ProxyBase,
-    target: Target,
-    request: Request,
-) -> Response {
-    if request.uri().path() == AUTH_PATH {
-        return redeem(&shared, &base, target, request.uri()).await;
+/// 名前で公開したポートを探す。ないか取り消したなら 404。
+async fn find_port(shared: &Shared, name: &str) -> Result<PublishedPort, Box<Response>> {
+    match shared.controller.ports().find(name).await {
+        Ok(Some(published)) => Ok(published),
+        Ok(None) => Err(Box::new(text(
+            StatusCode::NOT_FOUND,
+            "nothing is published at this address",
+        ))),
+        Err(e) => Err(Box::new(text(StatusCode::INTERNAL_SERVER_ERROR, e))),
     }
-    let (caller, strip_authorization) = match authenticate(&shared, target, request.headers()).await
-    {
-        Ok(Some(found)) => found,
-        Ok(None) => return to_login(&shared, target, &request),
+}
+
+async fn handle(shared: Arc<Shared>, base: ProxyBase, name: &str, request: Request) -> Response {
+    let published = match find_port(&shared, name).await {
+        Ok(published) => published,
         Err(response) => return *response,
     };
-    let (workspace, published) = match authorize(&shared, &caller, target).await {
-        Ok(found) => found,
+    let target = Target {
+        workspace_id: published.workspace_id,
+        port: published.port,
+    };
+    if request.uri().path() == AUTH_PATH {
+        return redeem(&shared, &base, name, target, request.uri()).await;
+    }
+    let (caller, strip_authorization) = match authenticate(&shared, name, request.headers()).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return to_login(&shared, name, &request),
+        Err(response) => return *response,
+    };
+    let workspace = match authorize(&shared, &caller, target).await {
+        Ok(workspace) => workspace,
         Err(response) => return *response,
     };
     let method = request.method().clone();
-    let request = upstream_request(request, &base, target, strip_authorization);
+    let request = upstream_request(request, &base, name, target.port, strip_authorization);
     let response = match relay(&shared, &workspace, &published, request).await {
         Ok(response) => response,
         Err(error) => {
@@ -181,7 +194,7 @@ async fn handle(
 /// `Authorization` を VM に渡さないよう `true` を添える。
 async fn authenticate(
     shared: &Shared,
-    target: Target,
+    name: &str,
     headers: &HeaderMap,
 ) -> Result<Option<(ProxyCaller, bool)>, Box<Response>> {
     let store = shared.controller.store();
@@ -209,7 +222,7 @@ async fn authenticate(
         return Ok(None);
     };
     let found = store
-        .authenticate_proxy_session(&session, target.workspace_id, target.port)
+        .authenticate_proxy_session(&session, name)
         .await
         .map_err(internal)?;
     Ok(found.map(|web| {
@@ -221,12 +234,12 @@ async fn authenticate(
     }))
 }
 
-/// 利用者がまだログインでき、ワークスペースに入れて、ポートが公開されているかを確かめる。
+/// 利用者がまだログインでき、公開したポートのワークスペースに入れるかを確かめる。
 async fn authorize(
     shared: &Shared,
     caller: &ProxyCaller,
     target: Target,
-) -> Result<(Workspace, PublishedPort), Box<Response>> {
+) -> Result<Workspace, Box<Response>> {
     let internal = |e: &dyn std::fmt::Display| {
         Box::new(text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
     };
@@ -240,33 +253,37 @@ async fn authorize(
         }
         Err(e) => return Err(internal(&format!("{e:#}"))),
     }
-    find_published(shared, &caller.login, target)
+    member_workspace(shared, &caller.login, target.workspace_id)
         .await
         .map_err(|e| match e {
-            Lookup::NotFound => Box::new(text(
-                StatusCode::NOT_FOUND,
-                format!("port {} is not published in this workspace", target.port),
-            )),
+            Lookup::NotFound => Box::new(not_published()),
             Lookup::Internal(e) => internal(&e),
         })
 }
 
+fn not_published() -> Response {
+    text(
+        StatusCode::NOT_FOUND,
+        "nothing is published at this address",
+    )
+}
+
 enum Lookup {
-    /// ワークスペースがないか、入れないか、ポートを公開していない (区別して伝えない)。
+    /// ワークスペースがないか、入れない (公開していないときと区別して伝えない)。
     NotFound,
     Internal(String),
 }
 
-async fn find_published(
+async fn member_workspace(
     shared: &Shared,
     login: &str,
-    target: Target,
-) -> Result<(Workspace, PublishedPort), Lookup> {
+    workspace_id: i64,
+) -> Result<Workspace, Lookup> {
     let internal = |e: &dyn std::fmt::Display| Lookup::Internal(format!("{e:#}"));
     let workspace = shared
         .controller
         .store()
-        .get(target.workspace_id)
+        .get(workspace_id)
         .await
         .map_err(|e| internal(&e))?
         .ok_or(Lookup::NotFound)?;
@@ -277,14 +294,7 @@ async fn find_published(
     {
         return Err(Lookup::NotFound);
     }
-    let published = shared
-        .controller
-        .ports()
-        .get(workspace.id, target.port)
-        .await
-        .map_err(|e| internal(&e))?
-        .ok_or(Lookup::NotFound)?;
-    Ok((workspace, published))
+    Ok(workspace)
 }
 
 /// `next` に使える、同じホストの中のパスか (`//host` や `/\host` のような、ほかのホストへ
@@ -299,7 +309,7 @@ fn local_path(next: &str) -> Option<&str> {
 
 /// ログインの要らない呼び出し元 (ブラウザでない) には 401 を、ブラウザのページの読み込みには
 /// Web の画面でのログインへの案内を返す。
-fn to_login(shared: &Shared, target: Target, request: &Request) -> Response {
+fn to_login(shared: &Shared, name: &str, request: &Request) -> Response {
     let browsing = matches!(*request.method(), Method::GET | Method::HEAD)
         && !request.headers().contains_key(header::UPGRADE);
     let Some(web) = WebConfig::of(shared).filter(|_| browsing) else {
@@ -313,23 +323,22 @@ fn to_login(shared: &Shared, target: Target, request: &Request) -> Response {
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    Redirect::to(&web.url(&start_path(target, next))).into_response()
+    Redirect::to(&web.url(&start_path(name, next))).into_response()
 }
 
 /// Web の画面でコードを作る経路 (`/api/auth/proxy?...`)。
-fn start_path(target: Target, next: &str) -> String {
+fn start_path(name: &str, next: &str) -> String {
     let mut url = Url::parse("http://localhost/api/auth/proxy").expect("a valid URL");
     url.query_pairs_mut()
-        .append_pair("workspace", &target.workspace_id.to_string())
-        .append_pair("port", &target.port.to_string())
+        .append_pair("name", name)
         .append_pair("next", next);
     format!("{}?{}", url.path(), url.query().unwrap_or_default())
 }
 
 #[derive(Deserialize)]
 pub(crate) struct StartQuery {
-    workspace: i64,
-    port: u16,
+    /// プロキシのホストの名前。
+    name: String,
     #[serde(default)]
     next: Option<String>,
 }
@@ -347,9 +356,8 @@ pub(crate) async fn start(
             "ports are not published on this server",
         );
     };
-    let target = Target {
-        workspace_id: query.workspace,
-        port: query.port,
+    let Some(name) = base.parse_host(&base.host(&query.name)) else {
+        return not_published();
     };
     let next = query.next.as_deref().and_then(local_path).unwrap_or("/");
     let store = shared.controller.store();
@@ -362,7 +370,7 @@ pub(crate) async fn start(
     };
     let Some(session) = session else {
         let mut response = Redirect::to("/login").into_response();
-        let remembered = start_path(target, next);
+        let remembered = start_path(&name, next);
         let value = remembered.trim_start_matches("/api/auth/proxy?");
         response.headers_mut().append(
             header::SET_COOKIE,
@@ -376,24 +384,23 @@ pub(crate) async fn start(
         Ok(false) => return text(StatusCode::FORBIDDEN, "the user can no longer log in"),
         Err(e) => return text(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
-    match find_published(&shared, &login, target).await {
+    let published = match find_port(&shared, &name).await {
+        Ok(published) => published,
+        Err(response) => return *response,
+    };
+    match member_workspace(&shared, &login, published.workspace_id).await {
         Ok(_) => {}
-        Err(Lookup::NotFound) => {
-            return text(
-                StatusCode::NOT_FOUND,
-                format!("port {} is not published in this workspace", target.port),
-            );
-        }
+        Err(Lookup::NotFound) => return not_published(),
         Err(Lookup::Internal(e)) => return text(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
     let code = match store
-        .create_proxy_code(session.id, target.workspace_id, target.port, CODE_TTL_SECS)
+        .create_proxy_code(session.id, &name, CODE_TTL_SECS)
         .await
     {
         Ok(code) => code,
         Err(e) => return text(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
-    let mut url = Url::parse(&base.origin(target.workspace_id, target.port))
+    let mut url = Url::parse(&base.origin(&name))
         .expect("the proxy origin is a valid URL")
         .join(AUTH_PATH)
         .expect("a valid path");
@@ -426,15 +433,18 @@ struct RedeemQuery {
 }
 
 /// プロキシのホストで、Web の画面が作ったコードをセッションに替える。
-async fn redeem(shared: &Shared, base: &ProxyBase, target: Target, uri: &Uri) -> Response {
+async fn redeem(
+    shared: &Shared,
+    base: &ProxyBase,
+    name: &str,
+    target: Target,
+    uri: &Uri,
+) -> Response {
     let Ok(Query(query)) = Query::<RedeemQuery>::try_from_uri(uri) else {
         return text(StatusCode::BAD_REQUEST, "the sign-in link is incomplete");
     };
     let store = shared.controller.store();
-    let session = match store
-        .redeem_proxy_code(&query.code, target.workspace_id, target.port)
-        .await
-    {
+    let session = match store.redeem_proxy_code(&query.code, name).await {
         Ok(Some(session)) => session,
         Ok(None) => {
             return text(
@@ -511,7 +521,8 @@ fn remove_hop_by_hop(headers: &mut HeaderMap) {
 fn upstream_request(
     request: Request,
     base: &ProxyBase,
-    target: Target,
+    name: &str,
+    port: u16,
     strip_authorization: bool,
 ) -> Request {
     let (mut parts, body) = request.into_parts();
@@ -531,10 +542,10 @@ fn upstream_request(
         headers.insert(header::UPGRADE, upgrade);
     }
     // 開発用のサーバーは知らない `Host` を断るので、VM の中で開いたときと同じにする。
-    let public_host = base.host(target.workspace_id, target.port);
+    let public_host = base.host(name);
     headers.insert(
         header::HOST,
-        HeaderValue::from_str(&format!("{UPSTREAM_HOST}:{}", target.port)).expect("a valid host"),
+        HeaderValue::from_str(&format!("{UPSTREAM_HOST}:{port}")).expect("a valid host"),
     );
     headers.insert(
         "x-forwarded-host",
@@ -799,14 +810,11 @@ mod tests {
         ProxyBase::parse("https://preview.example.com").unwrap()
     }
 
-    const TARGET: Target = Target {
-        workspace_id: 12,
-        port: 5173,
-    };
+    const NAME: &str = "k3x7q2m5vbtd";
 
     fn request(pairs: &[(&'static str, &str)]) -> Request {
         let mut builder = Request::builder()
-            .uri("https://5173-ws-12.preview.example.com/src/main.ts?t=1")
+            .uri("https://k3x7q2m5vbtd.preview.example.com/src/main.ts?t=1")
             .version(Version::HTTP_2);
         for (name, value) in pairs {
             builder = builder.header(*name, *value);
@@ -827,7 +835,8 @@ mod tests {
                 ("accept", "text/html"),
             ]),
             &base(),
-            TARGET,
+            NAME,
+            5173,
             true,
         );
         assert_eq!(rewritten.uri(), "/src/main.ts?t=1");
@@ -836,7 +845,7 @@ mod tests {
         assert_eq!(headers["host"], "localhost:5173");
         assert_eq!(
             headers["x-forwarded-host"],
-            "5173-ws-12.preview.example.com"
+            "k3x7q2m5vbtd.preview.example.com"
         );
         assert_eq!(headers["x-forwarded-proto"], "https");
         assert_eq!(headers["cookie"], "app=1; theme=dark");
@@ -856,7 +865,8 @@ mod tests {
                 ("upgrade", "websocket"),
             ]),
             &base(),
-            TARGET,
+            NAME,
+            5173,
             false,
         );
         let headers = rewritten.headers();
@@ -906,8 +916,8 @@ mod tests {
             assert_eq!(local_path(bad), None, "{bad}");
         }
         assert_eq!(
-            start_path(TARGET, "/a?b=1&c"),
-            "/api/auth/proxy?workspace=12&port=5173&next=%2Fa%3Fb%3D1%26c"
+            start_path(NAME, "/a?b=1&c"),
+            "/api/auth/proxy?name=k3x7q2m5vbtd&next=%2Fa%3Fb%3D1%26c"
         );
     }
 

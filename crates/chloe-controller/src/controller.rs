@@ -1400,10 +1400,14 @@ mod tests {
         .await;
         let published: serde_json::Value = serde_json::from_str(&published).unwrap();
         assert_eq!(published["port"]["scheme"], "https");
-        assert_eq!(
-            published["port"]["url"],
-            format!("https://5173-ws-{}.preview.example.com/", ws_a.id)
-        );
+        // ホスト名はランダムで、ワークスペースもポートも含まない。
+        let url = published["port"]["url"].as_str().unwrap();
+        let name = url
+            .strip_prefix("https://")
+            .and_then(|u| u.strip_suffix(".preview.example.com/"))
+            .unwrap();
+        assert_eq!(name.len(), 12, "{url}");
+        assert!(!name.contains("5173"), "{url}");
         // ほかのワークスペースからは、見ることも取り消すこともできない。
         let listed = send_line(&socket_b, serde_json::json!({"port": "list"})).await;
         assert_eq!(listed.trim(), r#"{"ports":[]}"#);
