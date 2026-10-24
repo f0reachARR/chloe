@@ -76,8 +76,12 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | `GET /api/v1/secrets[?owner=]` | シークレットの名前の一覧 |
 | `PUT /api/v1/secrets/{kind}[?owner=]` | シークレットを登録する |
 | `DELETE /api/v1/secrets/{kind}[?owner=]` | シークレットを消す |
-| `GET /api/v1/policies/{owner}` | Organization か team の設定 |
-| `PUT /api/v1/policies/{owner}` | 設定を置き換える |
+| `GET /api/v1/policy-scopes` | 見られる設定の層（ゲートウェイ、個人、Organization、team）と、変えられるか、規則の数、ワークスペース |
+| `GET /api/v1/policy-rules?scope=` | 層で効く規則と出どころ、層の設定とその版、変えられるか |
+| `GET /api/v1/policy` | 自分の個人の設定（`ETag` は版） |
+| `PUT /api/v1/policy` | 個人の設定を置き換える（`If-Match` で版を確かめる） |
+| `GET /api/v1/policies/{owner}` | Organization か team の設定（`ETag` は版） |
+| `PUT /api/v1/policies/{owner}` | 設定を置き換える（`If-Match` で版を確かめる） |
 | `DELETE /api/v1/policies/{owner}` | 設定を消す |
 | `GET /api/v1/tokens` | 自分のトークンの一覧（値は含まない） |
 | `POST /api/v1/tokens` | トークンを作る |
@@ -163,6 +167,22 @@ api /api/v1/policies/acme/dev -X PUT \
   -d '{"github": {"repositories": ["web"], "permissions": {"contents": "read"}}}'
 
 api /api/v1/policy -X PUT -d '{"rules": [{"hosts": ["example.com"], "action": "allow"}]}'
+```
+
+ワークスペースの規則と同じく、`GET` は設定の版を `ETag` で返し、`PUT` に `If-Match` でその版を付けると、読んだあとに書き換えられていれば 412 を返す（[ワークスペースの規則](#ワークスペースの規則)）。
+
+`GET /api/v1/policy-scopes` は、見られる設定の層を、ゲートウェイ、個人、Organization、その team の順に返す。
+層（`scope`）は `gateway`、`user:alice`、`org:acme`、`team:acme/dev` と書く。
+`GET /api/v1/policy-rules?scope=` は、その層で効く規則を出どころを添えて返し、`own` にその層の設定、`version` に版を返す（ゲートウェイの層の版は `none` で、変えられない）。
+持ち主の層は、そのメンバーか設定を変えられる人だけが見られ、個人の層は本人だけが見られる。
+
+```sh
+api /api/v1/policy-scopes
+# [{"scope":"gateway","kind":"gateway","name":"gateway","editable":false,"rules":3,"workspaces":[]},
+#  {"scope":"user:alice","kind":"user","name":"alice","editable":false,"rules":0,"workspaces":["default"]},
+#  {"scope":"org:acme","kind":"org","name":"acme","editable":true,"rules":1,"workspaces":["acme/web"]}]
+api '/api/v1/policy-rules?scope=team:acme/dev'
+# {"rules":[...],"own":{"rules":[...],"github":{"repositories":["web"]}},"editable":true,"version":"9a1b2c3d4e5f6071"}
 ```
 
 ### ワークスペースの規則
