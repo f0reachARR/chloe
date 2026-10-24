@@ -45,7 +45,8 @@ export function WorkspaceSettings({
         </Text>
       }
     >
-      {confirming && (
+      {/* 尋ねているあいだに保存が終われば、尋ねるのをやめる。 */}
+      {confirming && unsaved.length > 0 && (
         <Alert color="yellow" mb="md" title="Discard unsaved changes?">
           <Text size="sm" mb="xs">
             {unsaved.map((s) => s.label).join(', ')} has changes that are not saved.

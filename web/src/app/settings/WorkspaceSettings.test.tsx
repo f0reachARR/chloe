@@ -68,6 +68,27 @@ describe('WorkspaceSettings', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('stops asking once the changes are saved', async () => {
+    const onClose = vi.fn<() => void>();
+    renderWithProviders(
+      <WorkspaceSettings
+        workspace="acme/proj"
+        sections={sections}
+        onSectionChange={() => {}}
+        onClose={onClose}
+      />,
+    );
+    const value = await screen.findByRole('textbox', { name: 'Value' });
+    await userEvent.type(value, 'x');
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByText('Discard unsaved changes?')).toBeInTheDocument();
+    // 保存が終わったのと同じく、変更がなくなる。
+    await userEvent.clear(value);
+    expect(screen.queryByText('Discard unsaved changes?')).not.toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it('closes right away without changes', async () => {
     const onClose = vi.fn<() => void>();
     renderWithProviders(
