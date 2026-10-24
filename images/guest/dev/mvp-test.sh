@@ -594,6 +594,33 @@ check api-policy-show '{"rules":[{"hosts":["api.example"],"action":"allow"}]} 20
 check api-policy-ssh "api.example" as alice chloe policy show acme
 check api-policy-denied "only the administrators" api "$bob_token" PUT /api/v1/policies/acme -d '{"rules":[]}'
 check api-policy-invalid "overlaps" api "$alice_token" PUT /api/v1/policies/acme -d '{"rules":[{"hosts":["hub.docker.com"],"action":"deny"}]}'
+# ワークスペースで効く規則は、上の層から出どころを添えて返し、規則がないときの版は none。
+check api-ws-rules-gateway '{"source":{"kind":"gateway"},"rule":{"hosts":["httpbin.org","statsig.anthropic.com"],"action":"allow"}}' \
+    api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-owner '{"source":{"kind":"owner","owner":"acme"},"rule":{"hosts":["api.example"],"action":"allow"}}' \
+    api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-empty '"own":[],"editable":true,"version":"none"} 200' api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-other "404" api "$bob_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-readonly '"editable":false' api "$bob_token" GET /api/v1/workspace-rules/default
+check api-ws-policy-denied "403" api "$bob_token" PUT /api/v1/workspace-policies/default -d '{"rules":[]}'
+check api-ws-policy-passthrough "passthrough rules can only be set" api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -d '{"rules":[{"hosts":["staging.example"],"action":"passthrough"}]}'
+# If-Match の版が合うときだけ置き換え、読んだあとに書き換えられていれば 412 で断る。
+check api-ws-policy-create '"updated_runners":0} 200' api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H 'If-Match: "none"' -d '{"rules":[{"hosts":["staging.example"],"action":"allow"}]}'
+check api-ws-policy-stale "changed after you read them; read them again\"} 412" api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H 'If-Match: "none"' -d '{"rules":[]}'
+ws_etag="$(curl -s -D - -o /dev/null -H "Authorization: Bearer $alice_token" "http://127.0.0.1:$api_port/api/v1/workspace-policies/acme/from-api" | tr -d '\r' | sed -n 's/^etag: "\(.*\)"$/\1/Ip')"
+check api-ws-policy-etag "16 hex" sh -c 'printf "%s" "$0" | grep -Eq "^[0-9a-f]{16}$" && echo "16 hex"' "$ws_etag"
+check api-ws-rules-version "\"version\":\"$ws_etag\"" api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-policy-replace '"updated_runners":0} 200' api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H "If-Match: \"$ws_etag\"" -d '{"rules":[{"hosts":["staging.example"],"action":"deny"}]}'
+check api-ws-policy-old-etag "412" api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H "If-Match: \"$ws_etag\"" -d '{"rules":[]}'
+# If-Match がなければ、これまでどおり確かめずに置き換える。
+check api-ws-policy-no-if-match '"updated_runners":0} 200' api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -d '{"rules":[{"hosts":["staging.example"],"action":"allow"}]}'
+check api-ws-rules-own '"own":[{"hosts":["staging.example"],"action":"allow"}]' api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
 check api-delete "204" api "$alice_token" DELETE /api/v1/workspaces/acme/from-api
 check api-deleted "404" api "$alice_token" GET /api/v1/workspaces/acme/from-api
 check api-token-list '"name":"ci"' api "$alice_token" GET /api/v1/tokens
