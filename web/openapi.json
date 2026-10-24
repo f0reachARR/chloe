@@ -1153,6 +1153,113 @@
         }
       }
     },
+    "/api/v1/workspace-ports/{name}": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "description": "VM の中で `chloe-ask port publish` で公開したポート (ポートの順)。`url` をブラウザで開くと、Web の画面のログインを通って VM の中のサーバーに届く。",
+        "operationId": "workspace_ports",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublishedPort"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workspaces"
+        ],
+        "operationId": "unpublish_port",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "port",
+            "in": "query",
+            "description": "取り消すポート。",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "取り消した"
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspace-requests/{name}": {
       "get": {
         "tags": [
@@ -2018,11 +2125,50 @@
           }
         }
       },
+      "PublishedPort": {
+        "type": "object",
+        "description": "公開したポート。",
+        "required": [
+          "port",
+          "scheme",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "UNIX 時刻 (秒)。"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "scheme": {
+            "$ref": "#/components/schemas/Scheme"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ブラウザで開く URL。ゲートウェイに `[api] proxy_url` がなければ出さない。"
+          }
+        }
+      },
       "RootMode": {
         "type": "string",
         "enum": [
           "ephemeral",
           "persistent"
+        ]
+      },
+      "Scheme": {
+        "type": "string",
+        "description": "VM の中のサーバーとの話し方。",
+        "enum": [
+          "http",
+          "https"
         ]
       },
       "SecretNames": {

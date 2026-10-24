@@ -8,3 +8,11 @@ export const workspacesQuery = () =>
 
 export const reloadWorkspaces = (queryClient: QueryClient) =>
   invalidatePath(queryClient, '/api/v1/workspaces');
+
+export const portsQuery = (workspace: string) =>
+  api.queryOptions('get', '/api/v1/workspace-ports/{name}', {
+    params: { path: { name: workspace } },
+  });
+
+export const reloadPorts = (queryClient: QueryClient) =>
+  invalidatePath(queryClient, '/api/v1/workspace-ports/{name}');

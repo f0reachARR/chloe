@@ -224,48 +224,68 @@ where
 }
 
 impl<C> EgressService<C> {
-    /// エージェントからの依頼 (`ask.chloe.internal`) を問い合わせ用ソケットへ送る。
+    /// エージェントからの依頼と、公開するポート (`ask.chloe.internal`) を問い合わせ用ソケットへ送る。
     ///
     /// ```text
-    /// POST   /v1/asks        依頼を出す (本文は依頼の JSON)
-    /// GET    /v1/asks/{id}   依頼の状態を見る
-    /// DELETE /v1/asks/{id}   依頼を取り下げる
+    /// POST   /v1/asks          依頼を出す (本文は依頼の JSON)
+    /// GET    /v1/asks/{id}     依頼の状態を見る
+    /// DELETE /v1/asks/{id}     依頼を取り下げる
+    /// POST   /v1/ports         ポートを公開する ({"port": 5173, "scheme": "http" | "https"})
+    /// GET    /v1/ports         公開したポートの一覧
+    /// DELETE /v1/ports/{port}  公開を取り消す
     /// ```
     async fn ask(&self, method: &str, path: &str, body: &[u8]) -> Response {
+        let object = || {
+            if body.len() > ASK_BODY_LIMIT {
+                return Err((StatusCode::PAYLOAD_TOO_LARGE, "the body is too large"));
+            }
+            match serde_json::from_slice::<serde_json::Value>(body) {
+                Ok(value) if value.is_object() => Ok(value),
+                _ => Err((StatusCode::BAD_REQUEST, "the body must be a JSON object")),
+            }
+        };
         let id = path
             .strip_prefix("/v1/asks/")
             .and_then(|id| id.parse::<i64>().ok());
-        let question = match (method, path, id) {
-            ("POST", "/v1/asks", _) => {
-                if body.len() > ASK_BODY_LIMIT {
-                    return error_response(StatusCode::PAYLOAD_TOO_LARGE, "the ask is too large");
-                }
-                match serde_json::from_slice::<serde_json::Value>(body) {
-                    Ok(ask) if ask.is_object() => serde_json::json!({ "ask": { "create": ask } }),
-                    _ => {
-                        return error_response(
-                            StatusCode::BAD_REQUEST,
-                            "the body must be a JSON object",
-                        );
-                    }
-                }
-            }
-            ("GET", _, Some(id)) => serde_json::json!({ "ask": { "get": id } }),
-            ("DELETE", _, Some(id)) => serde_json::json!({ "ask": { "cancel": id } }),
+        let port = path
+            .strip_prefix("/v1/ports/")
+            .and_then(|port| port.parse::<u16>().ok());
+        let question = match (method, path, id, port) {
+            ("POST", "/v1/asks", _, _) => match object() {
+                Ok(ask) => serde_json::json!({ "ask": { "create": ask } }),
+                Err((status, message)) => return error_response(status, message),
+            },
+            ("GET", _, Some(id), _) => serde_json::json!({ "ask": { "get": id } }),
+            ("DELETE", _, Some(id), _) => serde_json::json!({ "ask": { "cancel": id } }),
+            ("POST", "/v1/ports", _, _) => match object() {
+                Ok(port) => serde_json::json!({ "port": { "publish": port } }),
+                Err((status, message)) => return error_response(status, message),
+            },
+            ("GET", "/v1/ports", _, _) => serde_json::json!({ "port": "list" }),
+            ("DELETE", _, _, Some(port)) => serde_json::json!({ "port": { "unpublish": port } }),
             _ => return error_response(StatusCode::NOT_FOUND, "no such endpoint"),
         };
         let answer = match self.secrets.relay(&question).await {
             Ok(line) => serde_json::from_str::<serde_json::Value>(&line).unwrap_or_default(),
             Err(error) => {
-                tracing::warn!("failed to send an ask: {error:#}");
+                tracing::warn!("failed to send a question to the control plane: {error:#}");
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "the control plane is not reachable",
                 );
             }
         };
-        if let Some(ask) = answer.get("ask") {
-            return json_response(StatusCode::OK, ask);
+        for key in ["ask", "port", "ports"] {
+            if let Some(value) = answer.get(key) {
+                return json_response(StatusCode::OK, value);
+            }
+        }
+        match answer.get("unpublished").and_then(|v| v.as_bool()) {
+            Some(true) => return json_response(StatusCode::OK, &answer),
+            Some(false) => {
+                return error_response(StatusCode::NOT_FOUND, "the port is not published");
+            }
+            None => {}
         }
         let status = match answer.get("code").and_then(|c| c.as_str()) {
             Some("invalid") => StatusCode::BAD_REQUEST,

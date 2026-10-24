@@ -8,6 +8,9 @@
 //! chloe-ask question TEXT [--option O]... [--reason R] [--timeout 1h] [--no-wait]
 //! chloe-ask wait ID
 //! chloe-ask cancel ID
+//! chloe-ask port publish PORT [--https]   (VM の中の HTTP(S) のサーバーをブラウザで開けるようにする)
+//! chloe-ask port unpublish PORT
+//! chloe-ask port list
 //! chloe-ask mcp [--wait 55m]      (標準入出力の MCP のサーバー)
 //! chloe-ask register              (Claude Code と Codex の利用者の設定に MCP のサーバーを足す)
 //! ```
@@ -65,6 +68,11 @@ enum Command {
     Wait { id: i64 },
     /// Withdraw an ask.
     Cancel { id: i64 },
+    /// Let workspace members open an HTTP(S) server in this VM from their browser.
+    Port {
+        #[command(subcommand)]
+        command: PortCommand,
+    },
     /// Run the MCP server on stdin and stdout.
     Mcp {
         /// How long one tool call waits before returning pending, like 55m.
@@ -73,6 +81,21 @@ enum Command {
     },
     /// Add the MCP server to the user's Claude Code and Codex settings (once).
     Register,
+}
+
+#[derive(Subcommand)]
+enum PortCommand {
+    /// Publish a port, and print the URL to open it.
+    Publish {
+        port: u16,
+        /// The server speaks HTTPS (its certificate is not checked).
+        #[arg(long)]
+        https: bool,
+    },
+    /// Stop publishing a port.
+    Unpublish { port: u16 },
+    /// List the published ports.
+    List,
 }
 
 #[derive(clap::Args)]
@@ -125,6 +148,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             eprintln!("ask {} is {}", ask.id, ask.status);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::Port { command } => return port(&client, command).await,
         Command::Mcp { wait } => {
             mcp::serve(client, wait).await?;
             return Ok(ExitCode::SUCCESS);
@@ -153,6 +177,36 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         ask.id
     );
     wait(&client, ask.id).await
+}
+
+async fn port(client: &Client, command: PortCommand) -> Result<ExitCode> {
+    match command {
+        PortCommand::Publish { port, https } => {
+            let published = client.publish(port, https).await?;
+            match &published.url {
+                // URL だけを標準出力に出し、スクリプトで使えるようにする。
+                Some(url) => println!("{url}"),
+                None => eprintln!(
+                    "chloe-ask: published port {port}, but chloe has no proxy domain to open it (api.proxy_url)"
+                ),
+            }
+        }
+        PortCommand::Unpublish { port } => {
+            client.unpublish(port).await?;
+            eprintln!("chloe-ask: unpublished port {port}");
+        }
+        PortCommand::List => {
+            for p in client.ports().await? {
+                println!(
+                    "{}\t{}\t{}",
+                    p.port,
+                    p.scheme,
+                    p.url.as_deref().unwrap_or("-")
+                );
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// 答えが来るまで待つ。Ctrl-C で依頼を取り下げて終わる。

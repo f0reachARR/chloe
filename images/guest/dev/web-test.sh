@@ -17,7 +17,7 @@ keys_port=18905
 api_port=18921
 
 cleanup() {
-    kill "${keys_pid:-}" "${gateway_pid:-}" 2>/dev/null || true
+    kill "${keys_pid:-}" "${gateway_pid:-}" "${server_pid:-}" 2>/dev/null || true
     docker ps -aq --filter "name=^$prefix" | xargs -r docker rm -f >/dev/null
     rm -rf "$work"
 }
@@ -48,6 +48,8 @@ allowed_users = ["alice"]
 listen = "127.0.0.1:$api_port"
 public_url = "http://127.0.0.1:$api_port"
 web_root = "$root/web/dist"
+# 公開したポートは <ポート>-ws-<ID>.preview.localhost で開く (Playwright の Chromium は 127.0.0.1 に向ける)。
+proxy_url = "http://preview.localhost:$api_port"
 
 [memberships]
 "org:acme" = ["alice"]
@@ -75,10 +77,24 @@ check workspace "created acme/proj" as alice chloe ws create acme/proj
 check vm-up "UP" as alice+acme/proj 'echo UP'
 login="$(as alice chloe web login | grep -o 'http://[^ ]*' | tail -1)"
 check login-link "/login/link?code=" echo "$login"
+proxy_login="$(as alice chloe web login | grep -o 'http://[^ ]*' | tail -1)"
+# 公開したポートを開く確かめのために、VM の中でサーバーを動かして公開する。動かす接続が、
+# ワークスペースを止めずにおく。
+as alice+acme/proj 'cat > /tmp/proxy-server.py' < "$here/proxy-server.py"
+# 5174 は、ほかのポートのページから WebSocket を開けないことを確かめるのに使う。
+ssh "${ssh_opts[@]}" -i "$work/alice" alice+acme/proj@127.0.0.1 \
+    'python3 /tmp/proxy-server.py 5173 & python3 /tmp/proxy-server.py 5174 & wait' > "$work/server.out" 2>&1 &
+server_pid=$!
+servers_up() { [ "$(grep -c listening "$work/server.out")" -ge 2 ]; }
+wait_until 30 servers_up || true
+proxy_url="$(as alice+acme/proj 'chloe-ask port publish 5173')"
+as alice+acme/proj 'chloe-ask port publish 5174' >/dev/null
+check port-published ".preview.localhost:" echo "$proxy_url"
 
 section "browser"
 code=0
 (cd "$root/web" && CHLOE_E2E_URL="http://127.0.0.1:$api_port" CHLOE_E2E_LOGIN="$login" \
+    CHLOE_E2E_LOGIN_PROXY="$proxy_login" CHLOE_E2E_PROXY_URL="$proxy_url" \
     CHLOE_E2E_OUT="$state/playwright" CHLOE_E2E_SCREENSHOTS="${CHLOE_E2E_SCREENSHOTS:-}" pnpm exec playwright test) || code=$?
 # 監査ログに、Web の端末のシェルの始まりと終わりが残る。
 web_shells() { [ "$(strip_colors "$logs/gateway.log" | grep 'session started' | grep -c 'via="web"')" -gt 0 ] && echo yes; }

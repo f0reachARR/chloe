@@ -19,6 +19,8 @@ export default defineConfig({
     trace: 'retain-on-failure',
     // CHLOE_E2E_SCREENSHOTS=1 なら、見た目を確かめるために、すべてのテストで撮る。
     screenshot: process.env.CHLOE_E2E_SCREENSHOTS ? 'on' : 'only-on-failure',
+    // 公開したポートのホスト (*.preview.localhost) を、ゲートウェイの待ち受け (127.0.0.1) に向ける。
+    launchOptions: { args: ['--host-resolver-rules=MAP *.preview.localhost 127.0.0.1'] },
   },
   projects: [
     { name: 'login', testMatch: /login\.setup\.ts/ },

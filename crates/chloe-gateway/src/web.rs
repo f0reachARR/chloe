@@ -34,6 +34,7 @@ use utoipa::ToSchema;
 
 use crate::api::{ErrorBody, error};
 use crate::config::ApiConfig;
+use crate::proxy;
 use crate::session::Shared;
 
 const SESSION_COOKIE: &str = "chloe_session";
@@ -70,6 +71,14 @@ impl WebConfig {
     /// 起動時に設定を確かめる。
     pub fn check(api: &ApiConfig) -> Result<()> {
         Self::new(api)?;
+        if let Some(proxy_url) = &api.proxy_url {
+            chloe_controller::ports::ProxyBase::parse(proxy_url)?;
+            if api.public_url.is_none() {
+                bail!(
+                    "api.proxy_url needs api.public_url (opening a port signs in through the web UI)"
+                );
+            }
+        }
         if let Some(root) = &api.web_root
             && !root.join("index.html").is_file()
         {
@@ -87,7 +96,7 @@ impl WebConfig {
         self.public_url.origin().ascii_serialization()
     }
 
-    fn url(&self, path: &str) -> String {
+    pub(crate) fn url(&self, path: &str) -> String {
         format!("{}{path}", self.origin())
     }
 
@@ -99,7 +108,7 @@ impl WebConfig {
             .is_some_and(|origin| origin == self.origin())
     }
 
-    fn cookie(&self, name: &str, value: &str, path: &str, max_age: i64) -> HeaderValue {
+    pub(crate) fn cookie(&self, name: &str, value: &str, path: &str, max_age: i64) -> HeaderValue {
         let secure = if self.public_url.scheme() == "https" {
             "; Secure"
         } else {
@@ -118,7 +127,7 @@ pub fn login_link(shared: &Shared, code: &str) -> Option<String> {
 }
 
 /// 要求の cookie から、名前が `name` の値を探す。
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get_all(header::COOKIE)
         .iter()
@@ -145,6 +154,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(GITHUB_CALLBACK, get(github_callback))
         .route("/api/auth/link", post(link))
         .route("/api/auth/logout", post(logout))
+        .route("/api/auth/proxy", get(proxy::start))
+        .route("/api/auth/continue", get(proxy::resume))
         // 管理 API にもログインにもない `/api` の経路は、画面ではなく 404 を返す。
         .route("/api/{*rest}", any(api_not_found))
         .with_state(shared);
@@ -322,7 +333,8 @@ async fn github_callback(
         Ok(cookie) => cookie,
         Err((_, message)) => return back_to_login(&message),
     };
-    let mut response = Redirect::to("/").into_response();
+    // ログインの前に公開したポートを開こうとしていれば、そこへ戻す。
+    let mut response = Redirect::to("/api/auth/continue").into_response();
     let headers = response.headers_mut();
     headers.append(header::SET_COOKIE, cookie);
     headers.append(
@@ -409,6 +421,7 @@ mod tests {
             tls_key: None,
             public_url: public_url.map(Into::into),
             web_root: None,
+            proxy_url: None,
             session_ttl_secs: 3600,
         }
     }

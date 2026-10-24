@@ -7,11 +7,12 @@
 //! - `chloe-node` は参加するとき、CA の証明書の指紋を含む参加用のトークンで、最初の接続の
 //!   相手を確かめる ([`fetch_ca`])。
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ConnectInfo;
 use axum::{Extension, Router};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -328,7 +329,12 @@ pub async fn serve(
                     .and_then(|certs| certs.first())
                     .and_then(role_of),
             );
-            let service = TowerToHyperService::new(router.layer(Extension(peer)));
+            // 接続元のアドレスは、axum の `ConnectInfo<SocketAddr>` で読めるようにする。
+            let service = TowerToHyperService::new(
+                router
+                    .layer(Extension(peer))
+                    .layer(Extension(ConnectInfo::<SocketAddr>(addr))),
+            );
             if let Err(error) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(TokioIo::new(tls), service)
                 .with_upgrades()

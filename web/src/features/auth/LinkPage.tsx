@@ -21,7 +21,8 @@ export function LinkPage({ code }: { code?: string }) {
       setPending(false);
       return;
     }
-    window.location.assign('/');
+    // ログインの前に公開したポートを開こうとしていれば、ゲートウェイがそこへ戻す。
+    window.location.assign('/api/auth/continue');
   };
 
   return (

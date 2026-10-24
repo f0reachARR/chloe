@@ -25,6 +25,8 @@
 //! GET    /api/v1/workspace-policies/{name}  ワークスペースの規則 (PUT、DELETE も同じ形)
 //! GET    /api/v1/workspace-requests/{name}[?lines=200]   HTTP の要求のログの末尾 (古い順)
 //! GET    /api/v1/workspace-terminal/{name}?cols=80&rows=24   シェルの端末 (WebSocket、[`crate::terminal`])
+//! GET    /api/v1/workspace-ports/{name}     VM の中で公開したポート ([`crate::proxy`])
+//! DELETE /api/v1/workspace-ports/{name}?port=5173   ポートの公開を取り消す
 //! GET    /api/v1/policy                     個人の設定 (PUT、DELETE も /api/v1/policies と同じ)
 //! GET    /api/v1/policies/{owner}           Organization か team の設定
 //! PUT    /api/v1/policies/{owner}           設定 (JSON)
@@ -50,6 +52,7 @@ use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use chloe_controller::asks::AskEvent;
 use chloe_controller::catalog::SecretInput;
+use chloe_controller::ports::PublishedPort;
 use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
 use chloe_controller::store::ApiToken;
 use chloe_controller::workspace::{DiskSizes, MachineSize, RootMode};
@@ -153,6 +156,10 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .route("/api/v1/workspace-terminal/{*name}", get(terminal::open))
         .route(
+            "/api/v1/workspace-ports/{*name}",
+            get(workspace_ports).delete(unpublish_port),
+        )
+        .route(
             "/api/v1/policy",
             get(show_own_policy)
                 .put(set_own_policy)
@@ -181,7 +188,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
         remove_workspace, workspace_requests, list_secrets, show_secret, set_secret, remove_secret,
         show_workspace_policy, set_workspace_policy, remove_workspace_policy, show_own_policy,
         set_own_policy, remove_own_policy, show_policy, set_policy, remove_policy, list_tokens,
-        create_token, revoke_token, list_asks, show_ask, answer_ask, terminal::open,
+        create_token, revoke_token, list_asks, show_ask, answer_ask, terminal::open, workspace_ports,
+        unpublish_port,
         web::methods, web::github_start, web::link, web::logout,
     ),
     components(schemas(AskEventData, terminal::ClientFrame, terminal::ServerFrame)),
@@ -740,6 +748,34 @@ async fn workspace_requests(
 ) -> Result<Response, ops::Error> {
     let records = ops::tail_requests(&shared, &caller.login, &name, query.lines).await?;
     Ok(Json(records).into_response())
+}
+
+#[utoipa::path(get, path = "/api/v1/workspace-ports/{name}", tag = "workspaces", description = "VM の中で `chloe-ask port publish` で公開したポート (ポートの順)。`url` をブラウザで開くと、Web の画面のログインを通って VM の中のサーバーに届く。", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), responses((status = 200, body = Vec<PublishedPort>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+async fn workspace_ports(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Response, ops::Error> {
+    let (_, ports) = ops::workspace_ports(&shared, &caller.login, &name).await?;
+    Ok(Json(ports).into_response())
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct PortQuery {
+    /// 取り消すポート。
+    port: u16,
+}
+
+#[utoipa::path(delete, path = "/api/v1/workspace-ports/{name}", tag = "workspaces", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)"), PortQuery), responses((status = 204, description = "取り消した"), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+async fn unpublish_port(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+    Query(query): Query<PortQuery>,
+) -> Result<Response, ops::Error> {
+    ops::unpublish_port(&shared, &caller.login, &name, query.port).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[derive(Deserialize, IntoParams)]

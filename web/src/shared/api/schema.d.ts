@@ -272,6 +272,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspace-ports/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description VM の中で `chloe-ask port publish` で公開したポート (ポートの順)。`url` をブラウザで開くと、Web の画面のログインを通って VM の中のサーバーに届く。 */
+        get: operations["workspace_ports"];
+        put?: never;
+        post?: never;
+        delete: operations["unpublish_port"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspace-requests/{name}": {
         parameters: {
             query?: never;
@@ -474,8 +491,26 @@ export interface components {
             /** Format: int64 */
             token?: number | null;
         };
+        /** @description 公開したポート。 */
+        PublishedPort: {
+            /**
+             * Format: int64
+             * @description UNIX 時刻 (秒)。
+             */
+            created_at: number;
+            /** Format: int32 */
+            port: number;
+            scheme: components["schemas"]["Scheme"];
+            /** @description ブラウザで開く URL。ゲートウェイに `[api] proxy_url` がなければ出さない。 */
+            url?: string | null;
+        };
         /** @enum {string} */
         RootMode: "ephemeral" | "persistent";
+        /**
+         * @description VM の中のサーバーとの話し方。
+         * @enum {string}
+         */
+        Scheme: "http" | "https";
         SecretNames: {
             names: string[];
             owner: string;
@@ -1508,6 +1543,88 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["UpdatedRunners"];
                 };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    workspace_ports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ワークスペース (SSH と同じ書き方。`/` は `%2F` にする) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishedPort"][];
+                };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    unpublish_port: {
+        parameters: {
+            query: {
+                /** @description 取り消すポート。 */
+                port: number;
+            };
+            header?: never;
+            path: {
+                /** @description ワークスペース (SSH と同じ書き方。`/` は `%2F` にする) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 取り消した */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description 誤り */
             "4XX": {

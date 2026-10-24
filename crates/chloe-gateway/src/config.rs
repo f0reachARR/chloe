@@ -108,6 +108,11 @@ pub struct ApiConfig {
     /// `/usr/share/chloe/web`。なければ画面のファイルは出さない (開発で Vite から出すとき)。
     #[serde(default)]
     pub web_root: Option<PathBuf>,
+    /// VM の中で公開したポートを開くプロキシのホストの元 (`https://preview.example.com` など)。
+    /// 公開したポートごとに `<ポート>-ws-<ワークスペースの ID>.<ドメイン>` を割り当てるので、
+    /// ワイルドカードの DNS と証明書が要る。ログインに Web の画面を使うので、`public_url` も要る。
+    #[serde(default)]
+    pub proxy_url: Option<String>,
     /// Web の画面のセッションの有効期間 (秒)。
     #[serde(default = "default_session_ttl")]
     pub session_ttl_secs: i64,

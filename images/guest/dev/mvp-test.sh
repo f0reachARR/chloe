@@ -57,6 +57,8 @@ admins = ["alice"]
 listen = "127.0.0.1:$api_port"
 public_url = "http://127.0.0.1:$api_port"
 web_root = "$work/web"
+# 公開したポートは <ポート>-ws-<ID>.preview.localhost で開く (curl の --resolve で 127.0.0.1 に向ける)。
+proxy_url = "http://preview.localhost:$api_port"
 
 [memberships]
 "org:acme" = ["alice"]
@@ -379,8 +381,136 @@ check web-terminal-other-origin "refused" sh -c 'echo true | "$@"' _ \
     node "$here/web-terminal.mjs" "$web" acme/proj "$alice_cookie" https://evil.example.com
 check web-terminal-not-member "refused" sh -c 'echo true | "$@"' _ \
     node "$here/web-terminal.mjs" "$web" acme/proj "$bob_cookie"
+section "port proxy"
+# VM の中で公開したポートを、プロキシのホストで中継する。サーバーは 127.0.0.1 だけで待ち受ける。
+openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=localhost -days 1 \
+    -keyout "$work/proxy.key" -out "$work/proxy.pem" 2>/dev/null
+as alice+acme/proj 'cat > /tmp/proxy-server.py' < "$here/proxy-server.py"
+as alice+acme/proj 'cat > /tmp/proxy.pem' < "$work/proxy.pem"
+as alice+acme/proj 'cat > /tmp/proxy.key' < "$work/proxy.key"
+# サーバーを動かす接続が、ワークスペースを止めずにおく。
+ssh "${ssh_opts[@]}" -i "$work/alice" alice+acme/proj@127.0.0.1 \
+    'python3 /tmp/proxy-server.py 5173 & python3 /tmp/proxy-server.py 8443 /tmp/proxy.pem /tmp/proxy.key & wait' \
+    > "$work/proxy-server.out" 2>&1 &
+proxy_bg=$!
+servers_up() { [ "$(grep -c listening "$work/proxy-server.out")" -ge 2 ]; }
+wait_until 60 servers_up || true
+check port-not-published "not published" as alice chloe ws unpublish acme/proj 5173
+# ホスト名はランダムな 12 文字で、ワークスペースもポートも含まない。
+host_name_of() { local host="${1#http://}"; echo "${host%%.*}"; }
+port_url="$(as alice+acme/proj 'chloe-ask port publish 5173')"
+check port-published "random" sh -c 'echo "$1" | grep -Eq "^http://[a-z2-7]{12}\.preview\.localhost:[0-9]+/$" && echo random' _ "$port_url"
+https_url="$(as alice+acme/proj 'chloe-ask port publish 8443 --https')"
+check port-published-https "$https_url" as alice+acme/proj 'chloe-ask port list'
+check port-republish-keeps-name "$port_url" as alice+acme/proj 'chloe-ask port publish 5173'
+check port-list "5173	http" as alice+acme/proj 'chloe-ask port list'
+check port-ws-ports "8443	https" as alice chloe ws ports acme/proj
+check port-api '"port":5173' web_api "$alice_cookie" GET /api/v1/workspace-ports/acme%2Fproj
+check port-api-not-member "404" web_api "$bob_cookie" GET /api/v1/workspace-ports/acme%2Fproj
+proxy_host="${port_url#http://}"
+proxy_host="${proxy_host%%:*}"
+port_name="$(host_name_of "$port_url")"
+https_host="${https_url#http://}"
+https_host="${https_host%%:*}"
+proxied() {
+    local host="$1" path="$2"; shift 2
+    curl -s --resolve "$host:$api_port:127.0.0.1" "$@" "http://$host:$api_port$path"
+}
+proxy_token="$(as alice chloe token create proxy --expires 1d | head -1)"
+bob_proxy_token="$(as bob chloe token create proxy --expires 1d | head -1)"
+check proxy-token "hello from 5173" proxied "$proxy_host" / -H "Authorization: Bearer $proxy_token"
+check proxy-https "hello from 8443" proxied "$https_host" / -H "Authorization: Bearer $proxy_token"
+# X-Forwarded-Proto は、公開の URL (ここでは http) ではなく、VM の中のサーバーとの話し方に合わせる。
+check proxy-proto-http '"x-forwarded-proto": "http"' proxied "$proxy_host" /headers -H "Authorization: Bearer $proxy_token"
+check proxy-proto-https '"x-forwarded-proto": "https"' proxied "$https_host" /headers -H "Authorization: Bearer $proxy_token"
+check proxy-post "posted body" proxied "$proxy_host" /submit -H "Authorization: Bearer $proxy_token" -d body
+# 本文は溜めずに流すので、管理 API の本文の上限 (2 MiB) は効かない。
+head -c 5000000 /dev/zero | tr '\0' a > "$work/large-body"
+check proxy-large-body "(5000000 bytes)" proxied "$proxy_host" /submit -H "Authorization: Bearer $proxy_token" \
+    --data-binary @"$work/large-body"
+check proxy-websocket "echo:hi" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
+    "Authorization: Bearer $proxy_token" hi
+proxy_headers() { proxied "$proxy_host" /headers -H "Authorization: Bearer $proxy_token" -H 'Cookie: app=1; chloe_proxy=x'; }
+check proxy-host-rewritten '"host": "localhost:5173"' proxy_headers
+check proxy-forwarded-host "\"x-forwarded-host\": \"$proxy_host\"" proxy_headers
+check proxy-app-cookie '"cookie": "app=1"' proxy_headers
+# 利用者の IP アドレスは X-Forwarded-For の末尾に足す (手前のリバースプロキシが付けたものは残す)。
+check proxy-forwarded-for '"x-forwarded-for": "127.0.0.1"' proxy_headers
+check proxy-forwarded-for-appended '"x-forwarded-for": "198.51.100.1, 127.0.0.1"' proxied "$proxy_host" /headers \
+    -H "Authorization: Bearer $proxy_token" -H 'X-Forwarded-For: 198.51.100.1'
+# そのページ自身の Origin は localhost:<ポート> に書き換え、ほかのオリジンはそのまま渡す。
+check proxy-foreign-origin '"origin": "https://elsewhere.example.com"' proxied "$proxy_host" /headers \
+    -H "Authorization: Bearer $proxy_token" -H 'Origin: https://elsewhere.example.com'
+proxy_leaks() { if proxy_headers | grep -qiE "authorization|chloe_proxy|$proxy_token"; then echo leaked; else echo clean; fi; }
+check proxy-no-credentials "clean" proxy_leaks
+check proxy-not-member "404" proxied "$proxy_host" / -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $bob_proxy_token"
+check proxy-unpublished-port "404" proxied "aaaaaaaaaaaa.preview.localhost" / -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $proxy_token"
+check proxy-no-auth-post "401" proxied "$proxy_host" / -o /dev/null -w '%{http_code}' -d x
+# ブラウザの代わりに、Web の画面のセッションでログインを往復する。
+check proxy-to-login "/api/auth/proxy?name=$port_name&next=%2Fheaders" \
+    proxied "$proxy_host" /headers -o /dev/null -w '%{http_code} %{redirect_url}'
+location_of() { curl -s -o /dev/null -w '%{redirect_url}' "$@"; }
+code_url="$(location_of -H "Cookie: $alice_cookie" "$web/api/auth/proxy?name=$port_name&next=%2Fheaders")"
+check proxy-code "http://$proxy_host:$api_port/__chloe/auth?code=" echo "$code_url"
+redeemed="$(curl -s -D - -o /dev/null --resolve "$proxy_host:$api_port:127.0.0.1" "$code_url")"
+check proxy-cookie "HttpOnly; SameSite=Lax" echo "$redeemed"
+proxy_cookie="$(echo "$redeemed" | sed -n 's/^set-cookie: \(chloe_proxy=[^;]*\).*/\1/ip')"
+check proxy-code-once "already used" proxied "$proxy_host" "/__chloe/auth?${code_url#*\?}"
+check proxy-cookie-works '"x-forwarded-proto": "http"' proxied "$proxy_host" /headers -H "Cookie: $proxy_cookie; app=2"
+# cookie で来た要求は、ほかのサイト (ほかのプロキシのホストを含む) のページから送らせたものを断る。
+own_origin="http://$proxy_host:$api_port"
+other_origin="http://$https_host:$api_port"
+check proxy-same-origin-post "posted x" proxied "$proxy_host" /submit -H "Cookie: $proxy_cookie" \
+    -H "Origin: $own_origin" -H 'Sec-Fetch-Site: same-origin' -d x
+check proxy-other-origin-post "refused a request from another site" proxied "$proxy_host" /submit \
+    -H "Cookie: $proxy_cookie" -H "Origin: $other_origin" -d x -w ' %{http_code}'
+check proxy-same-site-fetch "403" proxied "$proxy_host" / -o /dev/null -w '%{http_code}' -H "Cookie: $proxy_cookie" \
+    -H 'Sec-Fetch-Site: same-site' -H 'Sec-Fetch-Mode: no-cors'
+check proxy-same-site-navigate "hello from 5173" proxied "$proxy_host" / -H "Cookie: $proxy_cookie" \
+    -H 'Sec-Fetch-Site: same-site' -H 'Sec-Fetch-Mode: navigate'
+check proxy-own-origin '"origin": "http://localhost:5173"' proxied "$proxy_host" /headers \
+    -H "Cookie: $proxy_cookie" -H "Origin: $own_origin"
+# VM の中のサーバーは、Vite と同じく localhost でない Origin の WebSocket を断る。
+check proxy-cookie-websocket "echo:cookie" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
+    "Cookie: $proxy_cookie" cookie "$own_origin"
+check proxy-cross-site-websocket "403" node "$here/proxy-ws.mjs" "127.0.0.1:$api_port" "$proxy_host:$api_port" \
+    "Cookie: $proxy_cookie" cookie "$other_origin"
+cookie_leaks() { if proxied "$proxy_host" /headers -H "Cookie: $proxy_cookie" | grep -q chloe_proxy; then echo leaked; else echo clean; fi; }
+check proxy-cookie-not-forwarded "clean" cookie_leaks
+check proxy-cookie-other-port "303" proxied "$https_host" / -o /dev/null -w '%{http_code}' -H "Cookie: $proxy_cookie"
+check proxy-login-not-member "nothing is published" curl -s -H "Cookie: $bob_cookie" \
+    "$web/api/auth/proxy?name=$port_name"
+check proxy-open-redirect "http://$proxy_host:$api_port/__chloe/auth?code=" \
+    location_of -H "Cookie: $alice_cookie" "$web/api/auth/proxy?name=$port_name&next=//evil.example.com/"
+# ログインしていなければ、開こうとしたポートを覚えてログインの画面へ送り、ログインのあと戻す。
+remembered="$(curl -s -D - -o /dev/null "$web/api/auth/proxy?name=$port_name&next=%2Fa")"
+check proxy-login-first "/login" echo "$remembered"
+return_cookie="$(echo "$remembered" | sed -n 's/^set-cookie: \(chloe_proxy_return=[^;]*\).*/\1/ip')"
+check proxy-continue "/api/auth/proxy?name=$port_name&next=%2Fa" \
+    location_of -H "Cookie: $return_cookie" "$web/api/auth/continue"
+check proxy-continue-nothing "/" location_of "$web/api/auth/continue"
+check port-unpublish "unpublished port 8443 of acme/proj" as alice chloe ws unpublish acme/proj 8443
+check proxy-after-unpublish "404" proxied "$https_host" / -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $proxy_token"
+check port-unpublish-agent "unpublished port 5173" as alice+acme/proj 'chloe-ask port unpublish 5173'
+# 取り消してから公開し直すと、新しい名前になり、前の URL は開けない。
+renewed_url="$(as alice+acme/proj 'chloe-ask port publish 5173')"
+check port-renewed-name "renewed" sh -c '[ -n "$1" ] && [ "$1" != "$2" ] && echo renewed' _ "$renewed_url" "$port_url"
+check proxy-old-name "404" proxied "$proxy_host" / -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $proxy_token"
+renewed_host="${renewed_url#http://}"
+renewed_host="${renewed_host%%:*}"
+# 前の名前の cookie は、新しいホストでは通らない (取り消したときに消える)。
+check proxy-old-cookie "303" proxied "$renewed_host" / -o /dev/null -w '%{http_code}' -H "Cookie: $proxy_cookie"
+renewed_code="$(location_of -H "Cookie: $alice_cookie" "$web/api/auth/proxy?name=$(host_name_of "$renewed_url")")"
+renewed_cookie="$(curl -s -D - -o /dev/null --resolve "$renewed_host:$api_port:127.0.0.1" "$renewed_code" |
+    sed -n 's/^set-cookie: \(chloe_proxy=[^;]*\).*/\1/ip')"
+check proxy-renewed-cookie "hello from 5173" proxied "$renewed_host" / -H "Cookie: $renewed_cookie"
+check proxy-audit "proxied a request" grep -m1 -o "proxied a request" "$logs/gateway.log"
+kill "$proxy_bg" 2>/dev/null || true
+# Web の画面からログアウトすると、プロキシのホストの cookie も使えなくなる (下で確かめる)。
 check web-logout "204" web_api "$alice_cookie" POST /api/auth/logout
 check web-logged-out "401" web_api "$alice_cookie" GET /api/v1/me
+check proxy-logged-out "303" proxied "$renewed_host" / -o /dev/null -w '%{http_code}' -H "Cookie: $renewed_cookie"
 
 section "authentication"
 check wrong-key "Permission denied" ssh "${ssh_opts[@]}" -i "$work/stranger" alice@127.0.0.1 true

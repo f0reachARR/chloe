@@ -18,6 +18,7 @@ use tracing::{info, warn};
 use crate::Error;
 use crate::asks::Asks;
 use crate::catalog::{self, SecretSpec};
+use crate::ports::{Ports, ProxyBase};
 use crate::runner::{
     AgentStream, BasePolicy, PolicyLayer, RuleOrigin, RunnerBackend, RunnerSpec, build_spec,
     label_rules,
@@ -163,6 +164,7 @@ struct Inner<B> {
     store: Store,
     resolver: Resolver,
     asks: Asks,
+    ports: Ports,
     backend: B,
     base: BasePolicy,
     disks: DiskConfig,
@@ -242,6 +244,7 @@ impl<B: RunnerBackend> Controller<B> {
         Self {
             inner: Arc::new(Inner {
                 asks: Asks::new(store.clone()),
+                ports: Ports::new(store.clone(), None),
                 store,
                 resolver: Resolver {
                     secrets: Arc::new(secrets),
@@ -291,6 +294,12 @@ impl<B: RunnerBackend> Controller<B> {
     /// ディスクの大きさの既定と上限を変える。
     pub fn with_disks(self, disks: DiskConfig) -> Self {
         self.configure(|inner| inner.disks = disks)
+    }
+
+    /// 公開したポートを開くプロキシのホストの元 (ゲートウェイの `[api] proxy_url`) を決める。
+    /// 公開したときに VM の中へ URL を返すのに使う。
+    pub fn with_proxy_base(self, base: ProxyBase) -> Self {
+        self.configure(|inner| inner.ports = Ports::new(inner.store.clone(), Some(base)))
     }
 
     /// VM の大きさの既定を変える。
@@ -419,6 +428,11 @@ impl<B: RunnerBackend> Controller<B> {
         &self.inner.asks
     }
 
+    /// VM の中で公開したポート。
+    pub fn ports(&self) -> &Ports {
+        &self.inner.ports
+    }
+
     pub fn store(&self) -> &Store {
         &self.inner.store
     }
@@ -497,6 +511,7 @@ impl<B: RunnerBackend> Controller<B> {
                 workspace.clone(),
                 self.inner.resolver.clone(),
                 self.inner.asks.clone(),
+                self.inner.ports.clone(),
             )?)),
             None => Ok(None),
         }
@@ -521,8 +536,14 @@ impl<B: RunnerBackend> Controller<B> {
         };
         match workspace {
             Some(workspace) => {
-                crate::broker::answer(question, &workspace, &self.inner.resolver, &self.inner.asks)
-                    .await
+                crate::broker::answer(
+                    question,
+                    &workspace,
+                    &self.inner.resolver,
+                    &self.inner.asks,
+                    &self.inner.ports,
+                )
+                .await
             }
             None => format!("{}\n", serde_json::json!({ "error": "unknown runner" })),
         }
@@ -1358,6 +1379,55 @@ mod tests {
             )
             .await;
         assert!(relayed.contains("\"cancelled\""), "{relayed}");
+    }
+
+    #[tokio::test]
+    async fn broker_publishes_only_the_workspace_ports() {
+        let (controller, backend) = controller(Duration::from_secs(60)).await;
+        let controller =
+            controller.with_proxy_base(ProxyBase::parse("https://preview.example.com").unwrap());
+        let ws_a = workspace(&controller, "w", "alice").await;
+        let ws_b = workspace(&controller, "w", "bob").await;
+        let _a = controller.open(&ws_a).await.unwrap();
+        let _b = controller.open(&ws_b).await.unwrap();
+        let socket_a = backend.broker_socket(&ws_a.key());
+        let socket_b = backend.broker_socket(&ws_b.key());
+
+        let published = send_line(
+            &socket_a,
+            serde_json::json!({"port": {"publish": {"port": 5173, "scheme": "https"}}}),
+        )
+        .await;
+        let published: serde_json::Value = serde_json::from_str(&published).unwrap();
+        assert_eq!(published["port"]["scheme"], "https");
+        // ホスト名はランダムで、ワークスペースもポートも含まない。
+        let url = published["port"]["url"].as_str().unwrap();
+        let name = url
+            .strip_prefix("https://")
+            .and_then(|u| u.strip_suffix(".preview.example.com/"))
+            .unwrap();
+        assert_eq!(name.len(), 12, "{url}");
+        assert!(!name.contains("5173"), "{url}");
+        // ほかのワークスペースからは、見ることも取り消すこともできない。
+        let listed = send_line(&socket_b, serde_json::json!({"port": "list"})).await;
+        assert_eq!(listed.trim(), r#"{"ports":[]}"#);
+        let refused = send_line(&socket_b, serde_json::json!({"port": {"unpublish": 5173}})).await;
+        assert_eq!(refused.trim(), r#"{"unpublished":false}"#);
+        let invalid = send_line(
+            &socket_a,
+            serde_json::json!({"port": {"publish": {"port": 0}}}),
+        )
+        .await;
+        assert!(invalid.contains("\"invalid\""), "{invalid}");
+        let relayed = controller
+            .answer_secret(
+                &ws_a.key(),
+                &serde_json::json!({"port": "list"}).to_string(),
+            )
+            .await;
+        assert!(relayed.contains("\"port\":5173"), "{relayed}");
+        let removed = send_line(&socket_a, serde_json::json!({"port": {"unpublish": 5173}})).await;
+        assert_eq!(removed.trim(), r#"{"unpublished":true}"#);
     }
 
     #[tokio::test]

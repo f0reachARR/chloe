@@ -128,3 +128,6 @@ kind = "systemd"
 # tls_key = "/etc/chloe/api.key"
 # public_url = "https://chloe.example.com"
 # web_root = "/usr/local/share/chloe/web"
+# VM の中で公開したポートを開くホストの元。ランダムな名前の <名前>.<ドメイン> を割り当てるので、
+# ワイルドカードの DNS と証明書が要る。Web の画面とは登録できるドメインを分けるとよい。
+# proxy_url = "https://chloe-preview.example.net"
