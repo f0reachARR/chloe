@@ -823,7 +823,7 @@ async fn policy_set(
         .await
         .map_err(shown)?;
     let layer: PolicyLayer = toml::from_str(text).map_err(|e| format!("invalid settings: {e}"))?;
-    let refreshed = ops::set_policy(shared, login, &owner, &layer)
+    let refreshed = ops::set_policy(shared, login, &owner, &layer, None)
         .await
         .map_err(shown)?;
     Ok(format!(

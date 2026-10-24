@@ -657,12 +657,14 @@ pub async fn show_policy(
     Ok(shared.controller.store().policy(owner).await?)
 }
 
-/// 設定を置き換え、動いているランナーに送る。送ったランナーの数を返す。
+/// 設定を置き換え、動いているランナーに送る。送ったランナーの数を返す。`expected` があれば、
+/// 版 ([`chloe_controller::store::policy_version`]) がそれと同じときだけ置き換える。
 pub async fn set_policy(
     shared: &Shared,
     login: &str,
     owner: &Owner,
     layer: &PolicyLayer,
+    expected: Option<&str>,
 ) -> Result<usize> {
     check_policy_admin(shared, login, owner).await?;
     // 個人のワークスペースは利用者のトークンを使うので、インストールトークンの範囲は効かない。
@@ -675,11 +677,18 @@ pub async fn set_policy(
     layer
         .check(shared.controller.base_policy())
         .map_err(Error::Invalid)?;
-    shared
-        .controller
-        .store()
-        .set_policy(owner, layer, login)
-        .await?;
+    let store = shared.controller.store();
+    match expected {
+        Some(expected) => {
+            if !store.replace_policy(owner, layer, login, expected).await? {
+                return Err(Error::Stale(format!(
+                    "the settings of {} changed after you read them; read them again",
+                    owner_arg(owner)
+                )));
+            }
+        }
+        None => store.set_policy(owner, layer, login).await?,
+    }
     Ok(shared.refresh_running_under(owner).await)
 }
 
@@ -829,6 +838,67 @@ impl RuleScope {
     }
 }
 
+/// 設定の層 (`gateway`、`user:alice`、`org:acme`、`team:acme/dev`) を読む。
+pub fn parse_scope(text: &str) -> Result<RuleScope> {
+    if text == "gateway" {
+        return Ok(RuleScope::Gateway);
+    }
+    text.parse::<Owner>().map(RuleScope::Owner).map_err(|_| {
+        Error::Invalid(format!(
+            "invalid scope: {text} (use gateway, user:LOGIN, org:ORG or team:ORG/TEAM)"
+        ))
+    })
+}
+
+/// 層 (ゲートウェイか持ち主) で効く規則 (上の層から評価する順に、出どころを添えて)、その層
+/// 自身の設定とその版、利用者が変えられるか。持ち主の層は、そのメンバーか設定を変えられる人が
+/// 見られる ([`show_policy`] と同じ)。ゲートウェイの層は誰でも見られ、変えられない。
+pub async fn policy_rules(shared: &Shared, login: &str, scope: &RuleScope) -> Result<PolicyRules> {
+    let controller = &shared.controller;
+    match scope {
+        RuleScope::Gateway => {
+            let base = controller.base_policy();
+            Ok(PolicyRules {
+                rules: label_rules(base, &[], &[]),
+                own: PolicyLayer {
+                    rules: base.rules.clone(),
+                    ..Default::default()
+                },
+                editable: false,
+                version: chloe_controller::store::NO_POLICY_VERSION.to_string(),
+            })
+        }
+        RuleScope::Owner(owner) => {
+            if !shared.can_access(login, owner).await?
+                && !shared.can_manage_policy(login, owner).await?
+            {
+                return Err(Error::Forbidden(format!(
+                    "you are not a member of {}",
+                    owner_arg(owner)
+                )));
+            }
+            let (layer, version) = controller.store().policy_versioned(owner).await?;
+            Ok(PolicyRules {
+                rules: controller.owner_rules(owner).await?,
+                own: layer.unwrap_or_default(),
+                editable: shared.can_manage_policy(login, owner).await?,
+                version,
+            })
+        }
+        RuleScope::Workspace(_) => Err(Error::Invalid(
+            "use /api/v1/workspace-rules for a workspace".to_string(),
+        )),
+    }
+}
+
+/// [`policy_rules`] の結果。
+pub struct PolicyRules {
+    pub rules: Vec<(RuleOrigin, PathRuleConfig)>,
+    pub own: PolicyLayer,
+    pub editable: bool,
+    pub version: String,
+}
+
 /// 利用者が見られるスコープと、規則を変えられるか。
 #[derive(Debug, Clone)]
 pub struct ScopeEntry {
@@ -971,7 +1041,7 @@ async fn update_policy(
     let mut layer = existing.clone().unwrap_or_default();
     change(&mut layer);
     if layer != PolicyLayer::default() {
-        return set_policy(shared, login, owner, &layer).await;
+        return set_policy(shared, login, owner, &layer, None).await;
     }
     if existing.is_none() {
         return Ok(0);

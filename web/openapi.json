@@ -381,11 +381,11 @@
         ],
         "responses": {
           "200": {
-            "description": "設定",
+            "description": "設定。`ETag` は版 (`PUT` の `If-Match` に渡す)",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/PolicyLayer"
                 }
               }
             }
@@ -426,6 +426,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "読んだときの版。違えば 412",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -433,7 +445,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "$ref": "#/components/schemas/PolicyLayer"
               }
             }
           },
@@ -445,6 +457,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UpdatedRunners"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "読んだあとに書き換えられていた",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -528,11 +550,11 @@
         "operationId": "show_own_policy",
         "responses": {
           "200": {
-            "description": "個人の設定",
+            "description": "個人の設定。`ETag` は版 (`PUT` の `If-Match` に渡す)",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/PolicyLayer"
                 }
               }
             }
@@ -564,12 +586,26 @@
           "policies"
         ],
         "operationId": "set_own_policy",
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "読んだときの版。違えば 412",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "description": "個人の設定",
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "$ref": "#/components/schemas/PolicyLayer"
               }
             }
           },
@@ -581,6 +617,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UpdatedRunners"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "読んだあとに書き換えられていた",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -618,6 +664,99 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UpdatedRunners"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/policy-rules": {
+      "get": {
+        "tags": [
+          "policies"
+        ],
+        "operationId": "policy_rules",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "`gateway`、`user:alice`、`org:acme`、`team:acme/dev`。",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyRules"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/policy-scopes": {
+      "get": {
+        "tags": [
+          "policies"
+        ],
+        "description": "利用者が見られる設定の層を、ゲートウェイ、個人、Organization、その team の順に返す。",
+        "operationId": "policy_scopes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PolicyScope"
+                  }
                 }
               }
             }
@@ -2184,6 +2323,36 @@
           }
         }
       },
+      "GitHubScope": {
+        "type": "object",
+        "description": "インストールトークンの範囲。書かなかった項目は、インストールのすべてになる。",
+        "properties": {
+          "permissions": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "権限の名前と水準 (`contents = \"read\"` など)。",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "repositories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "リポジトリの名前 (Organization の名前を含まない)。"
+          }
+        },
+        "additionalProperties": false
+      },
       "LinkCode": {
         "type": "object",
         "required": [
@@ -2260,6 +2429,113 @@
           }
         },
         "additionalProperties": false
+      },
+      "PolicyLayer": {
+        "type": "object",
+        "description": "個人、Organization か team の設定 (データベースの `policies`)。\n\n中継のみ (`passthrough`) の規則は置けない。復号しないのでほかの規則が効かず、置けると\n上の層の規則を素通りする宛先を作れてしまうためである。",
+        "properties": {
+          "github": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GitHubScope",
+                "description": "共有ワークスペースに渡す GitHub のインストールトークンの範囲。下の層が優先する。"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "root": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RootMode",
+                "description": "新しく作るワークスペースのルートの扱いの既定。下の層が優先する。"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PathRuleConfig"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PolicyRules": {
+        "type": "object",
+        "description": "層で効く規則。",
+        "required": [
+          "rules",
+          "own",
+          "editable",
+          "version"
+        ],
+        "properties": {
+          "editable": {
+            "type": "boolean",
+            "description": "利用者がこの層の設定を変えられるか。"
+          },
+          "own": {
+            "$ref": "#/components/schemas/PolicyLayer",
+            "description": "この層自身の設定 (変えるもの)。設定がなければ空。"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectiveRule"
+            },
+            "description": "評価する順の規則 (上の層から)。最初に一致した規則で決まる。"
+          },
+          "version": {
+            "type": "string",
+            "description": "この層の設定の版。`PUT /api/v1/policies/{owner}` と `PUT /api/v1/policy` の `If-Match` に渡す。"
+          }
+        }
+      },
+      "PolicyScope": {
+        "type": "object",
+        "description": "利用者が見られる設定の層。",
+        "required": [
+          "scope",
+          "kind",
+          "name",
+          "editable",
+          "rules",
+          "workspaces"
+        ],
+        "properties": {
+          "editable": {
+            "type": "boolean",
+            "description": "利用者がこの層の設定を変えられるか。"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ScopeKind"
+          },
+          "name": {
+            "type": "string",
+            "description": "画面に出す名前 (`gateway`、`alice`、`acme`、`acme/dev`)。"
+          },
+          "rules": {
+            "type": "integer",
+            "description": "この層自身の規則の数。",
+            "minimum": 0
+          },
+          "scope": {
+            "type": "string",
+            "description": "`gateway`、`user:alice`、`org:acme`、`team:acme/dev`。`/api/v1/policy-rules` の `scope=` に渡す。"
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "この持ち主のワークスペース (ゲートウェイの層では空)。"
+          }
+        }
       },
       "PublishedPort": {
         "type": "object",
@@ -2374,6 +2650,16 @@
         "enum": [
           "http",
           "https"
+        ]
+      },
+      "ScopeKind": {
+        "type": "string",
+        "description": "設定の層の種類。",
+        "enum": [
+          "gateway",
+          "user",
+          "org",
+          "team"
         ]
       },
       "SecretNames": {
