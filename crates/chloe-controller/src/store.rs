@@ -261,6 +261,71 @@ impl Store {
         .transpose()
     }
 
+    /// ワークスペースの設定と、その版 ([`policy_version`])。
+    pub async fn workspace_policy_versioned(
+        &self,
+        id: i64,
+    ) -> Result<(Option<WorkspacePolicy>, String), Error> {
+        let config = self.workspace_policy_config(id).await?;
+        let version = policy_version(config.as_deref());
+        let policy = config
+            .map(|config| serde_json::from_str(&config).map_err(|e| Error::Invalid(e.to_string())))
+            .transpose()?;
+        Ok((policy, version))
+    }
+
+    async fn workspace_policy_config(&self, id: i64) -> Result<Option<String>, Error> {
+        let row = sqlx::query("SELECT config FROM workspace_policies WHERE workspace_id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| row.try_get("config")).transpose()?)
+    }
+
+    /// 版が `expected` のときだけ、ワークスペースの設定を置き換える。置き換えたら `true`。
+    /// 確かめてから書くまでに別の書き込みが入らないよう、読んだ JSON と同じ行だけを書き換える。
+    pub async fn replace_workspace_policy(
+        &self,
+        id: i64,
+        policy: &WorkspacePolicy,
+        updated_by: &str,
+        expected: &str,
+    ) -> Result<bool, Error> {
+        let current = self.workspace_policy_config(id).await?;
+        if policy_version(current.as_deref()) != expected {
+            return Ok(false);
+        }
+        let config = serde_json::to_string(policy).map_err(|e| Error::Invalid(e.to_string()))?;
+        let result = match current {
+            None => {
+                sqlx::query(
+                    "INSERT INTO workspace_policies (workspace_id, config, updated_by, updated_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (workspace_id) DO NOTHING",
+                )
+                .bind(id)
+                .bind(config)
+                .bind(updated_by)
+                .bind(now())
+                .execute(&self.pool)
+                .await?
+            }
+            Some(current) => {
+                sqlx::query(
+                    "UPDATE workspace_policies SET config = ?2, updated_by = ?3, updated_at = ?4
+                     WHERE workspace_id = ?1 AND config = ?5",
+                )
+                .bind(id)
+                .bind(config)
+                .bind(updated_by)
+                .bind(now())
+                .bind(current)
+                .execute(&self.pool)
+                .await?
+            }
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn set_workspace_policy(
         &self,
         id: i64,
@@ -954,6 +1019,18 @@ pub fn token_hash(token: &str) -> String {
         .collect()
 }
 
+/// ワークスペースの設定がないときの版。
+pub const NO_POLICY_VERSION: &str = "none";
+
+/// ワークスペースの設定の版。保存した JSON の SHA-256 の先頭 16 桁 (ないときは [`NO_POLICY_VERSION`])。
+/// 画面で編集しているあいだに、承認などでほかの書き込みがあったかを見分ける。
+pub fn policy_version(config: Option<&str>) -> String {
+    match config {
+        None => NO_POLICY_VERSION.to_string(),
+        Some(config) => token_hash(config)[..16].to_string(),
+    }
+}
+
 pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1394,6 +1471,47 @@ pub(crate) mod tests {
         );
         assert!(store.delete_workspace_policy(ws.id).await.unwrap());
         assert!(!store.delete_workspace_policy(ws.id).await.unwrap());
+
+        // 版が合うときだけ置き換える。ないときの版から作れ、読んだあとに書き換えられていれば書かない。
+        let (none, version) = store.workspace_policy_versioned(ws.id).await.unwrap();
+        assert_eq!((none, version.as_str()), (None, NO_POLICY_VERSION));
+        assert!(
+            store
+                .replace_workspace_policy(ws.id, &policy("a.example"), "alice", NO_POLICY_VERSION)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .replace_workspace_policy(ws.id, &policy("b.example"), "bob", NO_POLICY_VERSION)
+                .await
+                .unwrap()
+        );
+        let (read, version) = store.workspace_policy_versioned(ws.id).await.unwrap();
+        assert_eq!(read, Some(policy("a.example")));
+        assert_ne!(version, NO_POLICY_VERSION);
+        store
+            .set_workspace_policy(ws.id, &policy("c.example"), "carol")
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .replace_workspace_policy(ws.id, &policy("b.example"), "bob", &version)
+                .await
+                .unwrap()
+        );
+        let (_, latest) = store.workspace_policy_versioned(ws.id).await.unwrap();
+        assert!(
+            store
+                .replace_workspace_policy(ws.id, &policy("b.example"), "bob", &latest)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.workspace_policy(ws.id).await.unwrap(),
+            Some(policy("b.example"))
+        );
+        assert!(store.delete_workspace_policy(ws.id).await.unwrap());
 
         // ワークスペースを消すと、その設定も消える。同じ名前で作り直しても引き継がない。
         store

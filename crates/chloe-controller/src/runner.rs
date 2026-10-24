@@ -142,7 +142,7 @@ pub struct PolicyLayer {
 ///
 /// 規則だけを持つ。ルートの扱いはワークスペースそのものにあり、インストールトークンの範囲は
 /// 下の層ほど優先するので、ここで書けると持ち主の層で絞った範囲を広げられてしまう。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspacePolicy {
     #[serde(default)]
