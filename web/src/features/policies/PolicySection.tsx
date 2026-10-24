@@ -43,6 +43,7 @@ import {
 } from './rules';
 
 type WorkspaceRules = Schemas['WorkspaceRules'];
+type PathRuleConfig = Schemas['PathRuleConfig'];
 
 // 版 (If-Match) が違って断られた。読んだあとに、承認などで規則が書き換えられていた。
 class StaleError extends Error {}
@@ -119,21 +120,25 @@ function PolicyForm({
   }
 
   const save = useMutation({
-    mutationFn: async ({ version }: { version: string }) => {
+    mutationFn: async ({ version, rules }: { version: string; rules: PathRuleConfig[] }) => {
       const {
         data: updated,
         error,
         response,
       } = await fetchClient.PUT('/api/v1/workspace-policies/{name}', {
         params: { path: { name: workspace }, header: { 'If-Match': version } },
-        body: { rules: toRuleConfigs(form.values) },
+        body: { rules },
       });
       if (response.status === 412) throw new StaleError(errorMessage(error));
       if (error) throw error;
       return updated;
     },
-    onSuccess: async () => {
+    onSuccess: async (_, { rules }) => {
+      // 送った規則を、すぐに保存したものとして扱う (読み直しを待つあいだも、変更ありにしない)。
+      setBase((prev) => ({ ...prev, own: rules }));
+      setStale(false);
       notifications.show({ color: 'teal', message: `Saved the rules of ${workspace}` });
+      // 新しい版を読む。
       reset(await queryClient.fetchQuery({ ...rulesQuery(workspace), staleTime: 0 }));
     },
     onError: (error) => {
@@ -146,7 +151,9 @@ function PolicyForm({
     },
   });
 
-  const submit = form.onSubmit(() => save.mutate({ version: base.version }));
+  const submit = form.onSubmit(() =>
+    save.mutate({ version: base.version, rules: toRuleConfigs(form.values) }),
+  );
   const rules = form.values.rules;
 
   return (
@@ -166,7 +173,9 @@ function PolicyForm({
                 size="compact-sm"
                 color="red"
                 loading={save.isPending}
-                onClick={() => save.mutate({ version: data.version })}
+                onClick={() =>
+                  save.mutate({ version: data.version, rules: toRuleConfigs(form.values) })
+                }
               >
                 Save mine
               </Button>

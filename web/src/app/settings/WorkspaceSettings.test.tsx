@@ -68,7 +68,7 @@ describe('WorkspaceSettings', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('stops asking once the changes are saved', async () => {
+  it('closes once the changes it asked about are saved', async () => {
     const onClose = vi.fn<() => void>();
     renderWithProviders(
       <WorkspaceSettings
@@ -82,10 +82,9 @@ describe('WorkspaceSettings', () => {
     await userEvent.type(value, 'x');
     await userEvent.keyboard('{Escape}');
     expect(screen.getByText('Discard unsaved changes?')).toBeInTheDocument();
-    // 保存が終わったのと同じく、変更がなくなる。
+    expect(onClose).not.toHaveBeenCalled();
+    // 保存が終わったのと同じく、変更がなくなる。閉じようとしていたので閉じる。
     await userEvent.clear(value);
-    expect(screen.queryByText('Discard unsaved changes?')).not.toBeInTheDocument();
-    await userEvent.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalled();
   });
 

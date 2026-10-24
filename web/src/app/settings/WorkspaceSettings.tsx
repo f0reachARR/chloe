@@ -1,6 +1,6 @@
 import { Alert, Button, Group, Modal, Tabs, Text } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import type { WorkspaceSettingsSection } from '@/shared/feature';
 
@@ -25,6 +25,11 @@ export function WorkspaceSettings({
   const active = sections.some((s) => s.id === section) ? section : sections[0]?.id;
   const unsaved = sections.filter((s) => dirty[s.id]);
 
+  // 閉じようとしたときに保存の途中だったなら、保存が終わって変更がなくなったところで閉じる。
+  useEffect(() => {
+    if (confirming && unsaved.length === 0) onClose();
+  }, [confirming, unsaved.length, onClose]);
+
   const close = () => {
     if (unsaved.length > 0) {
       setConfirming(true);
@@ -45,7 +50,6 @@ export function WorkspaceSettings({
         </Text>
       }
     >
-      {/* 尋ねているあいだに保存が終われば、尋ねるのをやめる。 */}
       {confirming && unsaved.length > 0 && (
         <Alert color="yellow" mb="md" title="Discard unsaved changes?">
           <Text size="sm" mb="xs">
