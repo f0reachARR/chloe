@@ -12,7 +12,7 @@ export function useFeatureEvents(): LiveState {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const listeners = useMemo(() => {
-    const context: FeatureContext = { queryClient, navigate: (to) => void navigate({ to }) };
+    const context: FeatureContext = { queryClient, navigate: (options) => void navigate(options) };
     const collected: Listeners = {};
     for (const feature of features) {
       for (const [name, handler] of Object.entries(feature.events ?? {})) {
