@@ -50,8 +50,12 @@ test('shows the exit code and opens a new shell', async ({ page }) => {
 });
 
 test.describe(() => {
-  // 断られた WebSocket の切り替えは、ブラウザがコンソールに出す。
-  test.use({ allowedConsoleErrors: [/WebSocket connection to .* failed/] });
+  // 断られた WebSocket の切り替えと、止まったせいかを確かめる問い合わせの 404 は、ブラウザが
+  // コンソールに出す。
+  // (二つを並べた配列は、Playwright が値と設定の組と読むので、一つの正規表現にまとめる。)
+  test.use({
+    allowedConsoleErrors: [/WebSocket connection to .* failed|Failed to load resource: .* 404/],
+  });
 
   test('explains a workspace it cannot open', async ({ page }) => {
     await page.goto('/terminal?workspace=nobody%2Fnothing');
