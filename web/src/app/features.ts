@@ -24,4 +24,4 @@ export const overlays = features.flatMap((feature) =>
 
 export const workspaceSettings: WorkspaceSettingsSection[] = features
   .flatMap((feature) => feature.workspaceSettings ?? [])
-  .sort((a, b) => a.order - b.order);
+  .toSorted((a, b) => a.order - b.order);
