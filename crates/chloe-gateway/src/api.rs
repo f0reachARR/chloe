@@ -22,7 +22,8 @@
 //! GET    /api/v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
 //! PUT    /api/v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
 //! DELETE /api/v1/secrets/{name}[?owner=..]
-//! GET    /api/v1/workspace-policies/{name}  ワークスペースの規則 (PUT、DELETE も同じ形)
+//! GET    /api/v1/workspace-policies/{name}  ワークスペースの規則 (PUT、DELETE も同じ形。ETag と If-Match)
+//! GET    /api/v1/workspace-rules/{name}     ワークスペースで効く規則と出どころ、変えられるか、版
 //! GET    /api/v1/workspace-requests/{name}[?lines=200]   HTTP の要求のログの末尾 (古い順)
 //! GET    /api/v1/workspace-terminal/{name}?cols=80&rows=24   シェルの端末 (WebSocket、[`crate::terminal`])
 //! GET    /api/v1/workspace-ports/{name}     VM の中で公開したポート ([`crate::proxy`])
@@ -53,7 +54,7 @@ use axum::{Extension, Json, Router};
 use chloe_controller::asks::AskEvent;
 use chloe_controller::catalog::SecretInput;
 use chloe_controller::ports::PublishedPort;
-use chloe_controller::runner::{PolicyLayer, WorkspacePolicy};
+use chloe_controller::runner::{PolicyLayer, RuleOrigin, WorkspacePolicy};
 use chloe_controller::store::ApiToken;
 use chloe_controller::workspace::{DiskSizes, MachineSize, RootMode};
 use chloe_secrets::Owner;
@@ -150,6 +151,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
                 .put(set_workspace_policy)
                 .delete(remove_workspace_policy),
         )
+        .route("/api/v1/workspace-rules/{*name}", get(workspace_rules))
         .route(
             "/api/v1/workspace-requests/{*name}",
             get(workspace_requests),
@@ -186,7 +188,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
     paths(
         me, events, list_workspaces, create_workspace, show_workspace, update_workspace,
         remove_workspace, workspace_requests, list_secrets, show_secret, set_secret, remove_secret,
-        show_workspace_policy, set_workspace_policy, remove_workspace_policy, show_own_policy,
+        show_workspace_policy, set_workspace_policy, remove_workspace_policy, workspace_rules,
+        show_own_policy,
         set_own_policy, remove_own_policy, show_policy, set_policy, remove_policy, list_tokens,
         create_token, revoke_token, list_asks, show_ask, answer_ask, terminal::open, workspace_ports,
         unpublish_port,
@@ -297,6 +300,7 @@ impl IntoResponse for ops::Error {
             ops::Error::Forbidden(_) => StatusCode::FORBIDDEN,
             ops::Error::NotFound(_) => StatusCode::NOT_FOUND,
             ops::Error::Conflict(_) => StatusCode::CONFLICT,
+            ops::Error::Stale(_) => StatusCode::PRECONDITION_FAILED,
             ops::Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         error(status, self)
@@ -837,36 +841,134 @@ async fn answer_ask(
     Ok(Json(ops::answer_ask(&shared, &caller.login, id, reply).await?).into_response())
 }
 
-#[utoipa::path(get, path = "/api/v1/workspace-policies/{name}", tag = "policies", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), responses((status = 200, description = "ワークスペースの規則", body = Object), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+#[utoipa::path(get, path = "/api/v1/workspace-policies/{name}", tag = "policies", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), responses((status = 200, description = "ワークスペースの規則。`ETag` は版 (`PUT` の `If-Match` に渡す)", body = WorkspacePolicy), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn show_workspace_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
 ) -> Result<Response, ops::Error> {
-    match ops::show_workspace_policy(&shared, &caller.login, &name).await? {
-        (_, Some(policy)) => Ok(Json(policy).into_response()),
-        (ws, None) => Err(ops::Error::NotFound(format!(
+    let ws = ops::find_workspace(&shared, &caller.login, &name).await?;
+    match shared
+        .controller
+        .store()
+        .workspace_policy_versioned(ws.id)
+        .await?
+    {
+        (Some(policy), version) => {
+            Ok(([(header::ETAG, format!("\"{version}\""))], Json(policy)).into_response())
+        }
+        (None, _) => Err(ops::Error::NotFound(format!(
             "no rules for {}",
             ws.display_name()
         ))),
     }
 }
 
-#[utoipa::path(put, path = "/api/v1/workspace-policies/{name}", tag = "policies", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), request_body(content = Object, description = "ワークスペースの規則"), responses((status = 200, body = UpdatedRunners), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+/// `If-Match` の版。引用符を外す。`*` は版を問わないので、ないものとして扱う。
+fn if_match(headers: &axum::http::HeaderMap) -> Result<Option<String>, ops::Error> {
+    let Some(value) = headers.get(header::IF_MATCH) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| ops::Error::Invalid("invalid If-Match".into()))?
+        .trim();
+    if value == "*" {
+        return Ok(None);
+    }
+    Ok(Some(
+        value.trim_start_matches("W/").trim_matches('"').to_string(),
+    ))
+}
+
+#[utoipa::path(put, path = "/api/v1/workspace-policies/{name}", tag = "policies", description = "ワークスペースの規則を置き換える。`If-Match` に版 (`GET` の `ETag`、`/api/v1/workspace-rules` の `version`) を付けると、そのあとに書き換えられていれば 412 で断る。", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)"), ("If-Match" = Option<String>, Header, description = "読んだときの版")), request_body(content = WorkspacePolicy, description = "ワークスペースの規則"), responses((status = 200, body = UpdatedRunners), (status = 412, description = "読んだあとに書き換えられていた", body = ErrorBody), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn set_workspace_policy(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, ops::Error> {
     let ws = ops::find_workspace(&shared, &caller.login, &name).await?;
     // 権限のない利用者には、書き方の誤りより先に権限がないことを伝える。
     ops::check_workspace_policy_admin(&shared, &caller.login, &ws).await?;
+    let expected = if_match(&headers)?;
     let policy: WorkspacePolicy = serde_json::from_slice(&body)
         .map_err(|e| ops::Error::Invalid(format!("invalid rules: {e}")))?;
-    let updated = ops::set_workspace_policy(&shared, &caller.login, &ws, &policy).await?;
+    let updated =
+        ops::set_workspace_policy(&shared, &caller.login, &ws, &policy, expected.as_deref())
+            .await?;
     Ok(Json(UpdatedRunners {
         updated_runners: updated,
+    })
+    .into_response())
+}
+
+/// 規則の出どころ。
+#[derive(Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum RuleSource {
+    /// ゲートウェイの設定ファイルの `[policy]`。
+    Gateway,
+    /// 個人、Organization か team の設定 (`acme`、`acme/dev`、個人ならログイン名)。
+    Owner { owner: String },
+    /// ワークスペースの規則。
+    Workspace,
+    /// シークレットの差し替えと署名の宛先として足した規則。
+    Secret,
+}
+
+impl From<&RuleOrigin> for RuleSource {
+    fn from(origin: &RuleOrigin) -> Self {
+        match origin {
+            RuleOrigin::Gateway => Self::Gateway,
+            RuleOrigin::Owner(owner) => Self::Owner {
+                owner: ops::owner_arg(owner),
+            },
+            RuleOrigin::Workspace => Self::Workspace,
+            RuleOrigin::Secret => Self::Secret,
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+struct EffectiveRule {
+    source: RuleSource,
+    rule: chloe_policy::PathRuleConfig,
+}
+
+/// ワークスペースで効く規則。
+#[derive(Serialize, ToSchema)]
+struct WorkspaceRules {
+    /// 評価する順の規則 (上の層から)。最初に一致した規則で決まる。
+    rules: Vec<EffectiveRule>,
+    /// ワークスペース自身の規則 (変えるもの)。
+    own: Vec<chloe_policy::PathRuleConfig>,
+    /// 利用者がワークスペースの規則を変えられるか。
+    editable: bool,
+    /// ワークスペースの規則の版。`PUT /api/v1/workspace-policies/{name}` の `If-Match` に渡す。
+    version: String,
+}
+
+#[utoipa::path(get, path = "/api/v1/workspace-rules/{name}", tag = "policies", params(("name" = String, Path, description = "ワークスペース (SSH と同じ書き方。`/` は `%2F` にする)")), responses((status = 200, body = WorkspaceRules), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+async fn workspace_rules(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(name): Path<String>,
+) -> Result<Response, ops::Error> {
+    let view = ops::workspace_rules(&shared, &caller.login, &name).await?;
+    Ok(Json(WorkspaceRules {
+        rules: view
+            .rules
+            .iter()
+            .map(|(origin, rule)| EffectiveRule {
+                source: origin.into(),
+                rule: rule.clone(),
+            })
+            .collect(),
+        own: view.own,
+        editable: view.editable,
+        version: view.version,
     })
     .into_response())
 }

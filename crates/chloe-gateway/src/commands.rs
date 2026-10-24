@@ -777,7 +777,7 @@ async fn ws_policy_set(
         .map_err(shown)?;
     let policy: WorkspacePolicy =
         toml::from_str(text).map_err(|e| format!("invalid rules: {e}"))?;
-    let refreshed = ops::set_workspace_policy(shared, login, &ws, &policy)
+    let refreshed = ops::set_workspace_policy(shared, login, &ws, &policy, None)
         .await
         .map_err(shown)?;
     Ok(format!(

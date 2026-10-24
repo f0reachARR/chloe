@@ -32,6 +32,8 @@ pub enum Error {
     NotFound(String),
     /// すでにある。
     Conflict(String),
+    /// 読んだあとに書き換えられていた (`If-Match` の版が違う)。
+    Stale(String),
     Internal(String),
 }
 
@@ -42,6 +44,7 @@ impl std::fmt::Display for Error {
             | Self::Forbidden(m)
             | Self::NotFound(m)
             | Self::Conflict(m)
+            | Self::Stale(m)
             | Self::Internal(m) => f.write_str(m),
         }
     }
@@ -720,22 +723,68 @@ pub async fn show_workspace_policy(
 }
 
 /// ワークスペースの設定を置き換え、動いていればランナーに送る。送ったランナーの数を返す。
+/// `expected` があれば、版 ([`chloe_controller::store::policy_version`]) がそれと同じときだけ
+/// 置き換える。
 pub async fn set_workspace_policy(
     shared: &Shared,
     login: &str,
     workspace: &Workspace,
     policy: &WorkspacePolicy,
+    expected: Option<&str>,
 ) -> Result<usize> {
     check_workspace_policy_admin(shared, login, workspace).await?;
     policy
         .check(shared.controller.base_policy())
         .map_err(Error::Invalid)?;
-    shared
+    let store = shared.controller.store();
+    match expected {
+        Some(expected) => {
+            if !store
+                .replace_workspace_policy(workspace.id, policy, login, expected)
+                .await?
+            {
+                return Err(stale_rules(workspace));
+            }
+        }
+        None => {
+            store
+                .set_workspace_policy(workspace.id, policy, login)
+                .await?
+        }
+    }
+    Ok(shared.refresh_workspace(workspace).await? as usize)
+}
+
+fn stale_rules(workspace: &Workspace) -> Error {
+    Error::Stale(format!(
+        "the rules of {} changed after you read them; read them again",
+        workspace.display_name()
+    ))
+}
+
+/// ワークスペースで効く規則 (上の層から評価する順に、出どころを添えて)、ワークスペース自身の
+/// 規則とその版、利用者が変えられるか。ワークスペースに入れる人は見られる。
+pub async fn workspace_rules(shared: &Shared, login: &str, name: &str) -> Result<WorkspaceRules> {
+    let ws = find_workspace(shared, login, name).await?;
+    let (policy, version) = shared
         .controller
         .store()
-        .set_workspace_policy(workspace.id, policy, login)
+        .workspace_policy_versioned(ws.id)
         .await?;
-    Ok(shared.refresh_workspace(workspace).await? as usize)
+    Ok(WorkspaceRules {
+        rules: shared.controller.workspace_rules(&ws).await?,
+        own: policy.map(|p| p.rules).unwrap_or_default(),
+        editable: shared.can_manage_workspace_policy(login, &ws).await?,
+        version,
+    })
+}
+
+/// [`workspace_rules`] の結果。
+pub struct WorkspaceRules {
+    pub rules: Vec<(RuleOrigin, PathRuleConfig)>,
+    pub own: Vec<PathRuleConfig>,
+    pub editable: bool,
+    pub version: String,
 }
 
 pub async fn remove_workspace_policy(
@@ -890,7 +939,7 @@ pub async fn set_rules(
                 }
                 return remove_workspace_policy(shared, login, &ws).await;
             }
-            set_workspace_policy(shared, login, &ws, &WorkspacePolicy { rules }).await
+            set_workspace_policy(shared, login, &ws, &WorkspacePolicy { rules }, None).await
         }
     }
 }
@@ -1245,18 +1294,29 @@ pub async fn answer_ask(shared: &Shared, login: &str, id: i64, reply: Reply) -> 
     let resolution = resolution_for(&ask.body, reply)?;
     if resolution == Resolution::Allow {
         check_workspace_policy_admin(shared, login, &ws).await?;
-        let mut policy = shared
-            .controller
-            .store()
-            .workspace_policy(ws.id)
-            .await?
-            .unwrap_or_default();
-        if let Some(rule) = allow_rule(&ask)
-            && !policy.rules.iter().any(|r| r.name == rule.name)
-        {
-            policy.rules.push(rule);
+        // 読んでから書くまでに、画面などからほかの書き込みがあれば、読み直して足し直す
+        // (ほかの書き込みを消さないように)。
+        let mut attempts = 0;
+        loop {
+            let (policy, version) = shared
+                .controller
+                .store()
+                .workspace_policy_versioned(ws.id)
+                .await?;
+            let mut policy = policy.unwrap_or_default();
+            if let Some(rule) = allow_rule(&ask)
+                && !policy.rules.iter().any(|r| r.name == rule.name)
+            {
+                policy.rules.push(rule);
+            }
+            match set_workspace_policy(shared, login, &ws, &policy, Some(&version)).await {
+                Err(Error::Stale(_)) if attempts < 5 => attempts += 1,
+                result => {
+                    result?;
+                    break;
+                }
+            }
         }
-        set_workspace_policy(shared, login, &ws, &policy).await?;
     }
     let ask = shared
         .controller
