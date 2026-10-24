@@ -125,7 +125,7 @@ impl BasePolicy {
 ///
 /// 中継のみ (`passthrough`) の規則は置けない。復号しないのでほかの規則が効かず、置けると
 /// 上の層の規則を素通りする宛先を作れてしまうためである。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyLayer {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -165,7 +165,7 @@ impl WorkspacePolicy {
 }
 
 /// インストールトークンの範囲。書かなかった項目は、インストールのすべてになる。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubScope {
     /// リポジトリの名前 (Organization の名前を含まない)。

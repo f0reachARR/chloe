@@ -218,6 +218,71 @@ impl Store {
         .transpose()
     }
 
+    /// 持ち主の設定と、その版 ([`policy_version`])。
+    pub async fn policy_versioned(
+        &self,
+        owner: &Owner,
+    ) -> Result<(Option<PolicyLayer>, String), Error> {
+        let config = self.policy_config(owner).await?;
+        let version = policy_version(config.as_deref());
+        let layer = config
+            .map(|config| serde_json::from_str(&config).map_err(|e| Error::Invalid(e.to_string())))
+            .transpose()?;
+        Ok((layer, version))
+    }
+
+    async fn policy_config(&self, owner: &Owner) -> Result<Option<String>, Error> {
+        let row = sqlx::query("SELECT config FROM policies WHERE owner = ?1")
+            .bind(owner.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| row.try_get("config")).transpose()?)
+    }
+
+    /// 版が `expected` のときだけ、持ち主の設定を置き換える。置き換えたら `true`
+    /// ([`Self::replace_workspace_policy`] と同じ確かめ方)。
+    pub async fn replace_policy(
+        &self,
+        owner: &Owner,
+        layer: &PolicyLayer,
+        updated_by: &str,
+        expected: &str,
+    ) -> Result<bool, Error> {
+        let current = self.policy_config(owner).await?;
+        if policy_version(current.as_deref()) != expected {
+            return Ok(false);
+        }
+        let config = serde_json::to_string(layer).map_err(|e| Error::Invalid(e.to_string()))?;
+        let result = match current {
+            None => {
+                sqlx::query(
+                    "INSERT INTO policies (owner, config, updated_by, updated_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (owner) DO NOTHING",
+                )
+                .bind(owner.to_string())
+                .bind(config)
+                .bind(updated_by)
+                .bind(now())
+                .execute(&self.pool)
+                .await?
+            }
+            Some(current) => {
+                sqlx::query(
+                    "UPDATE policies SET config = ?2, updated_by = ?3, updated_at = ?4
+                     WHERE owner = ?1 AND config = ?5",
+                )
+                .bind(owner.to_string())
+                .bind(config)
+                .bind(updated_by)
+                .bind(now())
+                .bind(current)
+                .execute(&self.pool)
+                .await?
+            }
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn set_policy(
         &self,
         owner: &Owner,
@@ -1383,6 +1448,43 @@ pub(crate) mod tests {
             store.policy(&team).await.unwrap(),
             Some(layer("team2.example"))
         );
+
+        // 版が合うときだけ置き換える。ないときの版から作れ、読んだあとに書き換えられていれば書かない。
+        let carol = Owner::User("carol".into());
+        let (none, version) = store.policy_versioned(&carol).await.unwrap();
+        assert_eq!((none, version.as_str()), (None, NO_POLICY_VERSION));
+        assert!(
+            store
+                .replace_policy(&carol, &layer("a.example"), "carol", NO_POLICY_VERSION)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .replace_policy(&carol, &layer("b.example"), "carol", NO_POLICY_VERSION)
+                .await
+                .unwrap()
+        );
+        let (_, read) = store.policy_versioned(&carol).await.unwrap();
+        store
+            .set_policy(&carol, &layer("c.example"), "carol")
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .replace_policy(&carol, &layer("b.example"), "carol", &read)
+                .await
+                .unwrap()
+        );
+        let (current, latest) = store.policy_versioned(&carol).await.unwrap();
+        assert_eq!(current, Some(layer("c.example")));
+        assert!(
+            store
+                .replace_policy(&carol, &layer("b.example"), "carol", &latest)
+                .await
+                .unwrap()
+        );
+        assert!(store.delete_policy(&carol).await.unwrap());
 
         let hosts = |layers: Vec<PolicyLayer>| -> Vec<String> {
             layers
