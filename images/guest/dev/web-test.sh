@@ -43,6 +43,8 @@ github_url = "http://127.0.0.1:$keys_port"
 database = "$state/chloe.db"
 master_key = "$state/master.key"
 allowed_users = ["alice"]
+# GitHub App がないので、Organization のワークスペースの規則を画面から変えられるよう、運用者にする。
+admins = ["alice"]
 
 [api]
 listen = "127.0.0.1:$api_port"
