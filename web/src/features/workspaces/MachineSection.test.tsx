@@ -35,7 +35,7 @@ function fakeWorkspace(initial = workspace({ name: 'acme/proj' })) {
 describe('MachineSection', () => {
   it('saves only what changed and offers to stop to apply it', async () => {
     const bodies = fakeWorkspace();
-    const onDirtyChange = vi.fn();
+    const onDirtyChange = vi.fn<(dirty: boolean) => void>();
     renderWithProviders(<MachineSection workspace="acme/proj" onDirtyChange={onDirtyChange} />);
     const vcpus = await screen.findByRole('textbox', { name: 'vCPUs' });
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
