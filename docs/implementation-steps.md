@@ -1128,6 +1128,34 @@ Rust のテストは `chloe-controller` が 60 本、`chloe-gateway` が 69 本�
 - **E2E の時間**：テストが 3 分の時間切れで二度落ちると、`chloe web login` のコード（5 分）が切れ、あとのポートのテストもログインできずに落ちた。テストを直すと起きなくなった。
 - **承認の読み直し**：承認で規則を足す処理が、ほかの書き込みと重なったときに読み直すことは、コードで確かめただけで、テストで重ならせてはいない。
 
+## 段階 26：個人、Organization、team の設定の画面
+
+段階 25 で、ワークスペースの規則は画面から変えられるようになった。
+しかし、その上の層の個人、Organization、team の設定（規則、新しいワークスペースのルートの扱いの既定、GitHub のインストールトークンの範囲）を変えるには、まだ `chloe policy set` か TUI が要る。
+Organization の管理者が、宛先を Organization 全体で許す、team のトークンの範囲を絞る、といった作業も、ワークスペースの規則と同じく画面から行いたい。
+この段階では、ナビゲーションに Policies を足し、利用者が見られる設定の層を並べて、層ごとに見て変えられるようにする。
+
+### 決めたこと（2026-10-24）
+
+- **ナビゲーションは Inbox、Workspaces、Policies**：Policies（`/policies`）は `features/policies` が申告する。一覧から層を選ぶと、その層の画面（`/policies?scope=org:acme`）に移る。
+- **層の書き方**：層はデータベースの持ち主と同じ書き方（`user:alice`、`org:acme`、`team:acme/dev`）にし、ゲートウェイの `[policy]` は `gateway` と書く。Organization と個人の名前は同じ形なので、`acme` だけでは区別できないからである。
+- **層の一覧の経路**：`GET /api/v1/policy-scopes` で、TUI の Rules タブと同じ順（ゲートウェイ、個人、Organization、その team）に、層、変えられるか、その層自身の規則の数、その持ち主のワークスペースを返す（`ops::rule_scopes` を使う）。
+- **層で効く規則の経路**：`GET /api/v1/policy-rules?scope=` で、その層で効く規則と出どころ、その層自身の設定（`PolicyLayer`）、版、変えられるかを返す。見られるのは、段階 25 までの `GET /api/v1/policies/{owner}` と同じく、その持ち主のメンバーか、設定を変えられる人である。個人の層は本人だけが見られる。ゲートウェイの層は誰でも見られ、変えられない。
+- **型をスペックに出す**：`PolicyLayer`、`GitHubScope` に `utoipa` の注釈を付け、`/api/v1/policies/{owner}` と `/api/v1/policy` の本文をその型にする。
+- **版で上書きを防ぐ**：段階 25 のワークスペースの規則と同じく、`GET /api/v1/policies/{owner}` と `GET /api/v1/policy` は `ETag` で版を返し、`PUT` の `If-Match` が違えば 412 で断る。データベースでは、読んだ JSON と同じときだけ書き換える。`If-Match` がなければ、これまでどおり確かめない。
+- **変えられる項目**：規則、ルートの扱いの既定（`root`、書かなければ上の層か既定に従う）、トークンの範囲（`github` のリポジトリと、権限の名前と水準の組）。トークンの範囲は Organization と team だけに出す（個人の設定には書けない）。規則の欄は、段階 25 の Policy のセクションと同じ部品を使う。
+- **ワークスペースへのリンク**：各層の下にその持ち主のワークスペースを並べ、押すとワークスペースの設定の Policy のタブ（`?settings=<名前>&section=policy`）を開く。ワークスペースの規則は、段階 25 のセクションで変える。
+- **確かめはサーバーに任せる**：段階 25 と同じく、規則の確かめ（`PolicyLayer::check`）と、個人の設定に `github` を書けないことは、保存したときのサーバーの誤りを出す。
+- **入れないもの**：ゲートウェイの `[policy]` を変えること（設定ファイルで書く）、設定を消す `DELETE` の画面（規則と項目を空にして保存すれば、上の層に従う）、シークレット。
+
+### 進め方
+
+1. `chloe-controller`：`PolicyLayer`、`GitHubScope` の注釈。持ち主の設定の、版を確かめる読み書き。
+2. `chloe-gateway`：`/api/v1/policy-scopes`、`/api/v1/policy-rules`、持ち主の設定の `ETag` と `If-Match`。スペックを書き出す。
+3. `web/`：規則の欄を部品に分け、`/policies` のルート、層の一覧と層の画面、ナビゲーションの申告。
+4. 文書：`api.md`、`usage.md`、`web.md`。
+5. 確かめる：版の読み書きは `chloe-controller` の Rust のテストで、層の一覧、層で効く規則、`If-Match` と 412、見られない人と変えられない人は `mvp-test.sh` で確かめる。フォームの変換（トークンの範囲を含む）と層の一覧は Vitest で、Policies から Organization の規則を足すと VM の中から届くようになることは `web/e2e` で確かめる。
+
 ## 段階 18 以降の進め方
 
 段階 18 以降は、各段階に入るときに、この文書に手順を書き足してから実装する。
