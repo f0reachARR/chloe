@@ -102,6 +102,7 @@ ssh -p 2222 <GitHub のログイン名>@127.0.0.1
 | [Web の画面の方針](docs/web.md) | Web の画面の技術、構成、依存の向き、安全のための決まり |
 | [調査と計画](docs/research-and-plan.md) | 設計の前提と、ほかの選択肢の比較 |
 | [OpenShell の調査](docs/research-openshell.md) | NVIDIA OpenShell に委ねられる範囲と、取り入れる候補 |
+| [エージェントを外から操作する方法の調査](docs/research-agent-control.md) | 質問と権限の確認を依頼に回す方法と、チャットの画面の作り方 |
 | [実装手順](docs/implementation-steps.md) | 段階ごとの計画と結果 |
 
 ## リポジトリの構成
