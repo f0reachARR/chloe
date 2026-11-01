@@ -594,6 +594,60 @@ check api-policy-show '{"rules":[{"hosts":["api.example"],"action":"allow"}]} 20
 check api-policy-ssh "api.example" as alice chloe policy show acme
 check api-policy-denied "only the administrators" api "$bob_token" PUT /api/v1/policies/acme -d '{"rules":[]}'
 check api-policy-invalid "overlaps" api "$alice_token" PUT /api/v1/policies/acme -d '{"rules":[{"hosts":["hub.docker.com"],"action":"deny"}]}'
+# 見られる設定の層を、ゲートウェイ、個人、Organization の順に、変えられるかとワークスペースを添えて返す。
+check api-policy-scopes-gateway '[{"scope":"gateway","kind":"gateway","name":"gateway","editable":false,' api "$alice_token" GET /api/v1/policy-scopes
+check api-policy-scopes-user '{"scope":"user:alice","kind":"user","name":"alice","editable":' api "$alice_token" GET /api/v1/policy-scopes
+check api-policy-scopes-org '{"scope":"org:acme","kind":"org","name":"acme","editable":true,"rules":1,"workspaces":[' \
+    api "$alice_token" GET /api/v1/policy-scopes
+check api-policy-scopes-workspaces '"acme/from-api"' api "$alice_token" GET /api/v1/policy-scopes
+scopes_without_acme() { api "$@" | grep -q "org:acme" || echo "no acme"; }
+check api-policy-scopes-not-member "no acme" scopes_without_acme "$bob_token" GET /api/v1/policy-scopes
+# 層で効く規則と、その層の設定と版。ゲートウェイの層は変えられない。
+check api-policy-rules-org '{"source":{"kind":"owner","owner":"acme"},"rule":{"hosts":["api.example"],"action":"allow"}}' \
+    api "$alice_token" GET '/api/v1/policy-rules?scope=org:acme'
+check api-policy-rules-own '"own":{"rules":[{"hosts":["api.example"],"action":"allow"}]},"editable":true,"version":"' \
+    api "$alice_token" GET '/api/v1/policy-rules?scope=org:acme'
+check api-policy-rules-gateway '"editable":false,"version":"none"} 200' api "$alice_token" GET '/api/v1/policy-rules?scope=gateway'
+check api-policy-rules-not-member 'you are not a member of acme"} 403' api "$bob_token" GET '/api/v1/policy-rules?scope=org:acme'
+check api-policy-rules-other-user "403" api "$bob_token" GET '/api/v1/policy-rules?scope=user:alice'
+check api-policy-rules-bad-scope "invalid scope: acme" api "$alice_token" GET '/api/v1/policy-rules?scope=acme'
+# 持ち主の設定も、If-Match の版が合うときだけ置き換える。
+owner_etag="$(curl -s -D - -o /dev/null -H "Authorization: Bearer $alice_token" "http://127.0.0.1:$api_port/api/v1/policies/acme" | tr -d '\r' | sed -n 's/^etag: "\(.*\)"$/\1/Ip')"
+check api-policy-etag "\"version\":\"$owner_etag\"" api "$alice_token" GET '/api/v1/policy-rules?scope=org:acme'
+check api-policy-if-match '"updated_runners":' api "$alice_token" PUT /api/v1/policies/acme -H "If-Match: \"$owner_etag\"" \
+    -d '{"rules":[{"hosts":["api.example"],"action":"allow"}],"root":"persistent"}'
+check api-policy-stale "the settings of acme changed after you read them; read them again\"} 412" api "$alice_token" PUT /api/v1/policies/acme \
+    -H "If-Match: \"$owner_etag\"" -d '{"rules":[]}'
+owner_etag="$(curl -s -D - -o /dev/null -H "Authorization: Bearer $alice_token" "http://127.0.0.1:$api_port/api/v1/policies/acme" | tr -d '\r' | sed -n 's/^etag: "\(.*\)"$/\1/Ip')"
+check api-policy-restore '"updated_runners":' api "$alice_token" PUT /api/v1/policies/acme -H "If-Match: \"$owner_etag\"" \
+    -d '{"rules":[{"hosts":["api.example"],"action":"allow"}]}'
+# ワークスペースで効く規則は、上の層から出どころを添えて返し、規則がないときの版は none。
+check api-ws-rules-gateway '{"source":{"kind":"gateway"},"rule":{"hosts":["httpbin.org","statsig.anthropic.com"],"action":"allow"}}' \
+    api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-owner '{"source":{"kind":"owner","owner":"acme"},"rule":{"hosts":["api.example"],"action":"allow"}}' \
+    api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-empty '"own":[],"editable":true,"version":"none"} 200' api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-other "404" api "$bob_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-rules-readonly '"editable":false' api "$bob_token" GET /api/v1/workspace-rules/default
+check api-ws-policy-denied "403" api "$bob_token" PUT /api/v1/workspace-policies/default -d '{"rules":[]}'
+check api-ws-policy-passthrough "passthrough rules can only be set" api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -d '{"rules":[{"hosts":["staging.example"],"action":"passthrough"}]}'
+# If-Match の版が合うときだけ置き換え、読んだあとに書き換えられていれば 412 で断る。
+check api-ws-policy-create '"updated_runners":0} 200' api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H 'If-Match: "none"' -d '{"rules":[{"hosts":["staging.example"],"action":"allow"}]}'
+check api-ws-policy-stale "changed after you read them; read them again\"} 412" api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H 'If-Match: "none"' -d '{"rules":[]}'
+ws_etag="$(curl -s -D - -o /dev/null -H "Authorization: Bearer $alice_token" "http://127.0.0.1:$api_port/api/v1/workspace-policies/acme/from-api" | tr -d '\r' | sed -n 's/^etag: "\(.*\)"$/\1/Ip')"
+check api-ws-policy-etag "16 hex" sh -c 'printf "%s" "$0" | grep -Eq "^[0-9a-f]{16}$" && echo "16 hex"' "$ws_etag"
+check api-ws-rules-version "\"version\":\"$ws_etag\"" api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
+check api-ws-policy-replace '"updated_runners":0} 200' api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H "If-Match: \"$ws_etag\"" -d '{"rules":[{"hosts":["staging.example"],"action":"deny"}]}'
+check api-ws-policy-old-etag "412" api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -H "If-Match: \"$ws_etag\"" -d '{"rules":[]}'
+# If-Match がなければ、これまでどおり確かめずに置き換える。
+check api-ws-policy-no-if-match '"updated_runners":0} 200' api "$alice_token" PUT /api/v1/workspace-policies/acme/from-api \
+    -d '{"rules":[{"hosts":["staging.example"],"action":"allow"}]}'
+check api-ws-rules-own '"own":[{"hosts":["staging.example"],"action":"allow"}]' api "$alice_token" GET /api/v1/workspace-rules/acme/from-api
 check api-delete "204" api "$alice_token" DELETE /api/v1/workspaces/acme/from-api
 check api-deleted "404" api "$alice_token" GET /api/v1/workspaces/acme/from-api
 check api-token-list '"name":"ci"' api "$alice_token" GET /api/v1/tokens

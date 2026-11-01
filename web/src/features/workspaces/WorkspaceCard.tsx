@@ -1,8 +1,9 @@
 import { Badge, Button, Card, Group, Stack, Text } from '@mantine/core';
-import { IconTerminal2 } from '@tabler/icons-react';
+import { IconSettings, IconTerminal2 } from '@tabler/icons-react';
 import { Link } from '@tanstack/react-router';
 
 import type { Schemas } from '@/shared/api/client';
+import { openOverlay } from '@/shared/overlays';
 
 import { agents } from './agents';
 import { WorkspacePorts } from './WorkspacePorts';
@@ -49,24 +50,42 @@ export function WorkspaceCard({ ws }: { ws: WorkspaceInfo }) {
             {ws.name}
           </Text>
           {ws.pending_asks > 0 && (
-            <Badge component={Link} to="/inbox" color="blue" style={{ cursor: 'pointer' }}>
+            <Badge
+              renderRoot={(props) => (
+                <Link to="." search={openOverlay('asks', ws.name)} {...props} />
+              )}
+              color="blue"
+              style={{ cursor: 'pointer' }}
+            >
               {ws.pending_asks} waiting
             </Badge>
           )}
         </Group>
         <Group gap="xs" justify="space-between">
           <AgentStatus ws={ws} />
-          <Button
-            // component={Link} では Link の検索パラメーターの型が失われるので、Link を直に描く。
-            renderRoot={(props) => (
-              <Link to="/terminal" search={{ workspace: ws.name }} {...props} />
-            )}
-            size="compact-sm"
-            variant="light"
-            leftSection={<IconTerminal2 size={14} />}
-          >
-            Terminal
-          </Button>
+          <Group gap="xs">
+            <Button
+              renderRoot={(props) => (
+                <Link to="." search={openOverlay('settings', ws.name)} {...props} />
+              )}
+              size="compact-sm"
+              variant="default"
+              leftSection={<IconSettings size={14} />}
+            >
+              Settings
+            </Button>
+            <Button
+              // component={Link} では Link の検索パラメーターの型が失われるので、Link を直に描く。
+              renderRoot={(props) => (
+                <Link to="/terminal" search={{ workspace: ws.name }} {...props} />
+              )}
+              size="compact-sm"
+              variant="light"
+              leftSection={<IconTerminal2 size={14} />}
+            >
+              Terminal
+            </Button>
+          </Group>
         </Group>
         <WorkspacePorts workspace={ws.name} />
         <Text size="xs" c="dimmed">

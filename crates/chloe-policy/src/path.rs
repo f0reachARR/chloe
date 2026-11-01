@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::host_matches;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PathRuleConfig {
     /// ログに残す名前。
@@ -30,7 +30,7 @@ pub struct PathRuleConfig {
     pub action: Action,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     Allow,

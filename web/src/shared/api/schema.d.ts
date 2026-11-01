@@ -190,6 +190,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/policy-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["policy_rules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/policy-scopes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 利用者が見られる設定の層を、ゲートウェイ、個人、Organization、その team の順に返す。 */
+        get: operations["policy_scopes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/secrets": {
         parameters: {
             query?: never;
@@ -264,6 +297,7 @@ export interface paths {
             cookie?: never;
         };
         get: operations["show_workspace_policy"];
+        /** @description ワークスペースの規則を置き換える。`If-Match` に版 (`GET` の `ETag`、`/api/v1/workspace-rules` の `version`) を付けると、そのあとに書き換えられていれば 412 で断る。 */
         put: operations["set_workspace_policy"];
         post?: never;
         delete: operations["remove_workspace_policy"];
@@ -297,6 +331,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["workspace_requests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspace-rules/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workspace_rules"];
         put?: never;
         post?: never;
         delete?: never;
@@ -358,6 +408,8 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @enum {string} */
+        Action: "allow" | "deny" | "passthrough";
         /** @description 依頼への答え。`allow`、`deny`、`answer` のどれか一つを書く。 */
         AnswerBody: {
             allow?: boolean;
@@ -476,9 +528,22 @@ export interface components {
             id: number;
             token: string;
         };
+        EffectiveRule: {
+            rule: components["schemas"]["PathRuleConfig"];
+            source: components["schemas"]["RuleSource"];
+        };
         /** @description 誤りの応答。 */
         ErrorBody: {
             error: string;
+        };
+        /** @description インストールトークンの範囲。書かなかった項目は、インストールのすべてになる。 */
+        GitHubScope: {
+            /** @description 権限の名前と水準 (`contents = "read"` など)。 */
+            permissions?: {
+                [key: string]: string;
+            } | null;
+            /** @description リポジトリの名前 (Organization の名前を含まない)。 */
+            repositories?: string[] | null;
         };
         LinkCode: {
             code: string;
@@ -490,6 +555,52 @@ export interface components {
             session?: number | null;
             /** Format: int64 */
             token?: number | null;
+        };
+        PathRuleConfig: {
+            action: components["schemas"]["Action"];
+            hosts: string[];
+            /** @description 空ならすべてのメソッドに一致する。 */
+            methods?: string[];
+            /** @description ログに残す名前。 */
+            name?: string | null;
+            /** @description 空ならすべてのパスに一致する。 */
+            paths?: string[];
+        };
+        /**
+         * @description 個人、Organization か team の設定 (データベースの `policies`)。
+         *
+         *     中継のみ (`passthrough`) の規則は置けない。復号しないのでほかの規則が効かず、置けると
+         *     上の層の規則を素通りする宛先を作れてしまうためである。
+         */
+        PolicyLayer: {
+            github?: components["schemas"]["GitHubScope"] | null;
+            root?: components["schemas"]["RootMode"] | null;
+            rules?: components["schemas"]["PathRuleConfig"][];
+        };
+        /** @description 層で効く規則。 */
+        PolicyRules: {
+            /** @description 利用者がこの層の設定を変えられるか。 */
+            editable: boolean;
+            /** @description この層自身の設定 (変えるもの)。設定がなければ空。 */
+            own: components["schemas"]["PolicyLayer"];
+            /** @description 評価する順の規則 (上の層から)。最初に一致した規則で決まる。 */
+            rules: components["schemas"]["EffectiveRule"][];
+            /** @description この層の設定の版。`PUT /api/v1/policies/{owner}` と `PUT /api/v1/policy` の `If-Match` に渡す。 */
+            version: string;
+        };
+        /** @description 利用者が見られる設定の層。 */
+        PolicyScope: {
+            /** @description 利用者がこの層の設定を変えられるか。 */
+            editable: boolean;
+            kind: components["schemas"]["ScopeKind"];
+            /** @description 画面に出す名前 (`gateway`、`alice`、`acme`、`acme/dev`)。 */
+            name: string;
+            /** @description この層自身の規則の数。 */
+            rules: number;
+            /** @description `gateway`、`user:alice`、`org:acme`、`team:acme/dev`。`/api/v1/policy-rules` の `scope=` に渡す。 */
+            scope: string;
+            /** @description この持ち主のワークスペース (ゲートウェイの層では空)。 */
+            workspaces: string[];
         };
         /** @description 公開したポート。 */
         PublishedPort: {
@@ -506,11 +617,31 @@ export interface components {
         };
         /** @enum {string} */
         RootMode: "ephemeral" | "persistent";
+        /** @description 規則の出どころ。 */
+        RuleSource: {
+            /** @enum {string} */
+            kind: "gateway";
+        } | {
+            /** @enum {string} */
+            kind: "owner";
+            owner: string;
+        } | {
+            /** @enum {string} */
+            kind: "workspace";
+        } | {
+            /** @enum {string} */
+            kind: "secret";
+        };
         /**
          * @description VM の中のサーバーとの話し方。
          * @enum {string}
          */
         Scheme: "http" | "https";
+        /**
+         * @description 設定の層の種類。
+         * @enum {string}
+         */
+        ScopeKind: "gateway" | "user" | "org" | "team";
         SecretNames: {
             names: string[];
             owner: string;
@@ -604,6 +735,26 @@ export interface components {
              * @description ワークスペースのディスクの大きさ (GiB)。既定を当てはめたもの。
              */
             workspace_disk_gib: number;
+        };
+        /**
+         * @description ワークスペースの設定 (データベースの `workspace_policies`)。持ち主の層のあとに重ねる。
+         *
+         *     規則だけを持つ。ルートの扱いはワークスペースそのものにあり、インストールトークンの範囲は
+         *     下の層ほど優先するので、ここで書けると持ち主の層で絞った範囲を広げられてしまう。
+         */
+        WorkspacePolicy: {
+            rules?: components["schemas"]["PathRuleConfig"][];
+        };
+        /** @description ワークスペースで効く規則。 */
+        WorkspaceRules: {
+            /** @description 利用者がワークスペースの規則を変えられるか。 */
+            editable: boolean;
+            /** @description ワークスペース自身の規則 (変えるもの)。 */
+            own: components["schemas"]["PathRuleConfig"][];
+            /** @description 評価する順の規則 (上の層から)。最初に一致した規則で決まる。 */
+            rules: components["schemas"]["EffectiveRule"][];
+            /** @description ワークスペースの規則の版。`PUT /api/v1/workspace-policies/{name}` の `If-Match` に渡す。 */
+            version: string;
         };
     };
     responses: never;
@@ -926,13 +1077,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 設定 */
+            /** @description 設定。`ETag` は版 (`PUT` の `If-Match` に渡す) */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": components["schemas"]["PolicyLayer"];
                 };
             };
             /** @description 誤り */
@@ -958,7 +1109,10 @@ export interface operations {
     set_policy: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 読んだときの版。違えば 412 */
+                "If-Match"?: string | null;
+            };
             path: {
                 /** @description Organization (`acme`) か team (`acme/dev`)。`/` は `%2F` にする */
                 owner: string;
@@ -968,7 +1122,7 @@ export interface operations {
         /** @description 設定 */
         requestBody: {
             content: {
-                "application/json": Record<string, never>;
+                "application/json": components["schemas"]["PolicyLayer"];
             };
         };
         responses: {
@@ -978,6 +1132,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpdatedRunners"];
+                };
+            };
+            /** @description 読んだあとに書き換えられていた */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description 誤り */
@@ -1049,13 +1212,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 個人の設定 */
+            /** @description 個人の設定。`ETag` は版 (`PUT` の `If-Match` に渡す) */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": components["schemas"]["PolicyLayer"];
                 };
             };
             /** @description 誤り */
@@ -1081,14 +1244,17 @@ export interface operations {
     set_own_policy: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 読んだときの版。違えば 412 */
+                "If-Match"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
         /** @description 個人の設定 */
         requestBody: {
             content: {
-                "application/json": Record<string, never>;
+                "application/json": components["schemas"]["PolicyLayer"];
             };
         };
         responses: {
@@ -1098,6 +1264,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpdatedRunners"];
+                };
+            };
+            /** @description 読んだあとに書き換えられていた */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description 誤り */
@@ -1135,6 +1310,83 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpdatedRunners"];
+                };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    policy_rules: {
+        parameters: {
+            query: {
+                /** @description `gateway`、`user:alice`、`org:acme`、`team:acme/dev`。 */
+                scope: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyRules"];
+                };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    policy_scopes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyScope"][];
                 };
             };
             /** @description 誤り */
@@ -1450,13 +1702,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description ワークスペースの規則 */
+            /** @description ワークスペースの規則。`ETag` は版 (`PUT` の `If-Match` に渡す) */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": components["schemas"]["WorkspacePolicy"];
                 };
             };
             /** @description 誤り */
@@ -1482,7 +1734,10 @@ export interface operations {
     set_workspace_policy: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 読んだときの版 */
+                "If-Match"?: string | null;
+            };
             path: {
                 /** @description ワークスペース (SSH と同じ書き方。`/` は `%2F` にする) */
                 name: string;
@@ -1492,7 +1747,7 @@ export interface operations {
         /** @description ワークスペースの規則 */
         requestBody: {
             content: {
-                "application/json": Record<string, never>;
+                "application/json": components["schemas"]["WorkspacePolicy"];
             };
         };
         responses: {
@@ -1502,6 +1757,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpdatedRunners"];
+                };
+            };
+            /** @description 読んだあとに書き換えられていた */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description 誤り */
@@ -1667,6 +1931,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": Record<string, never>[];
+                };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    workspace_rules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ワークスペース (SSH と同じ書き方。`/` は `%2F` にする) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceRules"];
                 };
             };
             /** @description 誤り */

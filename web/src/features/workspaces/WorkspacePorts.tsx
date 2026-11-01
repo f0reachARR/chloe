@@ -1,4 +1,4 @@
-import { ActionIcon, Button, Group, Tooltip } from '@mantine/core';
+import { ActionIcon, Button, Group, Text, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconExternalLink, IconX } from '@tabler/icons-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -9,7 +9,14 @@ import { portsQuery, reloadPorts } from './api';
 
 // VM の中で `chloe-ask port publish` で公開したポートへのリンク。開くと、プロキシのホストで
 // Web の画面のログインを通って VM の中のサーバーに届く。公開は VM の中からしかできない。
-export function WorkspacePorts({ workspace }: { workspace: string }) {
+// `emptyText` がなければ、公開したポートがないときは何も描かない。
+export function WorkspacePorts({
+  workspace,
+  emptyText,
+}: {
+  workspace: string;
+  emptyText?: string;
+}) {
   const queryClient = useQueryClient();
   const ports = useQuery({ ...portsQuery(workspace), refetchOnWindowFocus: false });
   const unpublish = api.useMutation('delete', '/api/v1/workspace-ports/{name}', {
@@ -22,7 +29,13 @@ export function WorkspacePorts({ workspace }: { workspace: string }) {
     },
     onSettled: () => reloadPorts(queryClient),
   });
-  if (!ports.data?.length) return null;
+  if (!ports.data?.length) {
+    return emptyText && ports.isSuccess ? (
+      <Text size="sm" c="dimmed">
+        {emptyText}
+      </Text>
+    ) : null;
+  }
   return (
     <Group gap="xs">
       {ports.data.map((port) => (

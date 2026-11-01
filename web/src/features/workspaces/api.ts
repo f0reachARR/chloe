@@ -6,8 +6,17 @@ import { api, invalidatePath } from '@/shared/api/client';
 export const workspacesQuery = () =>
   api.queryOptions('get', '/api/v1/workspaces', { params: { query: { status: true } } });
 
+// 一つのワークスペースの設定と、動いているか (VM には尋ねない)。
+export const workspaceQuery = (workspace: string) =>
+  api.queryOptions('get', '/api/v1/workspaces/{name}', {
+    params: { path: { name: workspace } },
+  });
+
 export const reloadWorkspaces = (queryClient: QueryClient) =>
-  invalidatePath(queryClient, '/api/v1/workspaces');
+  Promise.all([
+    invalidatePath(queryClient, '/api/v1/workspaces'),
+    invalidatePath(queryClient, '/api/v1/workspaces/{name}'),
+  ]);
 
 export const portsQuery = (workspace: string) =>
   api.queryOptions('get', '/api/v1/workspace-ports/{name}', {

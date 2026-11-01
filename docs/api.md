@@ -65,6 +65,10 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | `GET /api/v1/workspaces/{name}[?status=true]` | ワークスペース |
 | `PATCH /api/v1/workspaces/{name}` | ルートの扱い、ディスクや VM の大きさ、止めるまでの時間を変える、止める |
 | `DELETE /api/v1/workspaces/{name}[?disks=true]` | ワークスペースを消す（`disks=true` でなければディスクは残る） |
+| `GET /api/v1/workspace-policies/{name}` | ワークスペースの規則（`ETag` は版） |
+| `PUT /api/v1/workspace-policies/{name}` | ワークスペースの規則を置き換える（`If-Match` で版を確かめる） |
+| `DELETE /api/v1/workspace-policies/{name}` | ワークスペースの規則を消す |
+| `GET /api/v1/workspace-rules/{name}` | ワークスペースで効く規則と出どころ、ワークスペースの規則とその版、変えられるか |
 | `GET /api/v1/workspace-requests/{name}[?lines=]` | HTTP の要求の記録の末尾（既定 200 件、2000 件まで） |
 | `GET /api/v1/workspace-terminal/{name}[?cols=&rows=]` | シェルの端末（WebSocket） |
 | `GET /api/v1/workspace-ports/{name}` | VM の中で公開したポートと、ブラウザで開く URL |
@@ -72,8 +76,12 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | `GET /api/v1/secrets[?owner=]` | シークレットの名前の一覧 |
 | `PUT /api/v1/secrets/{kind}[?owner=]` | シークレットを登録する |
 | `DELETE /api/v1/secrets/{kind}[?owner=]` | シークレットを消す |
-| `GET /api/v1/policies/{owner}` | Organization か team の設定 |
-| `PUT /api/v1/policies/{owner}` | 設定を置き換える |
+| `GET /api/v1/policy-scopes` | 見られる設定の層（ゲートウェイ、個人、Organization、team）と、変えられるか、規則の数、ワークスペース |
+| `GET /api/v1/policy-rules?scope=` | 層で効く規則と出どころ、層の設定とその版、変えられるか |
+| `GET /api/v1/policy` | 自分の個人の設定（`ETag` は版） |
+| `PUT /api/v1/policy` | 個人の設定を置き換える（`If-Match` で版を確かめる） |
+| `GET /api/v1/policies/{owner}` | Organization か team の設定（`ETag` は版） |
+| `PUT /api/v1/policies/{owner}` | 設定を置き換える（`If-Match` で版を確かめる） |
 | `DELETE /api/v1/policies/{owner}` | 設定を消す |
 | `GET /api/v1/tokens` | 自分のトークンの一覧（値は含まない） |
 | `POST /api/v1/tokens` | トークンを作る |
@@ -161,6 +169,22 @@ api /api/v1/policies/acme/dev -X PUT \
 api /api/v1/policy -X PUT -d '{"rules": [{"hosts": ["example.com"], "action": "allow"}]}'
 ```
 
+ワークスペースの規則と同じく、`GET` は設定の版を `ETag` で返し、`PUT` に `If-Match` でその版を付けると、読んだあとに書き換えられていれば 412 を返す（[ワークスペースの規則](#ワークスペースの規則)）。
+
+`GET /api/v1/policy-scopes` は、見られる設定の層を、ゲートウェイ、個人、Organization、その team の順に返す。
+層（`scope`）は `gateway`、`user:alice`、`org:acme`、`team:acme/dev` と書く。
+`GET /api/v1/policy-rules?scope=` は、その層で効く規則を出どころを添えて返し、`own` にその層の設定、`version` に版を返す（ゲートウェイの層の版は `none` で、変えられない）。
+持ち主の層は、そのメンバーか設定を変えられる人だけが見られ、個人の層は本人だけが見られる。
+
+```sh
+api /api/v1/policy-scopes
+# [{"scope":"gateway","kind":"gateway","name":"gateway","editable":false,"rules":3,"workspaces":[]},
+#  {"scope":"user:alice","kind":"user","name":"alice","editable":false,"rules":0,"workspaces":["default"]},
+#  {"scope":"org:acme","kind":"org","name":"acme","editable":true,"rules":1,"workspaces":["acme/web"]}]
+api '/api/v1/policy-rules?scope=team:acme/dev'
+# {"rules":[...],"own":{"rules":[...],"github":{"repositories":["web"]}},"editable":true,"version":"9a1b2c3d4e5f6071"}
+```
+
 ### ワークスペースの規則
 
 規則だけを JSON で書く（[設定](configuration.md#ワークスペースの規則)）。
@@ -172,6 +196,31 @@ api /api/v1/workspace-policies/acme/web -X PUT \
 
 api /api/v1/workspace-policies/acme/web
 api /api/v1/workspace-policies/acme/web -X DELETE
+```
+
+`GET /api/v1/workspace-policies/{name}` は、規則の版を `ETag` で返す。
+`PUT` に `If-Match` でその版を付けると、読んだあとに規則が書き換えられていれば（ほかの人が保存した、通信の許可を承認して規則が足された）、置き換えずに 412 を返す。
+`If-Match` がなければ、確かめずに置き換える。
+規則がないときの版は `none` である。
+
+```sh
+api -i /api/v1/workspace-policies/acme/web | grep -i etag
+# etag: "3f9c0d1e2a4b5c6d"
+api /api/v1/workspace-policies/acme/web -X PUT -H 'If-Match: "3f9c0d1e2a4b5c6d"' \
+  -d '{"rules": [{"hosts": ["staging.example.com"], "action": "deny"}]}'
+# 書き換えられていれば {"error":"the rules of acme/web changed after you read them; read them again"}   (412)
+```
+
+`GET /api/v1/workspace-rules/{name}` は、ワークスペースで効く規則を、評価する順（上の層から）に出どころを添えて返す。
+出どころ（`source.kind`）は、ゲートウェイの設定（`gateway`）、個人、Organization か team の設定（`owner`、`source.owner` に持ち主）、ワークスペースの規則（`workspace`）、シークレットの差し替えのために足したもの（`secret`）である。
+`own` はワークスペース自身の規則、`version` はその版（`If-Match` に渡す）、`editable` は利用者がワークスペースの規則を変えられるかである。
+
+```sh
+api /api/v1/workspace-rules/acme/web
+# {"rules":[{"source":{"kind":"gateway"},"rule":{"hosts":["github.com"],"action":"allow"}},
+#           {"source":{"kind":"owner","owner":"acme"},"rule":{"hosts":["registry.example.com"],"action":"allow"}},
+#           {"source":{"kind":"workspace"},"rule":{"hosts":["staging.example.com"],"action":"allow"}}],
+#  "own":[{"hosts":["staging.example.com"],"action":"allow"}],"editable":true,"version":"3f9c0d1e2a4b5c6d"}
 ```
 
 ### HTTP の要求の記録

@@ -21,6 +21,7 @@ import type { LiveState } from '@/shared/events';
 import { useFeatureEvents } from '../events';
 import { navItems } from '../features';
 import { BottomNavigation, SideNavigation } from './Navigation';
+import { Overlays } from './Overlays';
 
 const liveLabel: Record<LiveState, { color: string; text: string; hint: string }> = {
   live: { color: 'teal', text: 'Live', hint: 'New asks appear as they come in' },
@@ -100,6 +101,8 @@ export function AppShell() {
           <BottomNavigation items={navItems} />
         </MantineAppShell.Footer>
       )}
+
+      <Overlays />
     </MantineAppShell>
   );
 }

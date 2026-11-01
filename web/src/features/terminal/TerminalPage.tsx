@@ -1,20 +1,34 @@
 import '@xterm/xterm/css/xterm.css';
 
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
   Group,
+  Menu,
+  Modal,
   ScrollArea,
   Stack,
   Text,
   useComputedColorScheme,
 } from '@mantine/core';
-import { IconArrowLeft, IconRefresh } from '@tabler/icons-react';
+import { notifications } from '@mantine/notifications';
+import {
+  IconArrowLeft,
+  IconDotsVertical,
+  IconRefresh,
+  IconRotateClockwise,
+  IconSettings,
+} from '@tabler/icons-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { FitAddon } from '@xterm/addon-fit';
 import { type ITheme, Terminal } from '@xterm/xterm';
-import { type SyntheticEvent, useEffect, useRef, useState } from 'react';
+import { type ReactNode, type SyntheticEvent, useEffect, useRef, useState } from 'react';
+
+import { api, errorMessage, invalidatePath } from '@/shared/api/client';
+import { openOverlay } from '@/shared/overlays';
 
 import {
   type TerminalConnection,
@@ -41,7 +55,14 @@ const themes: Record<'light' | 'dark', ITheme> = {
 
 const fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono", monospace';
 
-function StatusBadge({ state }: { state: TerminalState }) {
+function StatusBadge({ state, stopped }: { state: TerminalState; stopped: boolean }) {
+  if (stopped) {
+    return (
+      <Badge color="gray" variant="light">
+        Workspace stopped
+      </Badge>
+    );
+  }
   switch (state.kind) {
     case 'connecting':
       return (
@@ -100,14 +121,89 @@ function useVisibleHeight(): number | undefined {
   return height;
 }
 
+const isEnded = (state: TerminalState) =>
+  state.kind === 'exited' || state.kind === 'failed' || state.kind === 'closed';
+
+// 切れたあと、ワークスペースが止まったせいか (設定、CLI、止めるまでの時間のどれで止めても、
+// ゲートウェイからは guest-agent との接続が切れた失敗として届く)。止める操作が終わるまで
+// 動いていると返ることがあるので、切れてからしばらくは読み直す。
+function useStoppedAfterEnd(workspace: string, endedAt: number | null): boolean {
+  const info = useQuery({
+    ...api.queryOptions('get', '/api/v1/workspaces/{name}', {
+      params: { path: { name: workspace } },
+    }),
+    enabled: endedAt !== null,
+    refetchInterval: (query) =>
+      query.state.data?.running && endedAt && Date.now() - endedAt < 15_000 ? 2000 : false,
+  });
+  return endedAt !== null && info.data?.running === false;
+}
+
+// 止めてから新しいシェルを開く (VM の大きさなど、次の起動から効く設定を効かせる)。
+function RestartDialog({
+  workspace,
+  opened,
+  onClose,
+  onRestarted,
+}: {
+  workspace: string;
+  opened: boolean;
+  onClose: () => void;
+  onRestarted: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const stop = api.useMutation('patch', '/api/v1/workspaces/{name}', {
+    onSuccess: onRestarted,
+    onError: (error) =>
+      notifications.show({ color: 'red', title: 'Could not stop', message: errorMessage(error) }),
+    onSettled: () =>
+      Promise.all([
+        invalidatePath(queryClient, '/api/v1/workspaces'),
+        invalidatePath(queryClient, '/api/v1/workspaces/{name}'),
+      ]),
+  });
+  return (
+    <Modal opened={opened} onClose={onClose} title="Restart workspace?">
+      <Text size="sm" mb="md">
+        This stops the VM, ending this shell and any running agents, then opens a new shell, which
+        starts the VM again.
+      </Text>
+      <Group justify="flex-end" gap="xs">
+        <Button variant="default" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button
+          color="red"
+          loading={stop.isPending}
+          onClick={() =>
+            stop.mutate({ params: { path: { name: workspace } }, body: { running: false } })
+          }
+        >
+          Restart
+        </Button>
+      </Group>
+    </Modal>
+  );
+}
+
 // 一つのシェル。
-function TerminalSession({ workspace, onRestart }: { workspace: string; onRestart: () => void }) {
+function TerminalSession({
+  workspace,
+  actions,
+  onRestart,
+}: {
+  workspace: string;
+  actions?: ReactNode;
+  onRestart: () => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const connectionRef = useRef<TerminalConnection | null>(null);
   const ctrlRef = useRef(false);
   const [ctrl, setCtrl] = useState(false);
   const [state, setState] = useState<TerminalState>({ kind: 'connecting' });
+  // 切れた時刻 (止まったせいかを、それからしばらく確かめる)。
+  const [endedAt, setEndedAt] = useState<number | null>(null);
   const scheme = useComputedColorScheme('dark');
   const schemeRef = useRef(scheme);
   const visibleHeight = useVisibleHeight();
@@ -137,7 +233,12 @@ function TerminalSession({ workspace, onRestart }: { workspace: string; onRestar
     const connection = connectTerminal({
       url: terminalUrl(window.location.origin, workspace, terminal.cols, terminal.rows),
       onOutput: (data) => terminal.write(data),
-      onState: setState,
+      onState: (next) => {
+        setState(next);
+        if (isEnded(next)) {
+          setEndedAt((prev) => prev ?? Date.now());
+        }
+      },
     });
     const subscriptions = [
       terminal.onData((data) => {
@@ -191,7 +292,9 @@ function TerminalSession({ workspace, onRestart }: { workspace: string; onRestar
     terminalRef.current?.focus();
   };
 
-  const ended = state.kind === 'exited' || state.kind === 'failed' || state.kind === 'closed';
+  const ended = isEnded(state);
+  const stopped = useStoppedAfterEnd(workspace, endedAt);
+  const [restarting, setRestarting] = useState(false);
   // 見える高さから、ヘッダー、下のナビゲーション、余白を引いた高さに収める。
   const height = `calc(${visibleHeight ? `${visibleHeight}px` : '100dvh'} - var(--app-shell-header-offset, 0px) - var(--app-shell-footer-offset, 0px) - 2 * var(--mantine-spacing-md))`;
 
@@ -212,15 +315,50 @@ function TerminalSession({ workspace, onRestart }: { workspace: string; onRestar
           <Text fw={600} ff="monospace" truncate>
             {workspace}
           </Text>
-          <StatusBadge state={state} />
+          <StatusBadge state={state} stopped={stopped} />
         </Group>
-        {ended && (
-          <Button size="compact-sm" leftSection={<IconRefresh size={14} />} onClick={onRestart}>
-            {state.kind === 'failed' ? 'Retry' : 'New shell'}
-          </Button>
-        )}
+        <Group gap="xs" wrap="nowrap">
+          {ended && (
+            <Button size="compact-sm" leftSection={<IconRefresh size={14} />} onClick={onRestart}>
+              {state.kind === 'failed' && !stopped ? 'Retry' : 'New shell'}
+            </Button>
+          )}
+          {actions}
+          <Menu position="bottom-end" withinPortal>
+            <Menu.Target>
+              <ActionIcon variant="subtle" color="gray" aria-label="Workspace menu">
+                <IconDotsVertical size={16} />
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Item
+                leftSection={<IconSettings size={14} />}
+                renderRoot={(props) => (
+                  <Link to="." search={openOverlay('settings', workspace)} {...props} />
+                )}
+              >
+                Settings
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconRotateClockwise size={14} />}
+                onClick={() => setRestarting(true)}
+              >
+                Restart workspace
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        </Group>
       </Group>
-      {state.kind === 'failed' && (
+      <RestartDialog
+        workspace={workspace}
+        opened={restarting}
+        onClose={() => {
+          setRestarting(false);
+          terminalRef.current?.focus();
+        }}
+        onRestarted={onRestart}
+      />
+      {state.kind === 'failed' && !stopped && (
         <Text size="sm" c="red">
           {state.message}
         </Text>
@@ -270,12 +408,14 @@ function TerminalSession({ workspace, onRestart }: { workspace: string; onRestar
 
 // ワークスペースのシェル (SSH の `ssh -t` と同じ)。閉じるとシェルは終わる。開き直すと、新しい
 // シェルを開く (切れたシェルにはつなぎ直せない)。
-export function TerminalPage({ workspace }: { workspace: string }) {
+// `actions` はヘッダーに並べる、ほかの機能の操作 (ルートが組む)。
+export function TerminalPage({ workspace, actions }: { workspace: string; actions?: ReactNode }) {
   const [attempt, setAttempt] = useState(0);
   return (
     <TerminalSession
       key={attempt}
       workspace={workspace}
+      actions={actions}
       onRestart={() => setAttempt((n) => n + 1)}
     />
   );
