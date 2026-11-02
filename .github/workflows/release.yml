@@ -1,0 +1,102 @@
+# main への push で、release-please がリリースの Pull Request を作り直す。その Pull Request を
+# マージすると、タグ (v<版>) と GitHub のリリースができ、ゲストを含む deb をリリースに置く。
+#
+# deb (chloe-common、chloe-gateway、chloe-node) は、main への push と手動の実行でも作り、
+# 成果物として置く。リリースと手動の実行では、ゲストのカーネルとルートファイルシステムを
+# ビルドして chloe-guest も作る。
+# 入れて確かめる packaging/deb/test.sh は KVM が要るので、手元で回す。
+#
+# GITHUB_TOKEN で作ったタグは別のワークフローを起こさないので、リリースの deb はこの
+# ワークフローの中で作って置く。
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      guest:
+        description: chloe-guest も作る
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # 設定は release-please-config.json と .release-please-manifest.json。
+      - uses: googleapis/release-please-action@v5
+        id: release
+
+  build:
+    needs: release-please
+    # 手動の実行では release-please を飛ばすので、飛ばしたときも動かす。
+    if: ${{ !cancelled() && needs.release-please.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE: ${{ needs.release-please.outputs.release_created == 'true' }}
+      GUEST: ${{ needs.release-please.outputs.release_created == 'true' || (github.event_name == 'workflow_dispatch' && inputs.guest) }}
+    steps:
+      # build.sh は作業ツリーに変更があると版に .dirty を付ける。ビルドの出力は build/ と target/
+      # (どちらも .gitignore にある) にだけ書く。
+      - uses: actions/checkout@v7
+      # crate と pnpm の取得物、Firecracker のリリースのバイナリ。
+      - uses: actions/cache@v6
+        with:
+          path: build/deb/cache
+          key: deb-${{ hashFiles('Cargo.lock', 'web/pnpm-lock.yaml', 'images/guest/dev/runner.Dockerfile') }}
+          restore-keys: deb-
+
+      # カーネルは、版と設定が同じならキャッシュのものを使う。
+      - if: env.GUEST == 'true'
+        id: kernel
+        uses: actions/cache@v6
+        with:
+          path: build/guest/kernel
+          key: guest-kernel-${{ hashFiles('images/guest/kernel/**', 'images/guest/build-lib.sh') }}
+      - if: env.GUEST == 'true' && steps.kernel.outputs.cache-hit != 'true'
+        run: |
+          images/guest/kernel/build.sh
+          # ソースとビルドの途中のファイル (約 2GB) は、あとの手順のために消す。
+          rm -rf build/cache/kernel-*
+      # ルートファイルシステムの guest-agent と chloe-ask を musl でビルドする (rust-toolchain.toml の版)。
+      - if: env.GUEST == 'true'
+        run: rustup toolchain install && rustup show
+      - if: env.GUEST == 'true'
+        run: images/guest/rootfs/build.sh
+
+      # リリースでは、版に +git を付けない (リリースの Pull Request で Cargo.toml の版が上がっている)。
+      - run: packaging/deb/build.sh ${{ env.GUEST == 'true' && '--guest' || '' }}
+        env:
+          DEB_RELEASE: ${{ env.RELEASE == 'true' && '1' || '' }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb
+          path: build/deb/*.deb
+          if-no-files-found: error
+
+  upload:
+    needs: [release-please, build]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: deb
+          path: deb
+      - run: gh release upload "$TAG" deb/*.deb --clobber --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
