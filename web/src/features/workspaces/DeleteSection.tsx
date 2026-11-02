@@ -7,7 +7,6 @@ import { useState } from 'react';
 
 import { api, errorMessage } from '@/shared/api/client';
 import type { WorkspaceSettingsSectionProps } from '@/shared/feature';
-import { closeOverlays } from '@/shared/overlays';
 
 import { reloadWorkspaces } from './api';
 
@@ -30,7 +29,7 @@ export function DeleteSection({ workspace }: WorkspaceSettingsSectionProps) {
         onSuccess: () => {
           notifications.show({ color: 'teal', message: `Deleted ${workspace}` });
           // 端末など、消したワークスペースの画面にいても一覧へ移る。
-          void navigate({ to: '/workspaces', search: closeOverlays });
+          void navigate({ to: '/workspaces', search: {} });
           void reloadWorkspaces(queryClient);
         },
       },
