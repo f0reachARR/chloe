@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/f0reachARR/chloe/compare/v0.2.0...v0.2.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **ci:** リリース時に web/openapi.json の版も release-please で上げる ([#13](https://github.com/f0reachARR/chloe/issues/13)) ([67bbab6](https://github.com/f0reachARR/chloe/commit/67bbab691d371ab522d47fd3b8f0335a58ebd2ad))
+
 ## [0.2.0](https://github.com/f0reachARR/chloe/compare/v0.1.0...v0.2.0) (2026-11-02)
 
 
