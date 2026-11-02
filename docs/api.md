@@ -60,6 +60,7 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | --- | --- |
 | `GET /api/v1/me` | トークンかセッションの利用者 |
 | `GET /api/v1/events` | 依頼の出来事（SSE） |
+| `GET /api/v1/owners` | 入れる持ち主（個人、Organization、team）。ワークスペースを作れる先 |
 | `GET /api/v1/workspaces[?status=true]` | 入れるワークスペースの一覧（`status=true` なら、エージェントが作業中かを VM に尋ねる） |
 | `POST /api/v1/workspaces` | ワークスペースを作る |
 | `GET /api/v1/workspaces/{name}[?status=true]` | ワークスペース |
@@ -118,6 +119,17 @@ api /api/v1/workspaces/acme/web -X PATCH -d '{"vcpus": 8, "memory_mib": 16384}' 
 api /api/v1/workspaces/acme/web -X PATCH -d '{"idle_timeout": "never"}'
 api /api/v1/workspaces/acme/web -X PATCH -d '{"running": false}'    # 止める
 api /api/v1/workspaces/acme/web -X DELETE                             # 204
+```
+
+`GET /api/v1/owners` は、ワークスペースを作れる持ち主を、個人、Organization、その team の順に返す。
+`prefix` をワークスペースの名前の前に付けると、作るときの `name` になる。
+GitHub App を使っていれば、所属する Organization の team は、ワークスペースがなくても並ぶ（GitHub に尋ねた結果は 5 分覚えておく）。
+
+```sh
+api /api/v1/owners
+# [{"owner":"user:alice","kind":"user","name":"alice","prefix":""},
+#  {"owner":"org:acme","kind":"org","name":"acme","prefix":"acme/"},
+#  {"owner":"team:acme/dev","kind":"team","name":"acme/dev","prefix":"acme/dev/"}]
 ```
 
 `root` を省いて作ると、持ち主（個人、Organization と team）の設定の既定を使う。
