@@ -22,7 +22,7 @@ pub const VALUE: &str = "value";
 /// プレースホルダーの形のうち、乱数に置き換える部分。
 pub const ID: &str = "{id}";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SecretSpec {
     pub fields: BTreeMap<String, FieldSpec>,
@@ -34,7 +34,7 @@ pub struct SecretSpec {
     pub files: Vec<FileSpec>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
     /// プレースホルダーを入れる VM の環境変数。
@@ -45,7 +45,7 @@ pub struct FieldSpec {
     pub placeholder: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InjectSpec {
     #[serde(default = "value_field", skip_serializing_if = "is_value_field")]
@@ -59,7 +59,7 @@ pub struct InjectSpec {
     pub username_field: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SignSpec {
     pub scheme: SignKind,
@@ -67,7 +67,7 @@ pub struct SignSpec {
 }
 
 /// VM に置くファイル。`content` の中の `{欄の名前}` を、その欄のプレースホルダーに置き換える。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FileSpec {
     /// VM の中の絶対パス。
@@ -82,7 +82,7 @@ pub struct FileSpec {
     pub mode: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FileOwner {
     #[default]
@@ -173,7 +173,7 @@ impl FileSpec {
 }
 
 /// 署名の方式。方式ごとに使う欄の名前が決まっている ([`SignKind::fields`])。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum SignKind {
     #[serde(rename = "aws-sigv4")]
     AwsSigV4,
@@ -317,7 +317,7 @@ impl SignKind {
 ///
 /// 欄が一つなら `env`、`placeholder`、`value` を直接書き、欄がいくつもあれば `fields` に書く。
 /// 定義の項目 (環境変数、プレースホルダー、規則) を何も書かなければ、値だけを変える。
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SecretInput {
     #[serde(default)]
@@ -334,7 +334,7 @@ pub struct SecretInput {
     pub files: Vec<FileSpec>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FieldInput {
     #[serde(default)]
