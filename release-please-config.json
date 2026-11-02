@@ -9,7 +9,8 @@
       "extra-files": [
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
         { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(@.source == null)].version" },
-        { "type": "json", "path": "web/package.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "web/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "web/openapi.json", "jsonpath": "$.info.version" }
       ]
     }
   }
