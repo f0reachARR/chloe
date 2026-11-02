@@ -55,6 +55,8 @@ proxy_url = "http://preview.localhost:$api_port"
 
 [memberships]
 "org:acme" = ["alice"]
+# GitHub App がないので、team は設定で与える (ワークスペースを作る先の team を選ぶ E2E のため)。
+"team:acme/dev" = ["alice"]
 
 [runner]
 guest_dir = "$root/build/guest"

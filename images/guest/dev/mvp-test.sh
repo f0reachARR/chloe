@@ -62,6 +62,8 @@ proxy_url = "http://preview.localhost:$api_port"
 
 [memberships]
 "org:acme" = ["alice"]
+# ワークスペースのない team も、入れる持ち主の一覧に出る。
+"team:acme/dev" = ["alice"]
 
 [[policy.rules]]
 hosts = ["httpbin.org", "statsig.anthropic.com"]
@@ -602,6 +604,10 @@ check api-policy-scopes-org '{"scope":"org:acme","kind":"org","name":"acme","edi
 check api-policy-scopes-workspaces '"acme/from-api"' api "$alice_token" GET /api/v1/policy-scopes
 scopes_without_acme() { api "$@" | grep -q "org:acme" || echo "no acme"; }
 check api-policy-scopes-not-member "no acme" scopes_without_acme "$bob_token" GET /api/v1/policy-scopes
+# 入れる持ち主を、個人、Organization、その team の順に、名前の前に付ける部分を添えて返す。
+check api-owners '[{"owner":"user:alice","kind":"user","name":"alice","prefix":""},{"owner":"org:acme","kind":"org","name":"acme","prefix":"acme/"},{"owner":"team:acme/dev","kind":"team","name":"acme/dev","prefix":"acme/dev/"}] 200' \
+    api "$alice_token" GET /api/v1/owners
+check api-owners-not-member '[{"owner":"user:bob","kind":"user","name":"bob","prefix":""}] 200' api "$bob_token" GET /api/v1/owners
 # 層で効く規則と、その層の設定と版。ゲートウェイの層は変えられない。
 check api-policy-rules-org '{"source":{"kind":"owner","owner":"acme"},"rule":{"hosts":["api.example"],"action":"allow"}}' \
     api "$alice_token" GET '/api/v1/policy-rules?scope=org:acme'
