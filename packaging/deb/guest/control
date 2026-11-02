@@ -5,7 +5,7 @@ Maintainer: @MAINTAINER@
 Installed-Size: @SIZE@
 Section: net
 Priority: optional
-Homepage: https://github.com/ForteFibre/chloe
+Homepage: https://github.com/f0reachARR/chloe
 Description: chloe guest kernel and root filesystem
  The Linux kernel and Ubuntu root filesystem image booted in chloe workspace
  microVMs, with Docker and mise. Users install coding agents and other

@@ -1,6 +1,6 @@
 [Unit]
 Description=chloe runner host network rules
-Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+Documentation=https://github.com/f0reachARR/chloe/blob/main/docs/install.md
 # nftables.service が規則をすべて消して置き直すので、そのあとに置く。
 After=network.target nftables.service
 

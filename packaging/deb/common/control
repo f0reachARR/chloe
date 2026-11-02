@@ -7,7 +7,7 @@ Depends: @SHLIBS@, dnsmasq-base, e2fsprogs, iproute2, jq, nftables, polkitd, sys
 Suggests: chloe-guest
 Section: net
 Priority: optional
-Homepage: https://github.com/ForteFibre/chloe
+Homepage: https://github.com/f0reachARR/chloe
 Description: chloe runner components
  Shared parts of chloe: the transparent proxy (chloe-egress), Firecracker,
  the scripts and systemd units that run a workspace runner (microVM, proxy

@@ -78,7 +78,7 @@ docs() {
     cat > "$doc/copyright" <<EOF
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: chloe
-Source: https://github.com/ForteFibre/chloe
+Source: https://github.com/f0reachARR/chloe
 
 Files: *
 Copyright: 2026 chloe contributors
@@ -96,7 +96,7 @@ License: Apache-2.0
  in /usr/share/common-licenses/Apache-2.0.
 EOF
     fi
-    printf '%s (%s) unstable; urgency=medium\n\n  * Build from https://github.com/ForteFibre/chloe.\n\n -- %s  %s\n' \
+    printf '%s (%s) unstable; urgency=medium\n\n  * Build from https://github.com/f0reachARR/chloe.\n\n -- %s  %s\n' \
         "$name" "$version" "$maintainer" "$(date -R -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}")" |
         gzip -9n > "$doc/changelog.gz"
 }

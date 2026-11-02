@@ -1,7 +1,7 @@
 # ワークスペースのランナーのネットワーク namespace (chloe-runner@.service が引き込む)。
 [Unit]
 Description=chloe runner network namespace %i
-Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+Documentation=https://github.com/f0reachARR/chloe/blob/main/docs/install.md
 Requires=chloe-host-net.service
 After=chloe-host-net.service
 StopWhenUnneeded=yes

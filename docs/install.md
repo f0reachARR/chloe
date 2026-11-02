@@ -18,7 +18,7 @@ jailer による Firecracker の隔離はまだないので、ホストは chloe
 
 ## deb で入れる
 
-リリースの deb は、GitHub の[リリース](https://github.com/ForteFibre/chloe/releases)に置いてある（`chloe-guest` を含む）。
+リリースの deb は、GitHub の[リリース](https://github.com/f0reachARR/chloe/releases)に置いてある（`chloe-guest` を含む）。
 自分で作るときは、次の「deb を作る」の手順で作る。
 
 ### deb を作る
