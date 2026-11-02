@@ -240,6 +240,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/secret-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 管理の TUI と同じシークレットの雛形。登録するときは、定義に値を添える。 */
+        get: operations["secret_templates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/secrets": {
         parameters: {
             query?: never;
@@ -264,7 +281,7 @@ export interface paths {
             cookie?: never;
         };
         get: operations["show_secret"];
-        /** @description Web の画面のセッションからは使えない。 */
+        /** @description 定義を書けば、すべての欄の値も要る。定義を書かなければ値だけを替える (欄がいくつもあるものは、値を定義と一緒に送る)。 */
         put: operations["set_secret"];
         post?: never;
         delete: operations["remove_secret"];
@@ -553,6 +570,35 @@ export interface components {
         ErrorBody: {
             error: string;
         };
+        FieldInput: {
+            env?: string[];
+            placeholder?: string | null;
+            value: string;
+        };
+        FieldSpec: {
+            /** @description プレースホルダーを入れる VM の環境変数。 */
+            env?: string[];
+            /**
+             * @description プレースホルダーの形。`{id}` をワークスペースごとの乱数に置き換える
+             *     (ツールが手元で形式を調べることがあるので、本物に似せる)。
+             */
+            placeholder: string;
+        };
+        /** @enum {string} */
+        FileOwner: "root" | "user";
+        /** @description VM に置くファイル。`content` の中の `{欄の名前}` を、その欄のプレースホルダーに置き換える。 */
+        FileSpec: {
+            content: string;
+            /**
+             * @description パーミッションを 8 進数で書く (`"0600"` など)。省くと `0644`
+             *     (プレースホルダーは漏れても害がないので、誰が読めてもよい)。
+             */
+            mode?: string | null;
+            /** @description 持ち主。省くと root。 */
+            owner?: components["schemas"]["FileOwner"];
+            /** @description VM の中の絶対パス。 */
+            path: string;
+        };
         /** @description インストールトークンの範囲。書かなかった項目は、インストールのすべてになる。 */
         GitHubScope: {
             /** @description 権限の名前と水準 (`contents = "read"` など)。 */
@@ -561,6 +607,16 @@ export interface components {
             } | null;
             /** @description リポジトリの名前 (Organization の名前を含まない)。 */
             repositories?: string[] | null;
+        };
+        /** @enum {string} */
+        InjectFormat: "replace" | "basic-password";
+        InjectSpec: {
+            field?: string;
+            format?: components["schemas"]["InjectFormat"];
+            header: string;
+            hosts: string[];
+            /** @description `basic-password` で、Basic 認証のユーザー名として差し替える欄。 */
+            username_field?: string | null;
         };
         LinkCode: {
             code: string;
@@ -575,6 +631,8 @@ export interface components {
         };
         /** @description 利用者が入れる持ち主。 */
         OwnerEntry: {
+            /** @description 利用者がこの持ち主のシークレットを登録、変更、削除できるか。 */
+            can_manage_secrets: boolean;
             kind: components["schemas"]["OwnerKind"];
             /** @description 画面に出す名前 (`alice`、`acme`、`acme/dev`)。 */
             name: string;
@@ -674,17 +732,49 @@ export interface components {
          * @enum {string}
          */
         ScopeKind: "gateway" | "user" | "org" | "team";
+        /**
+         * @description 登録するときに渡す、定義と値。
+         *
+         *     欄が一つなら `env`、`placeholder`、`value` を直接書き、欄がいくつもあれば `fields` に書く。
+         *     定義の項目 (環境変数、プレースホルダー、規則) を何も書かなければ、値だけを変える。
+         */
+        SecretInput: {
+            env?: string[];
+            fields?: {
+                [key: string]: components["schemas"]["FieldInput"];
+            };
+            files?: components["schemas"]["FileSpec"][];
+            inject?: components["schemas"]["InjectSpec"][];
+            placeholder?: string | null;
+            sign?: components["schemas"]["SignSpec"][];
+            value?: string | null;
+        };
         SecretNames: {
+            /** @description 名前と定義 (値は含まない)。GitHub のユーザートークンは含まない。 */
+            entries: components["schemas"]["SecretView"][];
             names: string[];
             owner: string;
+        };
+        SecretSpec: {
+            fields: {
+                [key: string]: components["schemas"]["FieldSpec"];
+            };
+            files?: components["schemas"]["FileSpec"][];
+            inject?: components["schemas"]["InjectSpec"][];
+            sign?: components["schemas"]["SignSpec"][];
+        };
+        /** @description シークレットの雛形 (`deploy/secrets/`)。 */
+        SecretTemplate: {
+            name: string;
+            spec: components["schemas"]["SecretSpec"];
         };
         /** @description 登録したシークレットの定義。組み込みの種類なら `builtin` が真になる。 */
         SecretView: {
             builtin: boolean;
             name: string;
             owner: string;
-            /** @description シークレットの定義 (`chloe secret set --spec` と同じ形を JSON にしたもの。値は含まない)。 */
-            spec: Record<string, never>;
+            /** @description シークレットの定義 (値は含まない)。 */
+            spec: components["schemas"]["SecretSpec"];
         };
         /** @description ゲートウェイから画面へのテキストのフレーム。 */
         ServerFrame: {
@@ -705,6 +795,15 @@ export interface components {
         } | {
             /** @enum {string} */
             type: "pong";
+        };
+        /**
+         * @description 署名の方式。方式ごとに使う欄の名前が決まっている ([`SignKind::fields`])。
+         * @enum {string}
+         */
+        SignKind: "aws-sigv4";
+        SignSpec: {
+            hosts: string[];
+            scheme: components["schemas"]["SignKind"];
         };
         UpdateWorkspace: {
             /** Format: int32 */
@@ -1478,6 +1577,43 @@ export interface operations {
             };
         };
     };
+    secret_templates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecretTemplate"][];
+                };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_secrets: {
         parameters: {
             query?: {
@@ -1572,7 +1708,7 @@ export interface operations {
         /** @description `{"value": "..."}` か、定義と値 */
         requestBody: {
             content: {
-                "application/json": Record<string, never>;
+                "application/json": components["schemas"]["SecretInput"];
             };
         };
         responses: {

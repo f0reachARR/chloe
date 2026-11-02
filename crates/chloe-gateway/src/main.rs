@@ -16,6 +16,7 @@ mod internal;
 mod ops;
 mod proxy;
 mod session;
+mod templates;
 mod terminal;
 mod tui;
 mod web;

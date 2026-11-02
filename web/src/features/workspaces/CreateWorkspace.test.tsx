@@ -17,9 +17,27 @@ describe('creating a workspace', () => {
       http.get('/api/v1/workspace-ports/{name}', ({ response }) => response(200).json([])),
       http.get('/api/v1/owners', ({ response }) =>
         response(200).json([
-          { owner: 'user:alice', kind: 'user', name: 'alice', prefix: '' },
-          { owner: 'org:acme', kind: 'org', name: 'acme', prefix: 'acme/' },
-          { owner: 'team:acme/dev', kind: 'team', name: 'acme/dev', prefix: 'acme/dev/' },
+          {
+            owner: 'user:alice',
+            kind: 'user',
+            name: 'alice',
+            prefix: '',
+            can_manage_secrets: true,
+          },
+          {
+            owner: 'org:acme',
+            kind: 'org',
+            name: 'acme',
+            prefix: 'acme/',
+            can_manage_secrets: true,
+          },
+          {
+            owner: 'team:acme/dev',
+            kind: 'team',
+            name: 'acme/dev',
+            prefix: 'acme/dev/',
+            can_manage_secrets: true,
+          },
         ]),
       ),
       http.post('/api/v1/workspaces', async ({ request, response }) => {
@@ -48,7 +66,15 @@ describe('creating a workspace', () => {
     server.use(
       http.get('/api/v1/workspaces', ({ response }) => response(200).json([])),
       http.get('/api/v1/owners', ({ response }) =>
-        response(200).json([{ owner: 'user:alice', kind: 'user', name: 'alice', prefix: '' }]),
+        response(200).json([
+          {
+            owner: 'user:alice',
+            kind: 'user',
+            name: 'alice',
+            prefix: '',
+            can_manage_secrets: true,
+          },
+        ]),
       ),
     );
     renderWithProviders(<WorkspacesPage />);
