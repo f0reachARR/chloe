@@ -147,6 +147,8 @@ pub struct GitHubApp {
     tokens: Mutex<HashMap<String, (String, Instant)>>,
     /// 所属の確認の結果 (役割。所属していなければ `None`) と、確かめた時刻。
     memberships: Mutex<HashMap<String, (Option<String>, Instant)>>,
+    /// Organization (小文字) ごとの team の slug の一覧と、調べた時刻。
+    teams: Mutex<HashMap<String, (Vec<String>, Instant)>>,
 }
 
 /// インストールトークンの範囲。既定ではインストールのすべてのリポジトリと権限。
@@ -204,6 +206,12 @@ struct TokenResponse {
     interval: Option<u64>,
 }
 
+/// `/orgs/{org}/teams` の要素。
+#[derive(Deserialize)]
+struct TeamEntry {
+    slug: String,
+}
+
 #[derive(Deserialize)]
 struct User {
     login: String,
@@ -244,6 +252,7 @@ impl GitHubApp {
             installations: Mutex::new(None),
             tokens: Mutex::new(HashMap::new()),
             memberships: Mutex::new(HashMap::new()),
+            teams: Mutex::new(HashMap::new()),
         })
     }
 
@@ -374,6 +383,44 @@ impl GitHubApp {
             "admin" => OrgRole::Admin,
             _ => OrgRole::Member,
         }))
+    }
+
+    /// `org` の team の slug (小文字、並べたもの)。アプリをインストールしていない Organization
+    /// では空。結果は所属の確認と同じ時間だけ覚えておく。
+    pub async fn teams(&self, org: &str) -> Result<Vec<String>, Error> {
+        let key = org.to_ascii_lowercase();
+        if let Some((teams, checked)) = self.teams.lock().unwrap().get(&key)
+            && checked.elapsed() < MEMBERSHIP_TTL
+        {
+            return Ok(teams.clone());
+        }
+        if !self.is_installed(&key).await? {
+            return Ok(Vec::new());
+        }
+        let token = self
+            .installation_token(&key, &TokenScope::default())
+            .await?;
+        let mut teams = Vec::new();
+        for page in 1.. {
+            let path = format!("/orgs/{key}/teams?per_page=100&page={page}");
+            let entries: Vec<TeamEntry> = json(
+                self.api(reqwest::Method::GET, &path)
+                    .bearer_auth(token.expose_secret()),
+            )
+            .await?;
+            let last = entries.len() < 100;
+            teams.extend(entries.into_iter().map(|t| t.slug.to_ascii_lowercase()));
+            if last {
+                break;
+            }
+        }
+        teams.sort();
+        teams.dedup();
+        self.teams
+            .lock()
+            .unwrap()
+            .insert(key, (teams.clone(), Instant::now()));
+        Ok(teams)
     }
 
     /// 利用者が `org` の team のメンバーか。
