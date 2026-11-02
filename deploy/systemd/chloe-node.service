@@ -1,6 +1,6 @@
 [Unit]
 Description=chloe node
-Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+Documentation=https://github.com/f0reachARR/chloe/blob/main/docs/install.md
 After=network-online.target docker.service
 # ランナーを Docker で動かすとき (設定の [runner] の kind が docker) だけ Docker を使う。
 Wants=network-online.target docker.service

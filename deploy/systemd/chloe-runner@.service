@@ -2,7 +2,7 @@
 # systemctl start chloe-runner@ws-<番号> で起動する (deploy/polkit/50-chloe.rules で chloe に許す)。
 [Unit]
 Description=chloe runner %i
-Documentation=https://github.com/ForteFibre/chloe/blob/main/docs/install.md
+Documentation=https://github.com/f0reachARR/chloe/blob/main/docs/install.md
 Requires=chloe-netns@%i.service
 After=chloe-netns@%i.service
 

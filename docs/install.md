@@ -18,6 +18,9 @@ jailer による Firecracker の隔離はまだないので、ホストは chloe
 
 ## deb で入れる
 
+リリースの deb は、GitHub の[リリース](https://github.com/f0reachARR/chloe/releases)に置いてある（`chloe-guest` を含む）。
+自分で作るときは、次の「deb を作る」の手順で作る。
+
 ### deb を作る
 
 deb は、ビルドするマシンで作る。
@@ -41,7 +44,8 @@ packaging/deb/build.sh --guest
 ルートファイルシステムには、`images/guest/rootfs/Dockerfile` で版を決めた mise が入る。
 Claude Code や Codex などのツールは入れない（利用者が VM の中で mise で入れる。[使い方](usage.md#ツールを入れる)）。
 
-deb の版は `0.1.0~git<コミットの日付>.<ハッシュ>` になる（コミットしていない変更があれば `+dirty` が付く）。
+deb の版は `<最後のリリースの版>+git<コミットの日付>.<ハッシュ>` になる（コミットしていない変更があれば `.dirty` が付く）。
+リリースの版より後に並ぶので、リリースの deb の上に入れられる。
 control の Maintainer は、環境変数 `DEB_MAINTAINER` で変えられる。
 
 | パッケージ | 中身 |

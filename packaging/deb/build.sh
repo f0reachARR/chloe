@@ -25,11 +25,21 @@ if [[ "${1:-}" == --guest ]]; then
     guest_args=(--guest /src/build/guest)
 fi
 
-# 版は、Cargo のワークスペースの版、コミットの日付、コミットのハッシュから作る。
+# 版は、Cargo のワークスペースの版 (最後のリリースの版) に、コミットの日付とハッシュを足して作る。
+# リリースの版より後に並ぶよう、`+` でつなぐ。環境変数 DEB_RELEASE=1 のときは (リリースの
+# ワークフローが付ける)、ワークスペースの版をそのまま使う。
 base="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
-version="$base~git$(git -C "$root" log -1 --format=%cd --date=format:%Y%m%d).$(git -C "$root" rev-parse --short HEAD)"
-if [[ -n "$(git -C "$root" status --porcelain)" ]]; then
-    version="$version+dirty"
+if [[ "${DEB_RELEASE:-}" == 1 ]]; then
+    if [[ -n "$(git -C "$root" status --porcelain)" ]]; then
+        echo "DEB_RELEASE=1 needs a clean work tree" >&2
+        exit 1
+    fi
+    version="$base"
+else
+    version="$base+git$(git -C "$root" log -1 --format=%cd --date=format:%Y%m%d).$(git -C "$root" rev-parse --short HEAD)"
+    if [[ -n "$(git -C "$root" status --porcelain)" ]]; then
+        version="$version.dirty"
+    fi
 fi
 
 context="$(mktemp -d)"
