@@ -353,6 +353,23 @@ web_api() {
 check web-me '"login":"alice","session":' web_api "$alice_cookie" GET /api/v1/me
 check web-sessions "signed in" as alice chloe web sessions
 check web-no-token "not allowed from the web UI" web_api "$alice_cookie" POST /api/v1/tokens -d '{"name":"x"}'
+# シークレットは cookie でも登録できるが、定義を書くならすべての値が要る (登録してある値を残して
+# 定義だけを変えさせない)。
+web_secret='{"value":"real-web-secret","env":["WEB_TOKEN"],"placeholder":"web_{id}","inject":[{"hosts":["httpbin.org"],"header":"x-web-token"}]}'
+check web-secret-set " 204" web_api "$alice_cookie" PUT /api/v1/secrets/web_token -d "$web_secret"
+check web-secret-entries '{"name":"web_token","owner":"alice","builtin":false,"spec":{"fields":{"value":{"env":["WEB_TOKEN"],"placeholder":"web_{id}"}},"inject":[{"hosts":["httpbin.org"],"header":"x-web-token","format":"replace"}]}}' \
+    web_api "$alice_cookie" GET /api/v1/secrets
+check web-secret-needs-value '"give the value"} 400' web_api "$alice_cookie" PUT /api/v1/secrets/web_token \
+    -d '{"env":["WEB_TOKEN"],"inject":[{"hosts":["evil.example"],"header":"x-web-token"}]}'
+check web-secret-kept '"hosts":["httpbin.org"]' web_api "$alice_cookie" GET /api/v1/secrets/web_token
+check web-secret-no-origin "403" curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Cookie: $alice_cookie" \
+    -H 'content-type: application/json' -d '{"value":"x"}' "$web/api/v1/secrets/web_token"
+check web-secret-not-admin "cannot change the secrets of acme" web_api "$bob_cookie" PUT '/api/v1/secrets/web_token?owner=acme' -d "$web_secret"
+check web-secret-injected "real-web-secret" as alice 'curl -s -H "x-web-token: $WEB_TOKEN" https://httpbin.org/headers'
+check web-secret-rm " 204" web_api "$alice_cookie" DELETE /api/v1/secrets/web_token
+check web-secret-templates '{"name":"anthropic_api_key","spec":{"fields":{"value":{"env":["ANTHROPIC_API_KEY"],"placeholder":"sk-ant-api03-{id}"}}' \
+    web_api "$alice_cookie" GET /api/v1/secret-templates
+check web-secret-not-logged "clean" sh -c '! grep -q real-web-secret "$0" && echo clean' "$logs/gateway.log"
 busy_of() { web_api "$alice_cookie" GET '/api/v1/workspaces?status=true' | grep -o '"name":"acme/proj"[^}]*"busy":\[' | head -1; }
 check web-busy '"name":"acme/proj"' busy_of
 # 依頼の出来事は、入れるワークスペースのものだけが届く。
@@ -605,9 +622,9 @@ check api-policy-scopes-workspaces '"acme/from-api"' api "$alice_token" GET /api
 scopes_without_acme() { api "$@" | grep -q "org:acme" || echo "no acme"; }
 check api-policy-scopes-not-member "no acme" scopes_without_acme "$bob_token" GET /api/v1/policy-scopes
 # 入れる持ち主を、個人、Organization、その team の順に、名前の前に付ける部分を添えて返す。
-check api-owners '[{"owner":"user:alice","kind":"user","name":"alice","prefix":""},{"owner":"org:acme","kind":"org","name":"acme","prefix":"acme/"},{"owner":"team:acme/dev","kind":"team","name":"acme/dev","prefix":"acme/dev/"}] 200' \
+check api-owners '[{"owner":"user:alice","kind":"user","name":"alice","prefix":"","can_manage_secrets":true},{"owner":"org:acme","kind":"org","name":"acme","prefix":"acme/","can_manage_secrets":true},{"owner":"team:acme/dev","kind":"team","name":"acme/dev","prefix":"acme/dev/","can_manage_secrets":true}] 200' \
     api "$alice_token" GET /api/v1/owners
-check api-owners-not-member '[{"owner":"user:bob","kind":"user","name":"bob","prefix":""}] 200' api "$bob_token" GET /api/v1/owners
+check api-owners-not-member '[{"owner":"user:bob","kind":"user","name":"bob","prefix":"","can_manage_secrets":true}] 200' api "$bob_token" GET /api/v1/owners
 # 層で効く規則と、その層の設定と版。ゲートウェイの層は変えられない。
 check api-policy-rules-org '{"source":{"kind":"owner","owner":"acme"},"rule":{"hosts":["api.example"],"action":"allow"}}' \
     api "$alice_token" GET '/api/v1/policy-rules?scope=org:acme'
