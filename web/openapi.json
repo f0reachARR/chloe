@@ -362,6 +362,49 @@
         }
       }
     },
+    "/api/v1/owners": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "description": "利用者が入れる持ち主 (ワークスペースを作れる先) を、個人、Organization、その team の順に返す。",
+        "operationId": "list_owners",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OwnerEntry"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/policies/{owner}": {
       "get": {
         "tags": [
@@ -784,6 +827,49 @@
         }
       }
     },
+    "/api/v1/secret-templates": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "description": "管理の TUI と同じシークレットの雛形。登録するときは、定義に値を添える。",
+        "operationId": "secret_templates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SecretTemplate"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/secrets": {
       "get": {
         "tags": [
@@ -893,7 +979,7 @@
         "tags": [
           "secrets"
         ],
-        "description": "Web の画面のセッションからは使えない。",
+        "description": "定義を書けば、すべての欄の値も要る。定義を書かなければ値だけを替える (欄がいくつもあるものは、値を定義と一緒に送る)。",
         "operationId": "set_secret",
         "parameters": [
           {
@@ -918,7 +1004,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "$ref": "#/components/schemas/SecretInput"
               }
             }
           },
@@ -2323,6 +2409,86 @@
           }
         }
       },
+      "FieldInput": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "placeholder": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FieldSpec": {
+        "type": "object",
+        "required": [
+          "placeholder"
+        ],
+        "properties": {
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "プレースホルダーを入れる VM の環境変数。"
+          },
+          "placeholder": {
+            "type": "string",
+            "description": "プレースホルダーの形。`{id}` をワークスペースごとの乱数に置き換える\n(ツールが手元で形式を調べることがあるので、本物に似せる)。"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FileOwner": {
+        "type": "string",
+        "enum": [
+          "root",
+          "user"
+        ]
+      },
+      "FileSpec": {
+        "type": "object",
+        "description": "VM に置くファイル。`content` の中の `{欄の名前}` を、その欄のプレースホルダーに置き換える。",
+        "required": [
+          "path",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "パーミッションを 8 進数で書く (`\"0600\"` など)。省くと `0644`\n(プレースホルダーは漏れても害がないので、誰が読めてもよい)。"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/FileOwner",
+            "description": "持ち主。省くと root。"
+          },
+          "path": {
+            "type": "string",
+            "description": "VM の中の絶対パス。"
+          }
+        },
+        "additionalProperties": false
+      },
       "GitHubScope": {
         "type": "object",
         "description": "インストールトークンの範囲。書かなかった項目は、インストールのすべてになる。",
@@ -2349,6 +2515,45 @@
               "type": "string"
             },
             "description": "リポジトリの名前 (Organization の名前を含まない)。"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InjectFormat": {
+        "type": "string",
+        "enum": [
+          "replace",
+          "basic-password"
+        ]
+      },
+      "InjectSpec": {
+        "type": "object",
+        "required": [
+          "hosts",
+          "header"
+        ],
+        "properties": {
+          "field": {
+            "type": "string"
+          },
+          "format": {
+            "$ref": "#/components/schemas/InjectFormat"
+          },
+          "header": {
+            "type": "string"
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "username_field": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`basic-password` で、Basic 認証のユーザー名として差し替える欄。"
           }
         },
         "additionalProperties": false
@@ -2389,6 +2594,47 @@
             "format": "int64"
           }
         }
+      },
+      "OwnerEntry": {
+        "type": "object",
+        "description": "利用者が入れる持ち主。",
+        "required": [
+          "owner",
+          "kind",
+          "name",
+          "prefix",
+          "can_manage_secrets"
+        ],
+        "properties": {
+          "can_manage_secrets": {
+            "type": "boolean",
+            "description": "利用者がこの持ち主のシークレットを登録、変更、削除できるか。"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/OwnerKind"
+          },
+          "name": {
+            "type": "string",
+            "description": "画面に出す名前 (`alice`、`acme`、`acme/dev`)。"
+          },
+          "owner": {
+            "type": "string",
+            "description": "`user:alice`、`org:acme`、`team:acme/dev` (設定の層と同じ書き方)。"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "ワークスペースの名前の前に付ける部分 (``、`acme/`、`acme/dev/`)。"
+          }
+        }
+      },
+      "OwnerKind": {
+        "type": "string",
+        "description": "持ち主の種類。",
+        "enum": [
+          "user",
+          "org",
+          "team"
+        ]
       },
       "PathRuleConfig": {
         "type": "object",
@@ -2662,13 +2908,73 @@
           "team"
         ]
       },
+      "SecretInput": {
+        "type": "object",
+        "description": "登録するときに渡す、定義と値。\n\n欄が一つなら `env`、`placeholder`、`value` を直接書き、欄がいくつもあれば `fields` に書く。\n定義の項目 (環境変数、プレースホルダー、規則) を何も書かなければ、値だけを変える。",
+        "properties": {
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FieldInput"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileSpec"
+            }
+          },
+          "inject": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InjectSpec"
+            }
+          },
+          "placeholder": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sign": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignSpec"
+            }
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "SecretNames": {
         "type": "object",
         "required": [
           "owner",
-          "names"
+          "names",
+          "entries"
         ],
         "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SecretView"
+            },
+            "description": "名前と定義 (値は含まない)。GitHub のユーザートークンは含まない。"
+          },
           "names": {
             "type": "array",
             "items": {
@@ -2677,6 +2983,58 @@
           },
           "owner": {
             "type": "string"
+          }
+        }
+      },
+      "SecretSpec": {
+        "type": "object",
+        "required": [
+          "fields"
+        ],
+        "properties": {
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FieldSpec"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileSpec"
+            }
+          },
+          "inject": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InjectSpec"
+            }
+          },
+          "sign": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignSpec"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SecretTemplate": {
+        "type": "object",
+        "description": "シークレットの雛形 (`deploy/secrets/`)。",
+        "required": [
+          "name",
+          "spec"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "spec": {
+            "$ref": "#/components/schemas/SecretSpec"
           }
         }
       },
@@ -2700,8 +3058,8 @@
             "type": "string"
           },
           "spec": {
-            "type": "object",
-            "description": "シークレットの定義 (`chloe secret set --spec` と同じ形を JSON にしたもの。値は含まない)。"
+            "$ref": "#/components/schemas/SecretSpec",
+            "description": "シークレットの定義 (値は含まない)。"
           }
         }
       },
@@ -2793,6 +3151,32 @@
           }
         ],
         "description": "ゲートウェイから画面へのテキストのフレーム。"
+      },
+      "SignKind": {
+        "type": "string",
+        "description": "署名の方式。方式ごとに使う欄の名前が決まっている ([`SignKind::fields`])。",
+        "enum": [
+          "aws-sigv4"
+        ]
+      },
+      "SignSpec": {
+        "type": "object",
+        "required": [
+          "scheme",
+          "hosts"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scheme": {
+            "$ref": "#/components/schemas/SignKind"
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateWorkspace": {
         "type": "object",

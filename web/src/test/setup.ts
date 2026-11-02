@@ -21,6 +21,8 @@ window.matchMedia ??= (query: string) =>
 if (!('fonts' in document)) {
   Object.defineProperty(document, 'fonts', { value: new EventTarget() });
 }
+// Combobox (Select) が選んだ候補まで動かすのに使う。
+Element.prototype.scrollIntoView ??= () => {};
 globalThis.ResizeObserver ??= class {
   observe() {}
   unobserve() {}

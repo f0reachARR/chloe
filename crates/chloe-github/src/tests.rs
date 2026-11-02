@@ -229,6 +229,42 @@ async fn installations_tokens_and_roles() {
     );
 }
 
+/// team の一覧はページを送って読み、しばらく覚えておく。インストールしていなければ空。
+#[tokio::test]
+async fn lists_teams_across_pages() {
+    let listed = Arc::new(AtomicUsize::new(0));
+    let fallback = two_orgs(Arc::default(), Arc::default());
+    let counter = listed.clone();
+    let url = stub(move |req| {
+        let page = match req.path.as_str() {
+            "/orgs/acme/teams?per_page=100&page=1" => 1,
+            "/orgs/acme/teams?per_page=100&page=2" => 2,
+            _ => return fallback(req),
+        };
+        assert_eq!(req.authorization.as_deref(), Some("Bearer ghs_acme"));
+        counter.fetch_add(1, Ordering::SeqCst);
+        let teams: Vec<String> = match page {
+            1 => (0..100)
+                .map(|i| format!(r#"{{"slug":"t{i:03}"}}"#))
+                .collect(),
+            _ => vec![r#"{"slug":"Dev"}"#.to_string()],
+        };
+        (200, format!("[{}]", teams.join(",")))
+    })
+    .await;
+    let app = app(&url).await;
+    let teams = app.teams("ACME").await.unwrap();
+    assert_eq!(teams.len(), 101);
+    assert_eq!(teams.first().map(String::as_str), Some("dev"));
+    assert_eq!(listed.load(Ordering::SeqCst), 2);
+    app.teams("acme").await.unwrap();
+    assert_eq!(listed.load(Ordering::SeqCst), 2, "remembered");
+    assert!(
+        app.teams("gamma").await.unwrap().is_empty(),
+        "not installed"
+    );
+}
+
 /// 設定で Organization を一つに限ると、ほかのインストールは使わない。
 #[tokio::test]
 async fn organization_setting_limits_installations() {

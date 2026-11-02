@@ -463,9 +463,36 @@ pub struct SecretView {
     pub name: String,
     pub owner: String,
     pub builtin: bool,
-    /// シークレットの定義 (`chloe secret set --spec` と同じ形を JSON にしたもの。値は含まない)。
-    #[schema(value_type = Object)]
+    /// シークレットの定義 (値は含まない)。
     pub spec: SecretSpec,
+}
+
+/// 持ち主のシークレットの定義の一覧 (値は含まない)。`chloe github login` が扱う GitHub の
+/// ユーザートークンは含めない。
+pub async fn secret_entries(
+    shared: &Shared,
+    login: &str,
+    owner: &Owner,
+) -> Result<Vec<SecretView>> {
+    let names = list_secrets(shared, login, owner).await?;
+    let secrets = shared.controller.secrets();
+    let mut entries = Vec::new();
+    for name in names {
+        if check_secret_name(&name).is_err() {
+            continue;
+        }
+        let Some((_, stored)) = secrets.get_with_spec(owner, &name).await? else {
+            continue;
+        };
+        let spec = stored_spec(&name, stored.as_deref(), shared.controller.preset(&name))?;
+        entries.push(SecretView {
+            owner: owner_arg(owner),
+            builtin: stored.is_none(),
+            spec,
+            name,
+        });
+    }
+    Ok(entries)
 }
 
 /// シークレットの定義を見る。値は返さないので、その持ち主のワークスペースに入れる人は見られる。
@@ -906,15 +933,21 @@ pub struct ScopeEntry {
     pub editable: bool,
 }
 
-/// 利用者が見られるスコープを、gateway、個人、Organization、その team の順に並べる。
-/// それぞれの持ち主のすぐあとに、そのワークスペースを置く。
-pub async fn rule_scopes(shared: &Shared, login: &str) -> Result<Vec<ScopeEntry>> {
+/// 利用者が入れる持ち主を、個人、Organization、その team の順に並べる。
+pub async fn owners(shared: &Shared, login: &str) -> Result<Vec<Owner>> {
     let mut owners = shared.owners_for(login).await?;
     owners.sort_by_key(|owner| match owner {
         Owner::User(_) => (0, String::new(), String::new()),
         Owner::Org(org) => (1, org.clone(), String::new()),
         Owner::Team { org, team } => (1, org.clone(), team.clone()),
     });
+    Ok(owners)
+}
+
+/// 利用者が見られるスコープを、gateway、個人、Organization、その team の順に並べる。
+/// それぞれの持ち主のすぐあとに、そのワークスペースを置く。
+pub async fn rule_scopes(shared: &Shared, login: &str) -> Result<Vec<ScopeEntry>> {
+    let owners = owners(shared, login).await?;
     let workspaces = shared.controller.store().list(&owners).await?;
     let mut entries = vec![ScopeEntry {
         scope: RuleScope::Gateway,

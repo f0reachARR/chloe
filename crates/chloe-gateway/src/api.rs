@@ -6,8 +6,9 @@
 //!
 //! Web の画面 ([`crate::web`]) からは、トークンの代わりにセッションの cookie で呼ぶ。cookie で
 //! 来た GET 以外の要求と WebSocket の切り替えは、`Origin` が公開 URL と一致しなければ断る
-//! (CSRF と Cross-Site WebSocket Hijacking の対策)。cookie では
-//! トークンを作らせず、シークレットも登録させない。
+//! (CSRF と Cross-Site WebSocket Hijacking の対策)。cookie ではトークンを作らせない。
+//! シークレットは登録できるが、登録には必ずすべての値が要り、登録してある値を残して定義だけを
+//! 変えることはできない (画面に XSS があっても、本物の値をほかの宛先へ向け直させない)。
 //!
 //! ```text
 //! GET    /api/v1/me
@@ -18,7 +19,9 @@
 //! PATCH  /api/v1/workspaces/{name}          {"root": "ephemeral"}、{"docker_disk_gib": 80}、{"memory_mib": 16384}、
 //!                                       {"idle_timeout": "never"} か {"running": false}
 //! DELETE /api/v1/workspaces/{name}[?disks=true]   disks=true ならディスクも消す
-//! GET    /api/v1/secrets[?owner=acme]       シークレットの名前の一覧
+//! GET    /api/v1/owners                     入れる持ち主 (個人、Organization、team)
+//! GET    /api/v1/secrets[?owner=acme]       シークレットの名前と定義の一覧
+//! GET    /api/v1/secret-templates           シークレットの雛形 (定義だけ)
 //! GET    /api/v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
 //! PUT    /api/v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
 //! DELETE /api/v1/secrets/{name}[?owner=..]
@@ -142,7 +145,9 @@ pub fn router(shared: Arc<Shared>) -> Router {
                 .patch(update_workspace)
                 .delete(remove_workspace),
         )
+        .route("/api/v1/owners", get(list_owners))
         .route("/api/v1/secrets", get(list_secrets))
+        .route("/api/v1/secret-templates", get(secret_templates))
         .route(
             "/api/v1/secrets/{name}",
             get(show_secret).put(set_secret).delete(remove_secret),
@@ -191,7 +196,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
     info(title = "chloe", description = "chloe のゲートウェイの管理 API"),
     paths(
         me, events, list_workspaces, create_workspace, show_workspace, update_workspace,
-        remove_workspace, workspace_requests, list_secrets, show_secret, set_secret, remove_secret,
+        remove_workspace, workspace_requests, list_owners, list_secrets, secret_templates, show_secret, set_secret, remove_secret,
         show_workspace_policy, set_workspace_policy, remove_workspace_policy, workspace_rules,
         policy_scopes, policy_rules, show_own_policy,
         set_own_policy, remove_own_policy, show_policy, set_policy, remove_policy, list_tokens,
@@ -272,6 +277,15 @@ pub(crate) enum AskEventKind {
 pub(crate) struct SecretNames {
     owner: String,
     names: Vec<String>,
+    /// 名前と定義 (値は含まない)。GitHub のユーザートークンは含まない。
+    entries: Vec<SecretView>,
+}
+
+/// シークレットの雛形 (`deploy/secrets/`)。
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SecretTemplate {
+    name: String,
+    spec: chloe_controller::catalog::SecretSpec,
 }
 
 /// 設定を送り直した、動いているランナーの数。
@@ -668,11 +682,25 @@ async fn list_secrets(
 ) -> Result<Response, ops::Error> {
     let owner = owner_or_personal(&caller.login, query.owner.as_deref())?;
     let names = ops::list_secrets(&shared, &caller.login, &owner).await?;
+    let entries = ops::secret_entries(&shared, &caller.login, &owner).await?;
     Ok(Json(SecretNames {
         owner: owner_arg(&owner),
         names,
+        entries,
     })
     .into_response())
+}
+
+#[utoipa::path(get, path = "/api/v1/secret-templates", tag = "secrets", description = "管理の TUI と同じシークレットの雛形。登録するときは、定義に値を添える。", responses((status = 200, body = Vec<SecretTemplate>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+async fn secret_templates() -> Response {
+    let templates: Vec<SecretTemplate> = crate::templates::template_specs()
+        .into_iter()
+        .map(|(name, spec)| SecretTemplate {
+            name: name.to_string(),
+            spec,
+        })
+        .collect();
+    Json(templates).into_response()
 }
 
 #[utoipa::path(get, path = "/api/v1/secrets/{name}", tag = "secrets", params(("name" = String, Path), OwnerQuery), responses((status = 200, body = SecretView), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
@@ -687,7 +715,7 @@ async fn show_secret(
     Ok(Json(view).into_response())
 }
 
-#[utoipa::path(put, path = "/api/v1/secrets/{name}", tag = "secrets", description = "Web の画面のセッションからは使えない。", params(("name" = String, Path), OwnerQuery), request_body(content = Object, description = "`{\"value\": \"...\"}` か、定義と値"), responses((status = 204, description = "登録した"), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+#[utoipa::path(put, path = "/api/v1/secrets/{name}", tag = "secrets", description = "定義を書けば、すべての欄の値も要る。定義を書かなければ値だけを替える (欄がいくつもあるものは、値を定義と一緒に送る)。", params(("name" = String, Path), OwnerQuery), request_body(content = SecretInput, description = "`{\"value\": \"...\"}` か、定義と値"), responses((status = 204, description = "登録した"), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
 async fn set_secret(
     State(shared): State<Arc<Shared>>,
     Extension(caller): Extension<Caller>,
@@ -695,7 +723,6 @@ async fn set_secret(
     Query(query): Query<OwnerQuery>,
     Json(body): Json<SecretInput>,
 ) -> Result<Response, ops::Error> {
-    caller.refuse_session("setting a secret")?;
     let owner = owner_or_personal(&caller.login, query.owner.as_deref())?;
     ops::set_secret(&shared, &caller.login, &owner, &name, body).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -976,6 +1003,52 @@ async fn workspace_rules(
         version: view.version,
     })
     .into_response())
+}
+
+/// 持ち主の種類。
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum OwnerKind {
+    User,
+    Org,
+    Team,
+}
+
+/// 利用者が入れる持ち主。
+#[derive(Serialize, ToSchema)]
+struct OwnerEntry {
+    /// `user:alice`、`org:acme`、`team:acme/dev` (設定の層と同じ書き方)。
+    owner: String,
+    kind: OwnerKind,
+    /// 画面に出す名前 (`alice`、`acme`、`acme/dev`)。
+    name: String,
+    /// ワークスペースの名前の前に付ける部分 (``、`acme/`、`acme/dev/`)。
+    prefix: String,
+    /// 利用者がこの持ち主のシークレットを登録、変更、削除できるか。
+    can_manage_secrets: bool,
+}
+
+#[utoipa::path(get, path = "/api/v1/owners", tag = "workspaces", description = "利用者が入れる持ち主 (ワークスペースを作れる先) を、個人、Organization、その team の順に返す。", responses((status = 200, body = Vec<OwnerEntry>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+async fn list_owners(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Response, ops::Error> {
+    let mut entries = Vec::new();
+    for owner in ops::owners(&shared, &caller.login).await? {
+        let (kind, prefix) = match &owner {
+            Owner::User(_) => (OwnerKind::User, String::new()),
+            Owner::Org(org) => (OwnerKind::Org, format!("{org}/")),
+            Owner::Team { org, team } => (OwnerKind::Team, format!("{org}/{team}/")),
+        };
+        entries.push(OwnerEntry {
+            can_manage_secrets: shared.can_manage_secrets(&caller.login, &owner).await?,
+            owner: owner.to_string(),
+            kind,
+            name: owner_arg(&owner),
+            prefix,
+        });
+    }
+    Ok(Json(entries).into_response())
 }
 
 /// 設定の層の種類。

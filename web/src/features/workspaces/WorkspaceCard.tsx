@@ -39,11 +39,19 @@ function AgentStatus({ ws }: { ws: WorkspaceInfo }) {
   );
 }
 
-export function WorkspaceCard({ ws }: { ws: WorkspaceInfo }) {
+// カードの要素の ID (作ったあとにそこまで動かす)。
+export const workspaceCardId = (name: string) => `workspace-${name.replaceAll('/', '--')}`;
+
+export function WorkspaceCard({ ws, highlighted }: { ws: WorkspaceInfo; highlighted?: boolean }) {
   const memory =
     ws.memory_mib >= 1024 ? `${(ws.memory_mib / 1024).toFixed(0)} GiB` : `${ws.memory_mib} MiB`;
   return (
-    <Card withBorder padding="md">
+    <Card
+      withBorder
+      padding="md"
+      id={workspaceCardId(ws.name)}
+      style={highlighted ? { borderColor: 'var(--mantine-primary-color-filled)' } : undefined}
+    >
       <Stack gap="xs">
         <Group justify="space-between" wrap="nowrap">
           <Text fw={600} ff="monospace" truncate>

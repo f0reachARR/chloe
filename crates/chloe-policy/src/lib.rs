@@ -121,7 +121,7 @@ pub struct InjectRuleConfig {
     pub username: Option<Credential>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum InjectFormat {
     /// ヘッダーの値の中のプレースホルダーを本物に置き換える。

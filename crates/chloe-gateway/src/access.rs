@@ -40,6 +40,30 @@ impl Shared {
         }
         candidates.sort();
         candidates.dedup();
+        // ワークスペースをまだ持たない team も選べるよう、所属する Organization の team を
+        // GitHub から候補に足す。
+        if let Some(github) = &self.github {
+            let mut teams = Vec::new();
+            for owner in &candidates {
+                if let Owner::Org(org) = owner
+                    && self.can_access(login, owner).await?
+                {
+                    teams.extend(
+                        github
+                            .teams(org)
+                            .await?
+                            .into_iter()
+                            .map(|team| Owner::Team {
+                                org: org.clone(),
+                                team,
+                            }),
+                    );
+                }
+            }
+            candidates.extend(teams);
+            candidates.sort();
+            candidates.dedup();
+        }
         for owner in candidates {
             if !matches!(owner, Owner::User(_)) && self.can_access(login, &owner).await? {
                 owners.push(owner);

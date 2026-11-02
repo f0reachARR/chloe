@@ -7,22 +7,7 @@ use serde_json::{Map, Value, json};
 use super::form::{Field, Form, RowKind};
 
 /// 雛形 (`deploy/secrets/`)。名前とその TOML。
-pub const TEMPLATES: &[(&str, &str)] = &[
-    (
-        "anthropic_api_key",
-        include_str!("../../../../deploy/secrets/anthropic_api_key.toml"),
-    ),
-    (
-        "claude_oauth_token",
-        include_str!("../../../../deploy/secrets/claude_oauth_token.toml"),
-    ),
-    (
-        "openai_api_key",
-        include_str!("../../../../deploy/secrets/openai_api_key.toml"),
-    ),
-    ("aws", include_str!("../../../../deploy/secrets/aws.toml")),
-    ("apt", include_str!("../../../../deploy/secrets/apt.toml")),
-];
+pub use crate::templates::TEMPLATES;
 
 const SINGLE: &str = "single value";
 const FIELDS: &str = "several fields";

@@ -34,7 +34,8 @@ API の呼び出しは、利用者、トークンの ID、メソッド、パス�
 cookie はブラウザが自動で付けるので、ほかのサイトから送らせた要求を断るために、次のように扱う。
 
 - GET と HEAD のほかの要求と、WebSocket への切り替え（`Upgrade` のある要求。端末）は、`Origin` がゲートウェイの `public_url` と一致しなければ 403 にする。
-- トークンを作る（`POST /api/v1/tokens`）ことと、シークレットを登録する（`PUT /api/v1/secrets/{name}`）ことは、cookie では 403 にする。
+- トークンを作る（`POST /api/v1/tokens`）ことは、cookie では 403 にする。
+- シークレットの登録（`PUT /api/v1/secrets/{name}`）は cookie でもできる。定義を書くときは必ずすべての欄の値が要り、登録してある値を残して定義だけを変える方法は API にない（[シークレット](#シークレット)）。
 - 監査ログには `via = "web"` とセッションの ID を残す。
 
 ログインの経路は `/api/auth` にある（`GET /api/auth/methods`、`GET /api/auth/github`、`POST /api/auth/link`、`POST /api/auth/logout`）。
@@ -60,6 +61,7 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | --- | --- |
 | `GET /api/v1/me` | トークンかセッションの利用者 |
 | `GET /api/v1/events` | 依頼の出来事（SSE） |
+| `GET /api/v1/owners` | 入れる持ち主（個人、Organization、team）。ワークスペースを作れる先 |
 | `GET /api/v1/workspaces[?status=true]` | 入れるワークスペースの一覧（`status=true` なら、エージェントが作業中かを VM に尋ねる） |
 | `POST /api/v1/workspaces` | ワークスペースを作る |
 | `GET /api/v1/workspaces/{name}[?status=true]` | ワークスペース |
@@ -73,7 +75,9 @@ cookie はブラウザが自動で付けるので、ほかのサイトから送�
 | `GET /api/v1/workspace-terminal/{name}[?cols=&rows=]` | シェルの端末（WebSocket） |
 | `GET /api/v1/workspace-ports/{name}` | VM の中で公開したポートと、ブラウザで開く URL |
 | `DELETE /api/v1/workspace-ports/{name}?port=` | ポートの公開を取り消す |
-| `GET /api/v1/secrets[?owner=]` | シークレットの名前の一覧 |
+| `GET /api/v1/secrets[?owner=]` | シークレットの名前と定義の一覧 |
+| `GET /api/v1/secrets/{kind}[?owner=]` | シークレットの定義（値は返さない） |
+| `GET /api/v1/secret-templates` | シークレットの雛形（管理の画面と同じもの。定義だけ） |
 | `PUT /api/v1/secrets/{kind}[?owner=]` | シークレットを登録する |
 | `DELETE /api/v1/secrets/{kind}[?owner=]` | シークレットを消す |
 | `GET /api/v1/policy-scopes` | 見られる設定の層（ゲートウェイ、個人、Organization、team）と、変えられるか、規則の数、ワークスペース |
@@ -120,6 +124,17 @@ api /api/v1/workspaces/acme/web -X PATCH -d '{"running": false}'    # 止める
 api /api/v1/workspaces/acme/web -X DELETE                             # 204
 ```
 
+`GET /api/v1/owners` は、ワークスペースを作れる持ち主を、個人、Organization、その team の順に返す。
+`prefix` をワークスペースの名前の前に付けると、作るときの `name` になる。
+GitHub App を使っていれば、所属する Organization の team は、ワークスペースがなくても並ぶ（GitHub に尋ねた結果は 5 分覚えておく）。
+
+```sh
+api /api/v1/owners
+# [{"owner":"user:alice","kind":"user","name":"alice","prefix":""},
+#  {"owner":"org:acme","kind":"org","name":"acme","prefix":"acme/"},
+#  {"owner":"team:acme/dev","kind":"team","name":"acme/dev","prefix":"acme/dev/"}]
+```
+
 `root` を省いて作ると、持ち主（個人、Organization と team）の設定の既定を使う。
 `workspace_disk_gib` と `docker_disk_gib` は GiB で、省くとゲートウェイの設定の既定を使う。
 変えるときは大きくするだけで、今より小さい値と上限を超える値は 400 を返す。
@@ -135,7 +150,7 @@ api /api/v1/secrets/hf_token -X PUT -d @hf.json                                 
 api '/api/v1/secrets/hf_token?owner=acme/dev' -X PUT -d @hf.json
 api /api/v1/secrets/hf_token -X PUT -d '{"value": "hf_..."}'      # 値だけを変える（定義はそのまま）
 api /api/v1/secrets
-# {"names":["hf_token"],"owner":"alice"}
+# {"owner":"alice","names":["hf_token"],"entries":[{"name":"hf_token","owner":"alice","builtin":false,"spec":{...}}]}
 api /api/v1/secrets/hf_token
 # {"name":"hf_token","owner":"alice","builtin":false,"spec":{"fields":{"value":{...}},"inject":[...]}}
 api /api/v1/secrets/hf_token -X DELETE
@@ -149,6 +164,18 @@ api /api/v1/secrets/hf_token -X DELETE
 ```
 
 値はシェルの履歴に残らないよう、ファイルや標準入力から渡す（`-d @value.json`）。
+
+定義（環境変数、プレースホルダー、規則、ファイル）を一つでも書くと、定義を置き換える。
+そのときは、すべての欄の値も書く（欄がいくつもあるシークレットの値を替えるときも、`fields` に定義と値を書く）。
+登録してある値を残して定義だけを変えることはできない。
+差し替えの宛先を変えるには、値を知っている人が値を入れ直す必要があるので、Web の画面のセッションを奪われても、登録してある本物の値をほかの宛先へ送らせることはできない。
+`entries` は名前と定義を返す（GitHub のユーザートークン `github_user_token` は含まない）。
+`/api/v1/owners` の `can_manage_secrets` は、その持ち主のシークレットを変えられるかを示す。
+
+```sh
+api /api/v1/secret-templates
+# [{"name":"anthropic_api_key","spec":{"fields":{"value":{"env":["ANTHROPIC_API_KEY"],"placeholder":"sk-ant-api03-{id}"}},"inject":[...]}}, ...]
+```
 
 ### 個人、Organization、team の設定
 
