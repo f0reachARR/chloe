@@ -362,6 +362,49 @@
         }
       }
     },
+    "/api/v1/owners": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "description": "利用者が入れる持ち主 (ワークスペースを作れる先) を、個人、Organization、その team の順に返す。",
+        "operationId": "list_owners",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OwnerEntry"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "ゲートウェイの誤り",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/policies/{owner}": {
       "get": {
         "tags": [
@@ -2389,6 +2432,42 @@
             "format": "int64"
           }
         }
+      },
+      "OwnerEntry": {
+        "type": "object",
+        "description": "利用者が入れる持ち主。",
+        "required": [
+          "owner",
+          "kind",
+          "name",
+          "prefix"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/OwnerKind"
+          },
+          "name": {
+            "type": "string",
+            "description": "画面に出す名前 (`alice`、`acme`、`acme/dev`)。"
+          },
+          "owner": {
+            "type": "string",
+            "description": "`user:alice`、`org:acme`、`team:acme/dev` (設定の層と同じ書き方)。"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "ワークスペースの名前の前に付ける部分 (``、`acme/`、`acme/dev/`)。"
+          }
+        }
+      },
+      "OwnerKind": {
+        "type": "string",
+        "description": "持ち主の種類。",
+        "enum": [
+          "user",
+          "org",
+          "team"
+        ]
       },
       "PathRuleConfig": {
         "type": "object",

@@ -906,15 +906,21 @@ pub struct ScopeEntry {
     pub editable: bool,
 }
 
-/// 利用者が見られるスコープを、gateway、個人、Organization、その team の順に並べる。
-/// それぞれの持ち主のすぐあとに、そのワークスペースを置く。
-pub async fn rule_scopes(shared: &Shared, login: &str) -> Result<Vec<ScopeEntry>> {
+/// 利用者が入れる持ち主を、個人、Organization、その team の順に並べる。
+pub async fn owners(shared: &Shared, login: &str) -> Result<Vec<Owner>> {
     let mut owners = shared.owners_for(login).await?;
     owners.sort_by_key(|owner| match owner {
         Owner::User(_) => (0, String::new(), String::new()),
         Owner::Org(org) => (1, org.clone(), String::new()),
         Owner::Team { org, team } => (1, org.clone(), team.clone()),
     });
+    Ok(owners)
+}
+
+/// 利用者が見られるスコープを、gateway、個人、Organization、その team の順に並べる。
+/// それぞれの持ち主のすぐあとに、そのワークスペースを置く。
+pub async fn rule_scopes(shared: &Shared, login: &str) -> Result<Vec<ScopeEntry>> {
+    let owners = owners(shared, login).await?;
     let workspaces = shared.controller.store().list(&owners).await?;
     let mut entries = vec![ScopeEntry {
         scope: RuleScope::Gateway,

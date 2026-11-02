@@ -158,6 +158,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/owners": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 利用者が入れる持ち主 (ワークスペースを作れる先) を、個人、Organization、その team の順に返す。 */
+        get: operations["list_owners"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/policies/{owner}": {
         parameters: {
             query?: never;
@@ -556,6 +573,21 @@ export interface components {
             /** Format: int64 */
             token?: number | null;
         };
+        /** @description 利用者が入れる持ち主。 */
+        OwnerEntry: {
+            kind: components["schemas"]["OwnerKind"];
+            /** @description 画面に出す名前 (`alice`、`acme`、`acme/dev`)。 */
+            name: string;
+            /** @description `user:alice`、`org:acme`、`team:acme/dev` (設定の層と同じ書き方)。 */
+            owner: string;
+            /** @description ワークスペースの名前の前に付ける部分 (``、`acme/`、`acme/dev/`)。 */
+            prefix: string;
+        };
+        /**
+         * @description 持ち主の種類。
+         * @enum {string}
+         */
+        OwnerKind: "user" | "org" | "team";
         PathRuleConfig: {
             action: components["schemas"]["Action"];
             hosts: string[];
@@ -1043,6 +1075,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Me"];
+                };
+            };
+            /** @description 誤り */
+            "4XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description ゲートウェイの誤り */
+            "5XX": {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_owners: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerEntry"][];
                 };
             };
             /** @description 誤り */

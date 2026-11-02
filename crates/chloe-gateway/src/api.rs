@@ -18,6 +18,7 @@
 //! PATCH  /api/v1/workspaces/{name}          {"root": "ephemeral"}、{"docker_disk_gib": 80}、{"memory_mib": 16384}、
 //!                                       {"idle_timeout": "never"} か {"running": false}
 //! DELETE /api/v1/workspaces/{name}[?disks=true]   disks=true ならディスクも消す
+//! GET    /api/v1/owners                     入れる持ち主 (個人、Organization、team)
 //! GET    /api/v1/secrets[?owner=acme]       シークレットの名前の一覧
 //! GET    /api/v1/secrets/{name}[?owner=..]  シークレットの定義 (値は返さない)
 //! PUT    /api/v1/secrets/{name}[?owner=..]  {"value": "..."} か、定義と値
@@ -142,6 +143,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
                 .patch(update_workspace)
                 .delete(remove_workspace),
         )
+        .route("/api/v1/owners", get(list_owners))
         .route("/api/v1/secrets", get(list_secrets))
         .route(
             "/api/v1/secrets/{name}",
@@ -191,7 +193,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
     info(title = "chloe", description = "chloe のゲートウェイの管理 API"),
     paths(
         me, events, list_workspaces, create_workspace, show_workspace, update_workspace,
-        remove_workspace, workspace_requests, list_secrets, show_secret, set_secret, remove_secret,
+        remove_workspace, workspace_requests, list_owners, list_secrets, show_secret, set_secret, remove_secret,
         show_workspace_policy, set_workspace_policy, remove_workspace_policy, workspace_rules,
         policy_scopes, policy_rules, show_own_policy,
         set_own_policy, remove_own_policy, show_policy, set_policy, remove_policy, list_tokens,
@@ -976,6 +978,52 @@ async fn workspace_rules(
         version: view.version,
     })
     .into_response())
+}
+
+/// 持ち主の種類。
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum OwnerKind {
+    User,
+    Org,
+    Team,
+}
+
+/// 利用者が入れる持ち主。
+#[derive(Serialize, ToSchema)]
+struct OwnerEntry {
+    /// `user:alice`、`org:acme`、`team:acme/dev` (設定の層と同じ書き方)。
+    owner: String,
+    kind: OwnerKind,
+    /// 画面に出す名前 (`alice`、`acme`、`acme/dev`)。
+    name: String,
+    /// ワークスペースの名前の前に付ける部分 (``、`acme/`、`acme/dev/`)。
+    prefix: String,
+}
+
+#[utoipa::path(get, path = "/api/v1/owners", tag = "workspaces", description = "利用者が入れる持ち主 (ワークスペースを作れる先) を、個人、Organization、その team の順に返す。", responses((status = 200, body = Vec<OwnerEntry>), (status = "4XX", description = "誤り", body = ErrorBody), (status = "5XX", description = "ゲートウェイの誤り", body = ErrorBody)))]
+async fn list_owners(
+    State(shared): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+) -> Result<Response, ops::Error> {
+    let entries: Vec<OwnerEntry> = ops::owners(&shared, &caller.login)
+        .await?
+        .into_iter()
+        .map(|owner| {
+            let (kind, prefix) = match &owner {
+                Owner::User(_) => (OwnerKind::User, String::new()),
+                Owner::Org(org) => (OwnerKind::Org, format!("{org}/")),
+                Owner::Team { org, team } => (OwnerKind::Team, format!("{org}/{team}/")),
+            };
+            OwnerEntry {
+                owner: owner.to_string(),
+                kind,
+                name: owner_arg(&owner),
+                prefix,
+            }
+        })
+        .collect();
+    Ok(Json(entries).into_response())
 }
 
 /// 設定の層の種類。
