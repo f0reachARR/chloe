@@ -13,6 +13,7 @@ import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppInboxRouteImport } from './routes/_app/inbox'
 import { Route as AppPoliciesRouteImport } from './routes/_app/policies'
+import { Route as AppSecretsRouteImport } from './routes/_app/secrets'
 import { Route as AppTerminalRouteImport } from './routes/_app/terminal'
 import { Route as AppWorkspacesRouteImport } from './routes/_app/workspaces'
 import { Route as LoginIndexRouteImport } from './routes/login/index'
@@ -35,6 +36,11 @@ const AppInboxRoute = AppInboxRouteImport.update({
 const AppPoliciesRoute = AppPoliciesRouteImport.update({
   id: '/policies',
   path: '/policies',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSecretsRoute = AppSecretsRouteImport.update({
+  id: '/secrets',
+  path: '/secrets',
   getParentRoute: () => AppRoute,
 } as any)
 const AppTerminalRoute = AppTerminalRouteImport.update({
@@ -62,6 +68,7 @@ export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/inbox': typeof AppInboxRoute
   '/policies': typeof AppPoliciesRoute
+  '/secrets': typeof AppSecretsRoute
   '/terminal': typeof AppTerminalRoute
   '/workspaces': typeof AppWorkspacesRoute
   '/login/link': typeof LoginLinkRoute
@@ -70,6 +77,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/inbox': typeof AppInboxRoute
   '/policies': typeof AppPoliciesRoute
+  '/secrets': typeof AppSecretsRoute
   '/terminal': typeof AppTerminalRoute
   '/workspaces': typeof AppWorkspacesRoute
   '/login/link': typeof LoginLinkRoute
@@ -81,6 +89,7 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_app/inbox': typeof AppInboxRoute
   '/_app/policies': typeof AppPoliciesRoute
+  '/_app/secrets': typeof AppSecretsRoute
   '/_app/terminal': typeof AppTerminalRoute
   '/_app/workspaces': typeof AppWorkspacesRoute
   '/login/link': typeof LoginLinkRoute
@@ -93,6 +102,7 @@ export interface FileRouteTypes {
     | '/'
     | '/inbox'
     | '/policies'
+    | '/secrets'
     | '/terminal'
     | '/workspaces'
     | '/login/link'
@@ -101,6 +111,7 @@ export interface FileRouteTypes {
   to:
     | '/inbox'
     | '/policies'
+    | '/secrets'
     | '/terminal'
     | '/workspaces'
     | '/login/link'
@@ -111,6 +122,7 @@ export interface FileRouteTypes {
     | '/_app'
     | '/_app/inbox'
     | '/_app/policies'
+    | '/_app/secrets'
     | '/_app/terminal'
     | '/_app/workspaces'
     | '/login/link'
@@ -154,6 +166,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppPoliciesRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/secrets': {
+      id: '/_app/secrets'
+      path: '/secrets'
+      fullPath: '/secrets'
+      preLoaderRoute: typeof AppSecretsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/terminal': {
       id: '/_app/terminal'
       path: '/terminal'
@@ -188,6 +207,7 @@ declare module '@tanstack/react-router' {
 interface AppRouteChildren {
   AppInboxRoute: typeof AppInboxRoute
   AppPoliciesRoute: typeof AppPoliciesRoute
+  AppSecretsRoute: typeof AppSecretsRoute
   AppTerminalRoute: typeof AppTerminalRoute
   AppWorkspacesRoute: typeof AppWorkspacesRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -196,6 +216,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppInboxRoute: AppInboxRoute,
   AppPoliciesRoute: AppPoliciesRoute,
+  AppSecretsRoute: AppSecretsRoute,
   AppTerminalRoute: AppTerminalRoute,
   AppWorkspacesRoute: AppWorkspacesRoute,
   AppIndexRoute: AppIndexRoute,

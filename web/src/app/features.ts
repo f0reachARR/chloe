@@ -2,6 +2,7 @@
 // ワークスペースの設定は、各機能が申告したものから組む)。ルートは src/routes にファイルを足す。
 import { inboxFeature } from '@/features/inbox';
 import { policiesFeature } from '@/features/policies';
+import { secretsFeature } from '@/features/secrets';
 import { workspacesFeature } from '@/features/workspaces';
 import type {
   Feature,
@@ -12,7 +13,12 @@ import type {
 import type { WorkspaceOverlay } from '@/shared/overlays';
 import type { ComponentType } from 'react';
 
-export const features: Feature[] = [inboxFeature, workspacesFeature, policiesFeature];
+export const features: Feature[] = [
+  inboxFeature,
+  workspacesFeature,
+  policiesFeature,
+  secretsFeature,
+];
 
 export const navItems: NavItem[] = features.flatMap((feature) => feature.nav ?? []);
 
