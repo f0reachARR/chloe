@@ -1,46 +1,46 @@
-# 設定
+# Configuration
 
-設定のファイルは TOML で書く。
-知らない項目があると、読み込みに失敗する（書き間違いに気付けるように）。
-相対パスは、プロセスを起動したディレクトリから解決する。
-systemd で動かすときは、すべて絶対パスで書く。
+Configuration files are written in TOML.
+Unknown keys cause loading to fail (so that typos get noticed).
+Relative paths are resolved from the directory the process was started in.
+When running under systemd, use absolute paths everywhere.
 
-| ファイル | 読むもの | 例 |
+| File | Read by | Example |
 | --- | --- | --- |
-| ゲートウェイの設定 | `chloe-gateway --config` | `deploy/gateway.toml`（開発用は `images/guest/dev/gateway.example.toml`） |
-| `chloe-node` の設定 | `chloe-node run --config` | `deploy/node.toml` |
-| GitHub App の設定 | ゲートウェイの設定の `github_app` | [GitHub App の準備](github-app.md) |
-| 個人、Organization、team の設定とワークスペースの規則 | `chloe policy set`、`chloe ws policy set`、管理 API、管理の画面 | 下の「個人、Organization、team の設定」と「ワークスペースの規則」 |
+| Gateway configuration | `chloe-gateway --config` | `deploy/gateway.toml` (for development, `images/guest/dev/gateway.example.toml`) |
+| `chloe-node` configuration | `chloe-node run --config` | `deploy/node.toml` |
+| GitHub App configuration | `github_app` in the gateway configuration | [Setting up the GitHub App](github-app.md) |
+| User, organization, and team settings and workspace rules | `chloe policy set`, `chloe ws policy set`, the admin API, the admin TUI | [User, organization, and team settings](#user-organization-and-team-settings) and [Workspace rules](#workspace-rules) below |
 
-## ゲートウェイ
+## Gateway
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `listen` | （必須） | SSH の待ち受け（`0.0.0.0:22` など） |
-| `host_key` | （必須） | SSH のホスト鍵（OpenSSH の形式）。なければ作る |
-| `database` | （必須） | SQLite のデータベース。なければ作る |
-| `master_key` | （必須） | シークレットを暗号化する鍵。なければ作る |
-| `audit_log` | なし | 監査ログ（JSON Lines、権限 600）を追記するファイル |
-| `github_url` | `https://github.com` | 公開鍵を読む先（`{github_url}/{login}.keys`） |
-| `ssh_user` | `chloe` | 誰でも使う SSH のユーザー名。このユーザー名と GitHub に存在しない名前では、利用者を結び付けた公開鍵か Device Flow で決める（`github_app` が要る） |
-| `github_app` | なし | GitHub App の設定のパス |
-| `allowed_users` | `[]` | ログインを許す GitHub のログイン名。GitHub App の Organization のメンバーに加えて許す |
-| `admins` | `[]` | サーバーの運用者。どの Organization と team の設定とシークレットも変えられる |
-| `memberships` | `{}` | 共有ワークスペースに入れる利用者を、GitHub の所属に加えて書く（開発用） |
-| `idle_timeout_secs` | `1800` | 最後の接続が切れてから VM を止めるまでの秒数。利用者は `chloe ws idle` でワークスペースごとに変えられる |
-| `activity_poll_secs` | `60` | エージェントが作業中のとき、作業中かを尋ね直す間隔の秒数 |
-| `max_busy_wait_secs` | `43200` | エージェントが作業中でも、この秒数が経ったら止める |
-| `reconcile_interval_secs` | `60` | 動いているランナーと記録を突き合わせる間隔の秒数 |
-| `[github_token]` | github.com 向け | GitHub のトークンを VM に渡す定義（下を参照） |
-| `[policy]` | 空 | すべてのワークスペースに共通の許可リストと規則 |
-| `[machine]` | 下を参照 | ワークスペースの VM の vCPU の数とメモリの既定 |
-| `[disks]` | 下を参照 | ワークスペースのディスクの大きさの既定と上限 |
-| `[runner]` | — | 同じホストの Docker にランナーを置く。`[cluster]` とどちらか一方を書く |
-| `[cluster]` | — | 複数のホスト（`chloe-node`）にランナーを置く |
-| `[api]` | なし | HTTP(S) の管理 API |
-| `[ban]` | 下を参照 | 認証を通らない接続が多い接続元を、しばらく受け付けない |
+| `listen` | (required) | SSH listen address (e.g. `0.0.0.0:22`) |
+| `host_key` | (required) | SSH host key (OpenSSH format). Created if missing |
+| `database` | (required) | SQLite database. Created if missing |
+| `master_key` | (required) | Key that encrypts secrets. Created if missing |
+| `audit_log` | none | File the audit log (JSON Lines, mode 600) is appended to |
+| `github_url` | `https://github.com` | Where public keys are fetched from (`{github_url}/{login}.keys`) |
+| `ssh_user` | `chloe` | Shared SSH user name anyone can use. With this name, or a name that does not exist on GitHub, the user is determined by a linked public key or by Device Flow (requires `github_app`) |
+| `github_app` | none | Path to the GitHub App configuration |
+| `allowed_users` | `[]` | GitHub logins allowed to log in, in addition to members of the GitHub App's organizations |
+| `admins` | `[]` | Server operators. They can change any organization's and team's settings and secrets |
+| `memberships` | `{}` | Users who may enter shared workspaces, in addition to their GitHub memberships (for development) |
+| `idle_timeout_secs` | `1800` | Seconds after the last connection closes before the VM is stopped. Users can change it per workspace with `chloe ws idle` |
+| `activity_poll_secs` | `60` | While an agent is busy, how often (in seconds) to ask again whether it is busy |
+| `max_busy_wait_secs` | `43200` | Stop the VM after this many seconds even if an agent is busy |
+| `reconcile_interval_secs` | `60` | How often (in seconds) to reconcile running runners with the records |
+| `[github_token]` | for github.com | How the GitHub token is passed to the VM (see below) |
+| `[policy]` | empty | Allowlist and rules shared by all workspaces |
+| `[machine]` | see below | Default vCPU count and memory for workspace VMs |
+| `[disks]` | see below | Default and maximum workspace disk sizes |
+| `[runner]` | — | Place runners in Docker on the same host. Write either this or `[cluster]` |
+| `[cluster]` | — | Place runners on multiple hosts (`chloe-node`) |
+| `[api]` | none | HTTP(S) admin API |
+| `[ban]` | see below | Temporarily refuse sources with many connections that fail authentication |
 
-`memberships` は、持ち主ごとにログイン名を並べる。
+`memberships` lists logins per owner.
 
 ```toml
 [memberships]
@@ -50,10 +50,10 @@ systemd で動かすときは、すべて絶対パスで書く。
 
 ### `[github_token]`
 
-GitHub のトークン（`github_token`）を、VM のどの環境変数に入れ、どの宛先のどのヘッダーで差し替えるかを決める。
-書き方は、[シークレットの定義](usage.md#シークレット)から値を除いたものである。
-欄は一つ（`value`）に限る（値は GitHub App やトークンの登録から決まるため）。
-省くと次の定義を使う。
+Defines which environment variables in the VM receive the GitHub token (`github_token`), and which header for which destinations it is injected into.
+The format is the [secret definition](usage.md#シークレット) without the value.
+Only one field (`value`) is allowed (the value comes from the GitHub App or the registered token).
+If omitted, the following definition is used.
 
 ```toml
 [github_token]
@@ -63,38 +63,38 @@ placeholder = "ghu_{id}"
 [[github_token.inject]]
 hosts = ["github.com"]
 header = "authorization"
-format = "basic-password"          # git の HTTPS（Basic 認証のパスワード）
+format = "basic-password"          # git over HTTPS (Basic auth password)
 
 [[github_token.inject]]
 hosts = ["api.github.com", "uploads.github.com"]
 header = "authorization"
 ```
 
-GitHub Enterprise Server に向けるときは、`hosts` をそのホストに書き換える。
-GitHub App の設定の `api_url` と `web_url` も、同じホストに合わせる。
+To target GitHub Enterprise Server, change `hosts` to that server's hosts.
+Set `api_url` and `web_url` in the GitHub App configuration to the same hosts.
 
 ### `[policy]`
 
-すべてのワークスペースに共通の、VM から外への通信の決まりである。
-宛先、メソッド、パスの規則（`[[policy.rules]]`）で書く。
+The rules for outbound traffic from VMs, shared by all workspaces.
+They are written as rules on destination, method, and path (`[[policy.rules]]`).
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `allow_personal_rules` | `false` | 利用者が、自分の個人の設定と個人のワークスペースの規則を変えられるようにする（[設定の重ね方](#設定の重ね方)）。個人のワークスペースのエージェントが頼んだ通信の許可を承認できるのも、有効にしたときだけ |
+| `allow_personal_rules` | `false` | Let users change their own user settings and their personal workspaces' rules ([Configuration layers](#configuration-layers)). Only when enabled can users also approve network access requested by agents in their personal workspaces |
 
-規則の項目は次のとおりである。
+Rules have the following keys.
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `name` | なし | ログに残す名前 |
-| `hosts` | （必須） | 宛先 |
-| `methods` | すべてのメソッド | メソッド |
-| `paths` | すべてのパス | パス |
-| `action` | （必須） | `allow`（許す）、`deny`（拒否する）、`passthrough`（復号せずに中継だけする） |
+| `name` | none | Name recorded in logs |
+| `hosts` | (required) | Destinations |
+| `methods` | all methods | Methods |
+| `paths` | all paths | Paths |
+| `action` | (required) | `allow`, `deny`, or `passthrough` (relay without decrypting) |
 
-規則は上から順に評価し、最初に一致した規則で決める。
-どの規則にも一致しなければ遮断する。
-そのため、パスを絞った `allow` の規則は、その宛先のほかのパスを許さない。
+Rules are evaluated top to bottom, and the first matching rule decides.
+If no rule matches, the request is blocked.
+So an `allow` rule restricted to certain paths does not allow other paths on that destination.
 
 ```toml
 [[policy.rules]]
@@ -114,198 +114,198 @@ hosts = ["registry-1.docker.io", "*.docker.com"]
 action = "passthrough"
 ```
 
-宛先は名前で書く。
-`*.example.com` は example.com のサブドメインに一致し、example.com そのものには一致しない。
-VM の DNS は、`allow` と `passthrough` の規則にある名前だけを上流に問い合わせる（`*.example.com` は、DNS では example.com そのものも問い合わせる）。
-ほかの名前には、上流に問い合わせずにプロキシのアドレスを答える。そこへの HTTP(S) は、プロキシが 403 で断る。
-DNS の問い合わせに情報を載せて外へ持ち出せないようにするためである。
-一語だけの名前と、`.local`、`.internal`、`.lan`、`.home.arpa` の名前は引けない。
+Destinations are written as host names.
+`*.example.com` matches subdomains of example.com, but not example.com itself.
+The VM's DNS forwards upstream only names that appear in `allow` and `passthrough` rules (for DNS, `*.example.com` also forwards example.com itself).
+For any other name, it answers with the proxy's address without asking upstream; HTTP(S) to it is refused by the proxy with 403.
+This prevents exfiltrating data through DNS queries.
+Single-label names and names under `.local`, `.internal`, `.lan`, and `.home.arpa` cannot be resolved.
 
-`passthrough` は、証明書を固定するクライアント向けである。
-復号しないので、規則も差し替えも効かない。
-`methods` と `paths` は書けない。
-また、ほかの規則と宛先が重なってはいけない（`*.docker.com` と `hub.docker.com` のように、どちらにも一致する名前があれば重なる）。
-接続の時点で中継に決まるので、重なると、もう一方の規則が順番にかかわらず効かなくなるためである。
-重なりがあると、ゲートウェイは起動しない。
+`passthrough` is for clients that pin certificates.
+Since traffic is not decrypted, neither rules nor injection apply.
+`methods` and `paths` cannot be set.
+Its destinations also must not overlap with those of other rules (they overlap if some name matches both, as with `*.docker.com` and `hub.docker.com`).
+Passthrough is decided at connection time, so on overlap the other rule would never take effect, regardless of order.
+The gateway does not start if there is an overlap.
 
-シークレットの差し替えと署名の宛先（`api.anthropic.com` や、登録した定義の `hosts`）は、そのシークレットを使うワークスペースでだけ、`allow` の規則として一番後ろに足す。
-ただし、すでにどれかの規則に書いた宛先と重なる宛先には足さない（`*.amazonaws.com` は、規則に `s3.amazonaws.com` があれば足さない）。
-足すと、パスを絞って許した宛先のほかのパスまで許してしまうためである。
-規則に書いた宛先は、書いた規則だけで許すかどうかが決まる。
+Destinations used for secret injection and signing (`api.anthropic.com`, or the `hosts` of a registered definition) are appended as a final `allow` rule, only in workspaces that use that secret.
+However, a destination is not appended if it overlaps with a destination already written in some rule (`*.amazonaws.com` is not appended if a rule has `s3.amazonaws.com`).
+Appending it would allow other paths on a destination you allowed only for certain paths.
+For destinations written in rules, only those rules decide whether traffic is allowed.
 
-パスはグロブで書く。
-`*` は `/` を含まない文字列に、一つの階層まるごとの `**` は 0 個以上の階層に一致する。
-照合の前にパスを正規化し（パーセントエンコードを戻し、`//`、`.`、`..` を解決する）、大文字と小文字を区別しない。
-クエリは照合に含めない。
+Paths are globs.
+`*` matches a string not containing `/`, and `**` as a whole path segment matches zero or more segments.
+Paths are normalized before matching (percent-encoding decoded, `//`, `.`, and `..` resolved), and matching is case-insensitive.
+The query string is not part of matching.
 
 ### `[runner]`
 
-同じホストで、ワークスペースごとにランナーを起動する。
-`kind` で、ランナーの動かし方を選ぶ。
+Starts a runner per workspace on the same host.
+`kind` selects how runners are run.
 
-| `kind` | 動かし方 |
+| `kind` | How runners are run |
 | --- | --- |
-| `docker`（既定） | ランナーのコンテナ（`chloe-dev-runner`）を Docker の特権コンテナで起動する。ゲートウェイを動かす利用者は `docker` のグループに入る |
-| `systemd` | ランナーを systemd の unit（`chloe-runner@ws-<番号>.service`）で起動する。root で動くのはネットワークの準備だけで、ゲートウェイを動かす利用者に root の権限は要らない（[インストール](install.md#ランナーとホストのネットワーク)） |
+| `docker` (default) | Starts the runner container (`chloe-dev-runner`) as a privileged Docker container. The user running the gateway must be in the `docker` group |
+| `systemd` | Starts the runner as a systemd unit (`chloe-runner@ws-<number>.service`). Only network setup runs as root; the user running the gateway needs no root privileges ([Installation](install.md#ランナーとホストのネットワーク)) |
 
-`kind = "docker"` のときの項目は次のとおり。
+With `kind = "docker"`, the keys are as follows.
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `guest_dir` | （必須） | カーネル（`kernel/vmlinux`）とルートファイルシステム（`rootfs.ext4`）のディレクトリ |
-| `egress_bin` | （必須） | コンテナに渡す `chloe-egress` のバイナリ |
-| `state_root` | （必須） | ワークスペースごとの状態（ディスク、ログ、CA）を置くディレクトリ |
-| `image` | `chloe-dev-runner` | ランナーのコンテナのイメージ |
-| `name_prefix` | `chloe-` | コンテナの名前の接頭辞。同じホストで複数のゲートウェイを動かすときに分ける |
+| `guest_dir` | (required) | Directory with the kernel (`kernel/vmlinux`) and root filesystem (`rootfs.ext4`) |
+| `egress_bin` | (required) | `chloe-egress` binary passed into the container |
+| `state_root` | (required) | Directory for per-workspace state (disks, logs, CA) |
+| `image` | `chloe-dev-runner` | Runner container image |
+| `name_prefix` | `chloe-` | Container name prefix. Use different prefixes when running multiple gateways on the same host |
 
-`kind = "systemd"` のときの項目は次のとおり。
-パスは、ランナーの unit と同じファイル（`env_file`）から読む。
+With `kind = "systemd"`, the keys are as follows.
+Paths are read from the same file the runner unit reads (`env_file`).
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `env_file` | `/etc/chloe/runner.env` | ランナーの設定のファイル |
+| `env_file` | `/etc/chloe/runner.env` | Runner configuration file |
 
-`env_file` は `KEY=VALUE` の行で書く（例は `deploy/runner.env`）。
-ランナーの unit のうち root で動く部分も読むので、root だけが書けるようにする。
+`env_file` consists of `KEY=VALUE` lines (see `deploy/runner.env` for an example).
+The parts of the runner unit that run as root also read it, so make it writable only by root.
 
-| 項目 | 内容 |
+| Key | Description |
 | --- | --- |
-| `CHLOE_STATE_ROOT` | ワークスペースごとの状態を置くディレクトリ（絶対パス）。ゲートウェイを動かす利用者が書けること |
-| `CHLOE_GUEST_DIR` | カーネルとルートファイルシステムのディレクトリ |
-| `CHLOE_EGRESS_BIN` | `chloe-egress` のバイナリ |
-| `CHLOE_NET_POOL` | ランナーのネットワーク namespace とホストをつなぐ veth のアドレス（既定 `10.250.0.0/16`）。ランナー一つに /30 を使うので、/16 なら 16384 個まで同時に動かせる。ホストのネットワークと重ならない範囲にする |
+| `CHLOE_STATE_ROOT` | Directory for per-workspace state (absolute path). Must be writable by the user running the gateway |
+| `CHLOE_GUEST_DIR` | Directory with the kernel and root filesystem |
+| `CHLOE_EGRESS_BIN` | `chloe-egress` binary |
+| `CHLOE_NET_POOL` | Addresses for the veth pairs connecting runner network namespaces to the host (default `10.250.0.0/16`). Each runner uses a /30, so a /16 allows up to 16384 runners at once. Choose a range that does not overlap the host's networks |
 
-一つのホストに置けるランナーの設定は一組である（unit がこのファイルを読むため）。
+A host can have only one runner configuration (because the unit reads this file).
 
-VM の vCPU の数とメモリの既定は `[machine]`、ディスクの大きさは `[disks]` で決める。
-ゲートウェイはワークスペースごとの値をランナーの設定に書くので、`runner.env` に `VCPUS` や `MEM_MIB` を書いても効かない。
+Default VM vCPU count and memory are set in `[machine]`, and disk sizes in `[disks]`.
+The gateway writes per-workspace values into the runner configuration, so `VCPUS` or `MEM_MIB` in `runner.env` have no effect.
 
 ### `[machine]`
 
-ワークスペースの VM の大きさの既定。
-利用者は `chloe ws create` と `chloe ws machine` で、ワークスペースごとに変えられる。
+Default size of workspace VMs.
+Users can change it per workspace with `chloe ws create` and `chloe ws machine`.
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `vcpus` | `4` | vCPU の数（1 から 32） |
-| `memory_mib` | `4096` | メモリ（MiB、512 以上） |
+| `vcpus` | `4` | Number of vCPUs (1 to 32) |
+| `memory_mib` | `4096` | Memory (MiB, at least 512) |
 
-上限は置かない。
-Firecracker はホストの CPU とメモリを超えて VM に割り当てられるので、大きな VM がいくつも動くと、ホストのメモリが足りなくなる可能性がある。
+There is no upper limit.
+Firecracker can allocate more CPU and memory to VMs than the host has, so many large VMs running at once can exhaust the host's memory.
 
 ### `[disks]`
 
-ワークスペースのディスクと Docker のディスクの大きさ（GiB）。
-利用者は `chloe ws create` と `chloe ws disk` で、ワークスペースごとに上限まで大きくできる。
+Sizes (GiB) of the workspace disk and the Docker disk.
+Users can grow them per workspace, up to the maximum, with `chloe ws create` and `chloe ws disk`.
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `workspace_gib` | `20` | ワークスペースのディスク（`/workspace`、ホームディレクトリ、永続のルートの層）の既定 |
-| `docker_gib` | `40` | Docker のディスクの既定 |
-| `max_workspace_gib` | `200` | ワークスペースのディスクの上限 |
-| `max_docker_gib` | `400` | Docker のディスクの上限 |
+| `workspace_gib` | `20` | Default workspace disk size (`/workspace`, the home directory, the persistent root layer) |
+| `docker_gib` | `40` | Default Docker disk size |
+| `max_workspace_gib` | `200` | Maximum workspace disk size |
+| `max_docker_gib` | `400` | Maximum Docker disk size |
 
-ディスクは疎なファイルなので、ホストの容量は大きさではなく使った分だけ消費する。
-そのため、ワークスペースの数に上限を掛けた値はホストの容量を超えていても起動できる。
-ただし、利用者がディスクを使い込むと、ホストのディスクがあふれる可能性がある。
-上限は、ホストの空き容量とワークスペースの数を見て決める。
+Disks are sparse files, so they consume host storage only for what is used, not their full size.
+So workspaces can start even if the number of workspaces times the maximum exceeds host capacity.
+However, if users fill their disks, the host's disk can run out.
+Choose the maximums based on the host's free space and the number of workspaces.
 
-大きさを指定していないワークスペースは、既定を上げると次の起動で広がる。
-既定を下げても、すでにあるディスクは縮まない。
-`[cluster]` のときも、ここに書く（`chloe-node` の設定には書かない）。
-ディスクを広げるのはランナーである。
-ランナーを Docker で動かすときは、更新したあと、どのホストでもランナーのコンテナのイメージ（`chloe-dev-runner`）をビルドし直す（[インストール](install.md#ランナーを-docker-で動かす)）。
+Workspaces without an explicit size grow on their next start when you raise the default.
+Lowering the default does not shrink existing disks.
+With `[cluster]`, set these here too (not in the `chloe-node` configuration).
+The runner is what grows the disk.
+When running runners in Docker, rebuild the runner container image (`chloe-dev-runner`) on every host after updating ([Installation](install.md#ランナーを-docker-で動かす)).
 
 ### `[cluster]`
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `listen` | （必須） | `chloe-node` から受ける内部 API（相互 TLS）の待ち受け |
-| `server_names` | （必須） | 内部 API の証明書に入れる名前。`chloe-node` がつなぐホスト名か IP アドレス |
-| `pki_dir` | （必須） | CA の証明書と鍵を置くディレクトリ。なければ作る |
-| `join_ttl_secs` | `3600` | `node add` で作る参加用のトークンの有効期間 |
+| `listen` | (required) | Listen address of the internal API (mTLS) that `chloe-node` connects to |
+| `server_names` | (required) | Names put in the internal API's certificate: the host name or IP address `chloe-node` connects to |
+| `pki_dir` | (required) | Directory for the CA certificate and key. Created if missing |
+| `join_ttl_secs` | `3600` | Lifetime of join tokens created by `node add` |
 
-コントロールプレーンの証明書は、起動のたびに CA で発行し直す（鍵はファイルに置かない）。
+The control plane's certificate is reissued by the CA on every start (its key is not stored in a file).
 
 ### `[api]`
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `listen` | （必須） | 管理 API と Web の画面の待ち受け |
-| `tls_cert`、`tls_key` | なし | TLS の証明書と鍵（PEM）。どちらも書けば HTTPS、どちらもなければ HTTP |
-| `public_url` | なし | Web の画面をブラウザで開く URL（`https://chloe.example.com`。リバースプロキシを置くならその URL）。書くと Web の画面のログインを受け付ける。パスは書けない |
-| `web_root` | なし | Web の画面のファイル（deb では `/usr/share/chloe/web`）。なければ画面のファイルは出さず、`/api` だけを受ける |
-| `session_ttl_secs` | `1209600`（14 日） | Web の画面のセッションの有効期間 |
-| `proxy_url` | なし | VM の中で公開したポートを開くプロキシのホストの元（`https://preview.example.com`）。公開したポートごとに、ランダムな名前の `<名前>.<ドメイン>` のホストを割り当てる。書くには `public_url` も要る（ログインに Web の画面を使う）。パスは書けず、ホストは IP アドレスにできない |
+| `listen` | (required) | Listen address of the admin API and web UI |
+| `tls_cert`, `tls_key` | none | TLS certificate and key (PEM). HTTPS if both are set, HTTP if neither is |
+| `public_url` | none | URL used to open the web UI in a browser (`https://chloe.example.com`; if you put a reverse proxy in front, its URL). When set, web UI login is enabled. Must not contain a path |
+| `web_root` | none | Web UI files (`/usr/share/chloe/web` in the deb). If unset, no UI files are served and only `/api` is handled |
+| `session_ttl_secs` | `1209600` (14 days) | Web UI session lifetime |
+| `proxy_url` | none | Base for the proxy hosts that open ports published in the VM (`https://preview.example.com`). Each published port gets a host `<name>.<domain>` with a random name. Requires `public_url` too (login goes through the web UI). Must not contain a path, and the host cannot be an IP address |
 
-`public_url` は、GitHub のログインのコールバックの URL と、Web の画面のセッションで来た要求の `Origin` の確認に使う。
-`https://` なら cookie に `Secure` を付ける。
+`public_url` is used for the GitHub login callback URL and to check the `Origin` of requests made with a web UI session.
+If it is `https://`, cookies get the `Secure` attribute.
 
-`proxy_url` のドメインには、ワイルドカードの DNS（`*.preview.example.com`）と証明書が要る（[インストール](install.md#vm-の中のサーバーを開けるようにする)）。
-VM の中のページはエージェントが書き換えられるので、`public_url` とは登録できるドメインを分けることを勧める（`chloe.example.com` と `chloe-preview.example.net` のように）。
-同じサイトにすると、VM の中のページが、Web の画面の cookie を上書きしうる。
+The `proxy_url` domain needs wildcard DNS (`*.preview.example.com`) and a certificate ([Installation](install.md#vm-の中のサーバーを開けるようにする)).
+Agents can rewrite pages served from the VM, so we recommend using a different registrable domain than `public_url` (e.g. `chloe.example.com` and `chloe-preview.example.net`).
+If they are the same site, pages from the VM could overwrite the web UI's cookies.
 
 ### `[ban]`
 
-SSH の接続のうち、認証を通らずに終わったものを接続元ごとに数える。
-認証に失敗した接続も、何もせずに切った接続も、同じ一回に数える。
-`window_secs` のあいだにその数が `max_failures` に達した接続元は、`ban_secs` のあいだ SSH を始める前に切る。
-認証を通ると、それまでの数を忘れる。
-IPv4 はアドレスごと、IPv6 は /64 ごとに数える。
+SSH connections that end without passing authentication are counted per source.
+A failed authentication and a connection closed without doing anything each count as one.
+A source whose count reaches `max_failures` within `window_secs` is disconnected before SSH starts, for `ban_secs`.
+Successful authentication resets the count.
+IPv4 is counted per address, IPv6 per /64.
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `max_failures` | `10` | ban するまでの回数。`0` なら ban しない |
-| `window_secs` | `600` | 回数を数える期間の秒数 |
-| `ban_secs` | `600` | ban する秒数 |
-| `ignore` | `["127.0.0.0/8", "::1"]` | 数えない接続元（アドレスか CIDR） |
+| `max_failures` | `10` | Count at which a source is banned. `0` disables banning |
+| `window_secs` | `600` | Counting window in seconds |
+| `ban_secs` | `600` | Ban duration in seconds |
+| `ignore` | `["127.0.0.0/8", "::1"]` | Sources not counted (addresses or CIDRs) |
 
-ban したことは監査ログに残る。ban の状態はメモリにだけ置くので、ゲートウェイを再起動すると消える。
-ロードバランサーのヘルスチェックや監視は、SSH を始めずに切るので失敗に数える。それらの接続元は `ignore` に書く。
-`ignore` を書くと既定を置き換えるので、ループバックも数えないなら一緒に書く。
-接続元を書き換えるロードバランサー（PROXY プロトコルなし）の後ろでは、すべての接続が同じ接続元に見えるので、`max_failures = 0` にする。
+Bans are recorded in the audit log. Ban state is kept only in memory and is cleared when the gateway restarts.
+Load balancer health checks and monitoring disconnect without starting SSH, so they count as failures; list their sources in `ignore`.
+Setting `ignore` replaces the default, so include loopback too if you still want it excluded.
+Behind a load balancer that rewrites the source address (without the PROXY protocol), all connections appear to come from the same source, so set `max_failures = 0`.
 
 ## `chloe-node`
 
-| 項目 | 内容 |
+| Key | Description |
 | --- | --- |
-| `listen` | コントロールプレーンからの API（相互 TLS）の待ち受け。`node add` の URL と同じポートにする |
-| `credentials` | `chloe-node join` で受け取った証明書と鍵のディレクトリ |
-| `control_plane` | コントロールプレーンの内部 API の URL（本物の値の問い合わせを中継する先） |
-| `[runner]` | ゲートウェイの `[runner]` と同じ |
+| `listen` | Listen address of the API (mTLS) the control plane connects to. Use the same port as in the `node add` URL |
+| `credentials` | Directory with the certificate and key received from `chloe-node join` |
+| `control_plane` | URL of the control plane's internal API (where real-value lookups are relayed) |
+| `[runner]` | Same as the gateway's `[runner]` |
 
 ## GitHub App
 
-| 項目 | 既定 | 内容 |
+| Key | Default | Description |
 | --- | --- | --- |
-| `app_id` | （必須） | App ID |
-| `client_id` | （必須） | Client ID（Device Flow に使う） |
-| `private_key` | （必須） | 秘密鍵の参照（`file:/path/to/key.pem`、`env:NAME`、`op://vault/item/field`） |
-| `client_secret` | なし | client secret の参照。書くと、Web の画面に GitHub でログインできる（[GitHub App の準備](github-app.md#登録後に控える情報)） |
-| `organizations` | なし | 使う Organization を限る。書かなければ、アプリをインストールしたすべての Organization を使う |
-| `organization` | なし | `organizations` を一つだけ書くときの書き方 |
-| `api_url`、`web_url` | `https://api.github.com`、`https://github.com` | GitHub の API と Web の URL |
+| `app_id` | (required) | App ID |
+| `client_id` | (required) | Client ID (used for Device Flow) |
+| `private_key` | (required) | Reference to the private key (`file:/path/to/key.pem`, `env:NAME`, `op://vault/item/field`) |
+| `client_secret` | none | Reference to the client secret. When set, users can log in to the web UI with GitHub ([Setting up the GitHub App](github-app.md#登録後に控える情報)) |
+| `organizations` | none | Restrict which organizations are used. If unset, every organization the app is installed in is used |
+| `organization` | none | Shorthand for `organizations` with a single entry |
+| `api_url`, `web_url` | `https://api.github.com`, `https://github.com` | GitHub API and web URLs |
 
-アプリを Any account で公開すると、だれでも自分の Organization にアプリをインストールでき、そのメンバーが chloe にログインできるようになる。
-そのときは `organizations` で、使ってよい Organization に限る。
+If you make the app public (Any account), anyone can install it in their own organization, and its members can then log in to chloe.
+In that case, restrict `organizations` to the organizations allowed to use it.
 
-## 個人、Organization、team の設定
+## User, organization, and team settings
 
-`chloe policy set acme`（Organization）か `chloe policy set acme/dev`（team）で、TOML を標準入力から渡す。
-`chloe policy set` のように持ち主を省くと、自分の個人の設定になる。
-管理 API では、同じ項目を JSON で渡す。
-管理の画面では、規則は Rules タブで、そのほかは Settings タブで編集する。
+Pass TOML on standard input to `chloe policy set acme` (organization) or `chloe policy set acme/dev` (team).
+If you omit the owner, as in `chloe policy set`, you set your own user settings.
+The admin API takes the same keys as JSON.
+In the admin TUI, rules are edited in the Rules tab and everything else in the Settings tab.
 
-| 持ち主 | 変えられる人 |
+| Owner | Who can change it |
 | --- | --- |
-| Organization、team | GitHub でその Organization の管理者である利用者と、ゲートウェイの設定の `admins` |
-| 個人 | 本人。ゲートウェイの `[policy]` で `allow_personal_rules = true` にしたときだけ |
+| Organization, team | Users who are administrators of that organization on GitHub, and the gateway configuration's `admins` |
+| User | The user themselves, only when the gateway's `[policy]` has `allow_personal_rules = true` |
 
-| 項目 | 内容 |
+| Key | Description |
 | --- | --- |
-| `rules` | 足す規則（書き方はゲートウェイの `[[policy.rules]]` と同じ。`passthrough` は書けない） |
-| `root` | 新しく作るワークスペースのルートの扱いの既定（`ephemeral` か `persistent`） |
-| `[github]` | 共有ワークスペースに渡す GitHub のインストールトークンの範囲（個人の設定には書けない） |
+| `rules` | Additional rules (same format as the gateway's `[[policy.rules]]`; `passthrough` is not allowed) |
+| `root` | Default root handling for newly created workspaces (`ephemeral` or `persistent`) |
+| `[github]` | Scope of the GitHub installation token passed to shared workspaces (not allowed in user settings) |
 
 ```toml
 root = "persistent"
@@ -320,20 +320,20 @@ paths = ["/repos/acme/**"]
 action = "allow"
 
 [github]
-repositories = ["web", "api"]                  # 省くとインストールのすべてのリポジトリ
-permissions = { contents = "write", pull_requests = "write" }   # 省くとインストールの権限すべて
+repositories = ["web", "api"]                  # omit for all repositories in the installation
+permissions = { contents = "write", pull_requests = "write" }   # omit for all of the installation's permissions
 ```
 
-個人の設定は、その人が持ち主のワークスペース（個人のワークスペース）にだけ重ねる。
-その人が入る Organization や team のワークスペースには重ねない。
-共有のランナーの規則が、入った人によって変わらないようにするためである。
-個人のワークスペースは利用者自身の GitHub のトークンを使うので、`[github]` は書けない。
+User settings are layered only onto workspaces that user owns (personal workspaces).
+They are not layered onto organization or team workspaces the user enters.
+This keeps a shared runner's rules from changing depending on who enters it.
+Personal workspaces use the user's own GitHub token, so `[github]` is not allowed.
 
-## ワークスペースの規則
+## Workspace rules
 
-`chloe ws policy set acme/web` で、規則だけを TOML で標準入力から渡す。
-管理 API では `/api/v1/workspace-policies/{name}` に JSON で渡す。
-管理の画面では、Rules タブでワークスペースを選んで編集する。
+Pass only rules, as TOML on standard input, to `chloe ws policy set acme/web`.
+In the admin API, send JSON to `/api/v1/workspace-policies/{name}`.
+In the admin TUI, select the workspace in the Rules tab and edit it.
 
 ```toml
 [[rules]]
@@ -341,43 +341,43 @@ hosts = ["staging.example.com"]
 action = "allow"
 ```
 
-書けるのは `rules` だけである。
-`root` はワークスペースそのものが持つので、`chloe ws root` で変える。
-`[github]` は下の層ほど優先されるので、ワークスペースで書けると、持ち主の設定で絞った範囲を広げられてしまう。
-ワークスペースを消すと、その規則も消える。
+Only `rules` can be set.
+`root` belongs to the workspace itself, so change it with `chloe ws root`.
+`[github]` takes precedence in lower layers, so allowing it per workspace would let a workspace widen a scope its owner's settings narrowed.
+Deleting a workspace also deletes its rules.
 
-変えられる人は、そのワークスペースの持ち主のシークレットを変えられる人と同じである。
+Whoever can change the secrets of the workspace's owner can change its rules.
 
-| ワークスペース | 変えられる人 |
+| Workspace | Who can change it |
 | --- | --- |
-| 個人 | 本人。ゲートウェイの `[policy]` で `allow_personal_rules = true` にしたときだけ |
-| Organization | Organization の管理者と、ゲートウェイの設定の `admins` |
-| team | Organization の管理者、team の maintainer、ゲートウェイの設定の `admins` |
+| Personal | The user themselves, only when the gateway's `[policy]` has `allow_personal_rules = true` |
+| Organization | Organization administrators and the gateway configuration's `admins` |
+| Team | Organization administrators, team maintainers, and the gateway configuration's `admins` |
 
-## 設定の重ね方
+## Configuration layers
 
-ワークスペースの方針は、次の順に層を重ねて作る。
+A workspace's policy is built by layering the following, in order.
 
-| ワークスペース | 層の順 |
+| Workspace | Layer order |
 | --- | --- |
-| 個人 | ゲートウェイの `[policy]`、個人の設定、ワークスペースの規則 |
-| Organization | ゲートウェイの `[policy]`、Organization の設定、ワークスペースの規則 |
-| team | ゲートウェイの `[policy]`、Organization の設定、team の設定、ワークスペースの規則 |
+| Personal | Gateway `[policy]`, user settings, workspace rules |
+| Organization | Gateway `[policy]`, organization settings, workspace rules |
+| Team | Gateway `[policy]`, organization settings, team settings, workspace rules |
 
-- **規則**：上の層のものを先に並べる。最初に一致した規則で決まるので、下の層は上の層の規則を覆せない（サーバーの運用者の規則を、Organization の設定で覆すことはできない）。
-- **`root` と `[github]`**：もっとも下の層で書いた値を使う（ワークスペースの規則は、どちらも持たない）。
+- **Rules**: rules from upper layers come first. Since the first matching rule decides, lower layers cannot override upper layers' rules (organization settings cannot override the server operator's rules).
+- **`root` and `[github]`**: the value from the lowest layer that sets it is used (workspace rules have neither).
 
-そのため、下の層でできるのは、上の層のどの規則にも一致しない宛先を許すか拒否することだけである。
-上の層が許した宛先を、下の層の `deny` で塞ぐことはできない。
+So all a lower layer can do is allow or deny destinations that no upper-layer rule matches.
+A lower layer's `deny` cannot block a destination an upper layer allowed.
 
-`allow_personal_rules` を有効にしていないときは、個人の設定と個人のワークスペースの規則を重ねない（保存してあっても効かない）。
+When `allow_personal_rules` is not enabled, user settings and personal workspace rules are not layered (they have no effect even if saved).
 
-`passthrough` の規則は、ゲートウェイの `[policy]` のほかには書けない。
-復号しない宛先には規則が効かないので、書けると、上の層の規則を素通りする宛先を作れてしまうためである。
-ゲートウェイの `passthrough` の規則と宛先が重なる規則も、書けない（理由は [`[policy]`](#policy) と同じ）。
-ゲートウェイの設定をあとから変えて、保存してある設定と重なったときは、そのワークスペースのランナーを起動しない。
+`passthrough` rules can only be written in the gateway's `[policy]`.
+Rules do not apply to destinations that are not decrypted, so allowing them elsewhere would let lower layers create destinations that bypass upper layers' rules.
+Rules whose destinations overlap the gateway's `passthrough` rules are also not allowed (for the same reason as in [`[policy]`](#policy)).
+If a later change to the gateway configuration makes it overlap with saved settings, that workspace's runner is not started.
 
-シークレットの宛先は、どの層の規則にもない宛先だけを一番後ろに足す（[`[policy]`](#policy) を参照）。
-そのため、ある層で `api.anthropic.com` を `deny` にすると、その層を重ねるワークスペースでは、そのシークレットの差し替えも効かなくなる。
+Secret destinations are appended last only if no rule in any layer covers them (see [`[policy]`](#policy)).
+So if a layer sets `api.anthropic.com` to `deny`, injection for that secret also stops working in workspaces that use that layer.
 
-管理の画面の Rules タブでは、選んだスコープで効く規則を、評価する順に層の名前と一緒に出す。
+The admin TUI's Rules tab shows the rules in effect for the selected scope, in evaluation order, along with the name of each layer.
