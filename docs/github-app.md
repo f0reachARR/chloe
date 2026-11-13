@@ -1,107 +1,107 @@
-# GitHub App の準備
+# GitHub App setup
 
-chloe は一つの GitHub App を、次の三つの用途に使う。
+chloe uses a single GitHub App for three purposes.
 
-- **Device Flow**：SSH の `keyboard-interactive` で利用者を認証し、個人ワークスペースの GitHub の認証情報（ユーザートークン）を得る。
-- **所属の確認**：利用者が Organization や team に属しているかを、インストールトークンで確かめる。
-- **共有ワークスペースの GitHub の認証情報**：ワークスペースごとにリポジトリと権限を絞ったインストールトークンを発行する。
+- **Device Flow**: authenticates users via SSH `keyboard-interactive` and obtains GitHub credentials (a user token) for their personal workspaces.
+- **Membership checks**: uses an installation token to check whether a user belongs to an organization or team.
+- **GitHub credentials for shared workspaces**: issues installation tokens scoped to specific repositories and permissions per workspace.
 
-## 登録する場所
+## Where to register
 
-アプリは Organization の下に登録する（Organization の Settings → Developer settings → GitHub Apps → New GitHub App）。
-個人アカウントの下に登録すると、Organization へのインストールに Organization 側の承認が要る。
+Register the app under the organization (the organization's Settings → Developer settings → GitHub Apps → New GitHub App).
+If you register it under a personal account, installing it in an organization requires approval on the organization's side.
 
-## 登録フォームの設定
+## Registration form settings
 
-| 項目 | 設定 |
+| Field | Setting |
 | --- | --- |
-| GitHub App name、Homepage URL | 任意 |
-| Callback URL | Web の画面に GitHub でログインするなら `<public_url>/api/auth/github/callback`（`https://chloe.example.com/api/auth/github/callback` など）。使わなければ空のまま |
-| Expire user authorization tokens | 有効（ユーザートークンを 8 時間で失効させ、リフレッシュトークンで更新する） |
-| Request user authorization (OAuth) during installation | 無効 |
-| Enable Device Flow | 有効 |
-| Webhook の Active | 無効（chloe は Webhook を受けない） |
-| Where can this GitHub App be installed? | Only on this account（複数の Organization で使うときは下の「複数の Organization」を参照） |
+| GitHub App name, Homepage URL | Anything |
+| Callback URL | If you log in to the web UI with GitHub, `<public_url>/api/auth/github/callback` (for example `https://chloe.example.com/api/auth/github/callback`). Otherwise leave it empty |
+| Expire user authorization tokens | Enabled (user tokens expire after 8 hours and are renewed with a refresh token) |
+| Request user authorization (OAuth) during installation | Disabled |
+| Enable Device Flow | Enabled |
+| Webhook Active | Disabled (chloe does not receive webhooks) |
+| Where can this GitHub App be installed? | Only on this account (to use it with several organizations, see [Multiple organizations](#multiple-organizations) below) |
 
-## 権限
+## Permissions
 
-最初は次の権限で始め、足りないものはあとから足す。
-アプリの権限を変えると、インストール先の Organization で承認し直す必要がある。
+Start with the following permissions and add any you are missing later.
+When you change the app's permissions, each organization it is installed in must approve them again.
 
-| 種類 | 権限 | 設定 | 用途 |
+| Type | Permission | Setting | Purpose |
 | --- | --- | --- | --- |
-| Repository | Contents | Read and write | clone、fetch、push |
-| Repository | Metadata | Read-only | 必須（自動で付く） |
-| Repository | Pull requests | Read and write | pull request の作成とレビュー |
-| Repository | Issues | Read and write | issue の参照とコメント |
-| Repository | Actions | Read-only | CI の結果とログの参照 |
-| Repository | Checks | Read-only | CI の結果の参照 |
-| Repository | Commit statuses | Read-only | CI の結果の参照 |
-| Repository | Workflows | No access | `.github/workflows` の変更を許さない |
-| Organization | Members | Read-only | Organization と team の所属の確認 |
+| Repository | Contents | Read and write | clone, fetch, push |
+| Repository | Metadata | Read-only | Required (added automatically) |
+| Repository | Pull requests | Read and write | Creating and reviewing pull requests |
+| Repository | Issues | Read and write | Reading and commenting on issues |
+| Repository | Actions | Read-only | Reading CI results and logs |
+| Repository | Checks | Read-only | Reading CI results |
+| Repository | Commit statuses | Read-only | Reading CI results |
+| Repository | Workflows | No access | Disallows changes to `.github/workflows` |
+| Organization | Members | Read-only | Checking organization and team membership |
 
-Workflows を No access にすると、`.github/workflows` 以下を変更するコミットの push を GitHub が拒否する。
-エージェントに CI の定義を書き換えさせない既定として、この設定から始める。
+With Workflows set to No access, GitHub rejects pushes of commits that change anything under `.github/workflows`.
+Start from this setting as a default that keeps agents from rewriting CI definitions.
 
-ユーザートークンの権限は、アプリの権限と利用者自身の権限の重なりになる。
-共有ワークスペースのインストールトークンは、ここで与えた権限の範囲内で、Organization の管理者がワークスペースごとにさらに絞る。
+A user token's permissions are the intersection of the app's permissions and the user's own permissions.
+For shared workspaces, the organization's administrators further narrow the installation token per workspace, within the permissions granted here.
 
-## 登録後に控える情報
+## Information to note after registration
 
-| 情報 | 取得する場所 | 秘密か |
+| Item | Where to find it | Secret? |
 | --- | --- | --- |
-| App ID | アプリの設定画面の About | 秘密ではない |
-| Client ID | アプリの設定画面の About | 秘密ではない |
-| 秘密鍵（`.pem`） | アプリの設定画面の Private keys → Generate a private key | **秘密** |
-| インストール先の Organization 名 | アプリをインストールした Organization | 秘密ではない |
+| App ID | About on the app's settings page | Not secret |
+| Client ID | About on the app's settings page | Not secret |
+| Private key (`.pem`) | Private keys → Generate a private key on the app's settings page | **Secret** |
+| Organization name the app is installed in | The organization where you installed the app | Not secret |
 
-SSH のログイン（Device Flow）だけなら、client secret は要らない。
-Device Flow で得たユーザートークンは、client secret なしで更新できる。
-Web の画面に GitHub でログインする（OAuth の Web のフロー）ときだけ、アプリの設定画面の Client secrets → Generate a new client secret で作り、秘密鍵と同じく**秘密**として扱う。
-client secret がなくても、Web の画面には SSH の `chloe web login` が出す URL でログインできる。
+For SSH login (Device Flow) alone, you don't need a client secret.
+User tokens obtained through Device Flow can be renewed without a client secret.
+Only if you log in to the web UI with GitHub (the OAuth web flow), create one under Client secrets → Generate a new client secret on the app's settings page, and treat it as a **secret**, just like the private key.
+Even without a client secret, you can log in to the web UI with the URL that `chloe web login` prints over SSH.
 
-アプリは Organization にインストールし、chloe で扱うリポジトリを選ぶ（Only select repositories）。
-インストール ID は chloe がアプリの秘密鍵で API から調べるので、控えなくてよい。
+Install the app in the organization and select the repositories chloe should work with (Only select repositories).
+You don't need to note the installation ID: chloe looks it up through the API using the app's private key.
 
-## 情報の置き場
+## Where to store the credentials
 
-秘密鍵はチャットやリポジトリに貼らず、ゲートウェイを動かす利用者だけが読めるようにする。
+Don't paste the private key into chats or repositories; make it readable only by the user that runs the gateway.
 
-### ホストに配置するとき
+### On a host
 
-[インストール](install.md) の配置では、`/etc/chloe/` に置き、ゲートウェイを動かす利用者 `chloe` のグループに読ませる。
+With the layout from [Installation](install.md), put the files in `/etc/chloe/` and make them readable by the group of `chloe`, the user that runs the gateway.
 
 ```sh
 sudo install -m 640 -g chloe ~/Downloads/<app-name>.*.private-key.pem /etc/chloe/github-app.pem
-# Web の画面に GitHub でログインするときだけ
+# Only if you log in to the web UI with GitHub
 sudo install -m 640 -g chloe /dev/stdin /etc/chloe/github-app-client-secret <<< '<client secret>'
 ```
 
-`/etc/chloe/github-app.toml`：
+`/etc/chloe/github-app.toml`:
 
 ```toml
 app_id = 123456
 client_id = "Iv23liXXXXXXXXXXXXXX"
 private_key = "file:/etc/chloe/github-app.pem"
-# Web の画面に GitHub でログインするときだけ書く。
+# Only if you log in to the web UI with GitHub.
 # client_secret = "file:/etc/chloe/github-app-client-secret"
-# 使う Organization を限るときに書く。書かなければ、アプリをインストールしたすべての
-# Organization を使う。
+# Set this to restrict which organizations are used. If omitted, every
+# organization the app is installed in is used.
 # organizations = ["ForteFibre"]
 ```
 
-`private_key` と `client_secret` はシークレットの参照として読む。
-1Password Connect を使うようになったら、`op://<vault>/<item>/<field>` の形の参照に書き換え、秘密鍵のファイルは消す。
+`private_key` and `client_secret` are read as secret references.
+Once you move to 1Password Connect, rewrite them as references of the form `op://<vault>/<item>/<field>` and delete the private key file.
 
-ゲートウェイの設定（`/etc/chloe/gateway.toml`）にこのパスを書く。
+Put this path in the gateway configuration (`/etc/chloe/gateway.toml`).
 
 ```toml
 github_app = "/etc/chloe/github-app.toml"
 ```
 
-### 開発するとき
+### For development
 
-リポジトリの外の `~/.config/chloe/` に置く。
+Keep the files outside the repository, in `~/.config/chloe/`.
 
 ```sh
 mkdir -p ~/.config/chloe
@@ -110,31 +110,30 @@ mv ~/Downloads/<app-name>.*.private-key.pem ~/.config/chloe/github-app.pem
 chmod 600 ~/.config/chloe/github-app.pem
 ```
 
-`~/.config/chloe/github-app.toml` の書き方は上と同じで、`private_key` を `file:/home/<user>/.config/chloe/github-app.pem` にする。
-ゲートウェイの設定には `github_app = "~/.config/chloe/github-app.toml"` と書く（`~` はゲートウェイを起動した利用者のホームディレクトリに読み替える）。
+Write `~/.config/chloe/github-app.toml` the same way as above, with `private_key` set to `file:/home/<user>/.config/chloe/github-app.pem`.
+In the gateway configuration, write `github_app = "~/.config/chloe/github-app.toml"` (`~` expands to the home directory of the user that started the gateway).
 
-## ゲートウェイでの使い方
+## How the gateway uses it
 
-ゲートウェイの設定の `github_app` に GitHub App の設定のパスを書くと、次のようになる。
+When the gateway configuration's `github_app` points to the GitHub App configuration file, the following applies.
 
-- アプリをインストールしたいずれかの Organization のメンバーがログインできる。`allowed_users` は、それに加えて許す利用者になる。
-- Organization のワークスペース（`org/name`）にはそのメンバーが、team のワークスペース（`org/team/name`）にはその team のメンバーが入れる。確かめられるのはアプリをインストールした Organization だけである。
-- SSH でログインするには、一度 keyboard-interactive で Device Flow を済ませる。GitHub に登録した公開鍵でも、ユーザートークンがなければ Device Flow に進める。
-- `ssh_user`（既定は `chloe`）と GitHub に存在しない名前のユーザー名では、Device Flow で承認したアカウントを利用者にし、そのとき使った公開鍵を結び付ける。次からはその鍵で入れる。
-- 個人のワークスペースには、Device Flow で得たユーザートークンを使う。トークンを取り直すときは `ssh <host> chloe github login` を実行する。トークンは chloe のデータベースに暗号化して置き、ランナーのプロキシが差し替えのたびに問い合わせたとき、失効まで 5 分を切っていれば更新してから答える。VM にはプレースホルダーだけを入れる。
-- team と Organization のワークスペースには、その Organization へのインストールのトークンを渡す。範囲は Organization と team の設定（`chloe policy set`）の `[github]` で絞れる。
-- GitHub で Organization の管理者（`admin` の役割）である利用者は、その Organization と team の設定とシークレット、ワークスペースの規則を変えられる。team の maintainer は、その team のシークレットとワークスペースの規則を変えられる。
+- Members of any organization the app is installed in can log in. `allowed_users` lists additional users allowed on top of them.
+- An organization's workspaces (`org/name`) are open to its members, and a team's workspaces (`org/team/name`) to that team's members. Membership can be checked only for organizations the app is installed in.
+- To log in over SSH, complete Device Flow once via keyboard-interactive. Even with a public key registered on GitHub, you proceed to Device Flow if you have no user token.
+- With `ssh_user` (`chloe` by default) or a user name that doesn't exist on GitHub, the account approved in Device Flow becomes the user, and the public key used at that time is linked to it. From then on, you can log in with that key.
+- Personal workspaces use the user token obtained through Device Flow. To obtain a new token, run `ssh <host> chloe github login`. The token is stored encrypted in chloe's database; when the runner's proxy asks for it at injection time and fewer than 5 minutes remain before it expires, chloe renews it before answering. Only placeholders go into the VM.
+- Team and organization workspaces get a token for the app's installation in that organization. You can narrow its scope with `[github]` in the organization and team settings (`chloe policy set`).
+- Users who are organization administrators on GitHub (the `admin` role) can change that organization's and its teams' settings and secrets, and the workspace rules. Team maintainers can change that team's secrets and workspace rules.
 
-VM の中の `git` は、GitHub に HTTPS でつなぎ、認証ヘルパーがプレースホルダーを返す（SSH のリモートも HTTPS に読み替える）。
+`git` inside the VM connects to GitHub over HTTPS, and a credential helper returns the placeholder (SSH remotes are rewritten to HTTPS too).
 
-設定は `cargo run -p chloe-github --example check -- ~/.config/chloe/github-app.toml <login>` で確かめられる（トークンの値は表示しない）。
+You can check the configuration with `cargo run -p chloe-github --example check -- ~/.config/chloe/github-app.toml <login>` (token values are not printed).
 
-## 複数の Organization
+## Multiple organizations
 
-chloe は、アプリをインストールしたすべての Organization を使う（App の設定の `organizations` で限っていなければ）。
-アプリを Only on this account で登録すると、インストールできるのは登録した Organization だけになる。
-ほかの Organization でも使うには、アプリを Any account にして、その Organization にインストールする。
+chloe uses every organization the app is installed in (unless restricted by `organizations` in the App configuration).
+If you register the app as Only on this account, it can be installed only in the organization that registered it.
+To use it in other organizations, change the app to Any account and install it in those organizations.
 
-Any account にすると、だれでも自分の Organization にアプリをインストールでき、そのメンバーが chloe にログインして VM を使えるようになる。
-このときは App の設定の `organizations` に、使ってよい Organization を並べて限る。
-
+With Any account, anyone can install the app in their own organization, and its members can then log in to chloe and use VMs.
+In that case, restrict this by listing the allowed organizations in `organizations` in the App configuration.
