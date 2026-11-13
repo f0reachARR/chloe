@@ -1,18 +1,18 @@
-# chloe-node の設定の例 (/etc/chloe/node.toml)。配置は docs/install.md の「配置」に合わせてある。
+# Example chloe-node configuration (/etc/chloe/node.toml). Paths match the layout in docs/install.md.
 #
-# 1. コントロールプレーンで: sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url https://<このホスト>:8445
-# 2. このホストで:         sudo -u chloe chloe-node join --server https://<コントロールプレーン>:8444 --token <トークン> --dir /var/lib/chloe-node/tls
-# 3. このホストで:         sudo systemctl enable --now chloe-node
+# 1. On the control plane: sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url https://<this-host>:8445
+# 2. On this host:         sudo -u chloe chloe-node join --server https://<control-plane>:8444 --token <token> --dir /var/lib/chloe-node/tls
+# 3. On this host:         sudo systemctl enable --now chloe-node
 
-# コントロールプレーンからの API (相互 TLS) の待ち受け。node add の URL と同じポートにする。
+# Listen address of the API (mTLS) the control plane connects to. Use the same port as the node add URL.
 listen = "0.0.0.0:8445"
-# join で受け取った証明書と鍵。
+# Certificate and key received from join.
 credentials = "/var/lib/chloe-node/tls"
-# 本物の値の問い合わせを中継する先 (コントロールプレーンの内部 API)。
+# Where real-value lookups are relayed (the control plane's internal API).
 control_plane = "https://cp.example.com:8444"
 
-# ランナーを systemd の unit で動かす。パスは /etc/chloe/runner.env に書く。
-# Docker のコンテナで動かすときは、kind を消して guest_dir、egress_bin、state_root を書く
-# (docs/configuration.md の [runner])。
+# Run runners as systemd units. Paths go in /etc/chloe/runner.env.
+# To run them in Docker containers, remove kind and set guest_dir, egress_bin, and state_root
+# ([runner] in docs/configuration.md).
 [runner]
 kind = "systemd"
