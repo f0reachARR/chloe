@@ -1,130 +1,130 @@
-# Web の画面の方針
+# Web UI guidelines
 
-Web の画面（`web/`）を作るときに守る決まりと、その理由を書く。
-決めた経緯は [実装手順](implementation-steps.md) の段階 20 から段階 22 に、開発の手順（コマンド、機能の足し方）は [開発](development.md#web-の画面) にある。
+This document lists the rules to follow when building the web UI (`web/`), and the reasons behind them.
+How these decisions were made is in stages 20 to 22 of the [implementation log](design/implementation-steps.md) (Japanese); the development workflow (commands, adding a feature) is in [Development](development.md#web-の画面).
 
-## 何のための画面か
+## What the UI is for
 
-Web の画面は、人が VM の中のエージェントを動かすための入口である。
-エージェントからの依頼に答える、エージェントが作業中かを見る、VM のシェルを使う、といった操作を、SSH の端末がなくてもできるようにする。
-エージェントは無人で動き、依頼はいつ出るか分からないので、手元にあるスマートフォンで答えられることを先に考える。
+The web UI is the entry point for people to drive the agents inside the VMs.
+It lets you answer asks from agents, see whether an agent is busy, and use the VM's shell, without an SSH terminal.
+Agents run unattended and asks can arrive at any time, so being able to answer from the smartphone in your hand comes first.
 
-画面は SSH の `chloe` コマンドを置き換えるものではない。
-できることは、管理 API でできることの範囲に限り、権限は SSH と同じにする。
-画面だけにある操作や、画面だけに効く権限は作らない。
+The UI does not replace the `chloe` command over SSH.
+It can only do what the admin API can do, and its permissions are the same as over SSH.
+Do not add operations that exist only in the UI, or permissions that apply only to the UI.
 
-## 技術の選択
+## Technology choices
 
-| 部分 | 選んだもの | 理由 |
+| Part | Choice | Reason |
 | --- | --- | --- |
-| 画面 | React の SPA | Web の端末や規則の編集など、状態の多い画面を足す |
-| 端末 | xterm.js（`@xterm/xterm`、`@xterm/addon-fit`） | VS Code などで使われ、端末の機能が揃っている。端末の画面のチャンクにだけ入る |
-| 部品 | Mantine（`@mantine/form` でフォームの状態） | 部品が揃っていて、暗い配色とスマートフォンの幅に始めから合う |
-| ルーター | TanStack Router（ファイルでルートを書く） | ルートと検索パラメーターに型が付き、TanStack Query と揃う |
-| サーバーの状態 | TanStack Query | 読み直し、キャッシュ、出来事での無効化を一か所で扱える |
-| API の呼び出し | openapi-fetch、openapi-react-query | 型を OpenAPI のスペックから作り、手で合わせない |
-| ビルド | Vite、pnpm | |
-| PWA | vite-plugin-pwa（Service Worker は自分で書く） | ホーム画面から開け、あとでプッシュ通知を足せる |
-| lint と整形 | oxlint、oxfmt | 速く、設定が少ない（Rust の側の clippy と rustfmt に近い） |
-| テスト | Vitest、Testing Library、MSW（openapi-msw） | 偽の API をスペックの型に合わせて書ける |
+| UI | React SPA | We add stateful screens such as the web terminal and the rule editor |
+| Terminal | xterm.js (`@xterm/xterm`, `@xterm/addon-fit`) | Used by VS Code and others, with complete terminal features. Only included in the terminal screen's chunk |
+| Components | Mantine (`@mantine/form` for form state) | A complete component set that fits dark color schemes and smartphone widths out of the box |
+| Router | TanStack Router (file-based routes) | Routes and search params are typed, and it pairs with TanStack Query |
+| Server state | TanStack Query | Refetching, caching, and event-driven invalidation in one place |
+| API calls | openapi-fetch, openapi-react-query | Types are generated from the OpenAPI spec, not kept in sync by hand |
+| Build | Vite, pnpm | |
+| PWA | vite-plugin-pwa (Service Worker written by hand) | Can be opened from the home screen, and push notifications can be added later |
+| Lint and format | oxlint, oxfmt | Fast, with little configuration (similar to clippy and rustfmt on the Rust side) |
+| Tests | Vitest, Testing Library, MSW (openapi-msw) | Fake APIs can be written against the spec's types |
 
-この選択を変えるときは、先に段階として文書に書き、相談してから変える。
+To change any of these choices, first write it up as a stage in the docs and discuss it before changing.
 
-## 構成と依存の向き
+## Layout and dependency direction
 
 ```text
 web/src/
-  app/              起動、ルーター、機能の一覧 (features.ts)、枠 (ヘッダーとナビゲーション)
-  routes/           ルートのファイル (routeTree.gen.ts はこれから作られる)
-  features/<機能>/
-    index.ts        入口。ほかから使ってよいものだけを書き出す
-    feature.ts      ナビゲーションの項目と、出来事の処理の申告
-    api.ts          この機能の問い合わせ (queryOptions) と読み直し
-    *.tsx           画面と部品 (*.test.tsx はそのテスト)
-  shared/           API のクライアントと型、出来事の配り手、機能をまたぐ部品と関数
-  test/             テストの準備 (MSW の偽の API、描き方、データ)
+  app/              bootstrap, router, feature list (features.ts), shell (header and navigation)
+  routes/           route files (routeTree.gen.ts is generated from these)
+  features/<feature>/
+    index.ts        entry point. Exports only what others may use
+    feature.ts      declares navigation items and event handlers
+    api.ts          this feature's queries (queryOptions) and refetching
+    *.tsx           screens and components (*.test.tsx are their tests)
+  shared/           API client and types, event dispatcher, cross-feature components and functions
+  test/             test setup (MSW fake API, rendering, data)
 ```
 
-依存は、`app` と `routes` → 機能の入口（`@/features/<機能>`）→ `shared` の向きに限る。
+Dependencies may only point from `app` and `routes` → feature entry points (`@/features/<feature>`) → `shared`.
 
-- **機能どうしは互いを使わない**：二つの機能で要るものは `shared` に上げる。機能を足したり消したりしても、ほかの機能に波及しないようにするためである。
-- **`shared` は機能を知らない**：`shared` が機能を使うと、機能を消したときに `shared` が壊れる。
-- **機能は入口から使う**：機能の中のファイルの置き方を変えても、使う側を直さずに済むようにする。
+- **Features do not use each other**: move anything two features need into `shared`. This way, adding or removing a feature does not ripple into other features.
+- **`shared` does not know about features**: if `shared` used a feature, removing that feature would break `shared`.
+- **Features are used through their entry point**: you can rearrange files inside a feature without changing its users.
 
-この向きは `pnpm lint`（`.oxlintrc.json` の `no-restricted-imports`）が確かめる。
-規則を緩めて通すのではなく、置き場所を直す。
+`pnpm lint` (`no-restricted-imports` in `.oxlintrc.json`) enforces this direction.
+Fix where the code lives instead of loosening the rule to make it pass.
 
-## 機能の作り方
+## Building a feature
 
-- **機能は自分を申告する**：ナビゲーションの項目（数を出すなら、数を描く部品）と、出来事ごとの処理は、機能の `feature.ts` に書き、枠がそれを集めて組む。機能を足すために枠の中身を書き換えない。
-- **ルートのファイルは薄く**：検索パラメーターの検証（zod）、読み込み（`loader` で TanStack Query のキャッシュを満たす）、機能の画面を描くことだけを書く。画面の部品は検索パラメーターを引数で受け取り、ルーターなしでテストできるようにする。
-- **状態の置き場所**：サーバーから来るものは TanStack Query だけに置く。絞り込みや表示の切り替えのように、開き直しても残したいものは URL の検索パラメーターに置く。その画面の中だけのものは `useState` に置く。全体で共有するストアは、ここに収まらないものが出てくるまで入れない。
-- **読み込みを待たせない**：VM に尋ねるような遅い問い合わせ（作業中かの確認）は、ルートの読み込みで待たず、画面の中で読み込み中を出す。
-- **ログインが要る画面**：`routes/_app/` の下に置く。`_app` の `beforeLoad` がセッションを確かめ、なければログインの画面へ送る。
-- **重いライブラリはその画面だけで**：xterm.js のように大きなものは、それを使う機能の中だけで読み込む。ルートごとにコードが分かれるので、ほかの画面のチャンクに入らない（`pnpm build` の出力で確かめる）。
-- **ルートが枠に申告するもの**：画面の幅いっぱいに描くルート（端末）は、`staticData: { wide: true }` を書く。枠はほかの画面を読みやすい幅に収める。
-- **フォームの中のボタン**：`<form>` の中に置く `ActionIcon` には `type="button"` を書く。書かないと送信のボタンになり、欄で Enter を押したときに、並べ替えや削除のボタンが押される。
-- **重ねて開くもの**：ワークスペースの設定と依頼のように、どの画面の上でも開きたいものは、ルートにせず、`_app` の検索パラメーター（`shared/overlays.ts`、`?settings=`、`?asks=`）で開き、枠が描く。開き閉じでルートが変わらないので、下の画面（端末）は作り直されず、シェルは続く。開く側は `openOverlay` で検索パラメーターを書き換えるリンクを置くだけなので、ほかの機能を使わずに済む。描く部品は機能が `overlays` で申告する（設定だけは、すべての機能のセクションを集めるので枠が描く）。新しく足すときは、`overlaySearchSchema` に名前を足す。閉じるときは履歴を置き換え、戻るで開き直さないようにする。
-- **ワークスペースの設定はセクションで足す**：設定の項目を足すときは、機能が `workspaceSettings` でセクション（`id`、名前、アイコン、並び順、部品）を申告し、枠のモーダルの中身は書き換えない。保存先の API がセクションごとに違うので、セクションは自分で読み、自分の保存のボタンで保存し、保存していない変更があるかを `onDirtyChange` で知らせる（閉じるときに枠が確かめる）。フォームの状態は `@mantine/form` で持ち、変えた項目だけを送る。今のセクションは Machine、Ports、Delete（`features/workspaces`）、Policy（`features/policies`）である。Delete は並び順を大きくして、最後に置く。
-- **持ち主を選ぶ**：ワークスペースを作る先やシークレットの持ち主のように、個人、Organization、team から選ぶ欄は、`shared/owners.ts` の問い合わせ（`/api/v1/owners`）と `shared/ui/OwnerSelect` を使う。持ち主は `user:alice`、`org:acme`、`team:acme/dev` と書く。
-- **ほかの機能の部品をヘッダーなどに並べる**：端末のヘッダーの依頼のボタンのように、ある機能の画面にほかの機能の部品を置くときは、画面が差し込む口（`actions` など）を持ち、ルートのファイルが組む。ルートは複数の機能の入口を使ってよい。
+- **Features declare themselves**: navigation items (and, if they show a count, the component that renders it) and per-event handlers go in the feature's `feature.ts`; the shell collects and assembles them. Do not edit the shell's internals to add a feature.
+- **Keep route files thin**: they only validate search params (zod), load data (fill the TanStack Query cache in `loader`), and render the feature's screen. Screen components take search params as arguments so they can be tested without the router.
+- **Where state lives**: anything from the server lives only in TanStack Query. Things that should survive reopening the page, like filters and view toggles, live in URL search params. Things local to one screen live in `useState`. Do not add a global store until something does not fit any of these.
+- **Do not block loading**: slow queries that go to the VM (checking whether an agent is busy) are not awaited in the route loader; the screen shows a loading state instead.
+- **Screens that need login**: put them under `routes/_app/`. `_app`'s `beforeLoad` checks the session and redirects to the login screen if there is none.
+- **Heavy libraries only on their screen**: load large libraries like xterm.js only inside the feature that uses them. Code is split per route, so they stay out of other screens' chunks (check the `pnpm build` output).
+- **What routes declare to the shell**: routes that draw at full screen width (the terminal) set `staticData: { wide: true }`. The shell fits other screens into a readable width.
+- **Buttons inside forms**: set `type="button"` on an `ActionIcon` placed inside a `<form>`. Otherwise it becomes a submit button, and pressing Enter in a field triggers the reorder or delete button.
+- **Overlays**: things you want to open on top of any screen, like workspace settings and asks, are not routes; they open through `_app` search params (`shared/overlays.ts`, `?settings=`, `?asks=`) and the shell renders them. Opening and closing does not change the route, so the screen underneath (the terminal) is not recreated and the shell session continues. The opener only places a link that rewrites the search params with `openOverlay`, so it does not need to use another feature. Features declare the rendering component in `overlays` (settings alone is rendered by the shell, because it collects sections from every feature). To add one, add its name to `overlaySearchSchema`. Closing replaces the history entry so that Back does not reopen it.
+- **Add workspace settings as sections**: to add a setting, the feature declares a section (`id`, name, icon, order, component) in `workspaceSettings`; do not edit the contents of the shell's modal. Each section saves to a different API, so a section loads its own data, saves with its own save button, and reports unsaved changes through `onDirtyChange` (the shell checks this on close). Form state is held in `@mantine/form`, and only changed fields are sent. The current sections are Machine, Ports, Delete (`features/workspaces`), and Policy (`features/policies`). Delete has a large order value so it comes last.
+- **Choosing an owner**: fields that choose among a user, organization, or team, such as where to create a workspace or who owns a secret, use the query in `shared/owners.ts` (`/api/v1/owners`) and `shared/ui/OwnerSelect`. Owners are written `user:alice`, `org:acme`, `team:acme/dev`.
+- **Placing another feature's components in a header and similar**: when a feature's screen hosts another feature's component, like the asks button in the terminal header, the screen exposes a slot (`actions` and so on) and the route file assembles them. Routes may use the entry points of several features.
 
-## 管理 API との関係
+## Relationship to the admin API
 
-管理 API の型の元は Rust のコードである。
-Rust の側で `utoipa` の注釈からスペックを作り、`web/openapi.json` に書き出し、画面の型はそこから作る。
-画面の側で API の型を手で書かない。
-API を変えたら、スペックと型を作り直す（`cargo test` は、スペックがコードとずれていると落ちる）。
+The admin API's types originate in the Rust code.
+The Rust side generates the spec from `utoipa` annotations and writes it to `web/openapi.json`; the UI's types are generated from that.
+Do not hand-write API types on the UI side.
+When you change the API, regenerate the spec and the types (`cargo test` fails if the spec is out of sync with the code).
 
-ゲートウェイが受ける経路はすべて `/api` の下にあり、それ以外のパスは画面のものである。
-画面のルートに `/api` で始まるパスは作らない。
+Every path the gateway serves is under `/api`; all other paths belong to the UI.
+Do not create UI routes whose paths start with `/api`.
 
-ワークスペースの規則の型（`WorkspacePolicy`、`PathRuleConfig`）はスペックに出している。
-個人、Organization、team の設定（`PolicyLayer`、`GitHubScope`）と、シークレットの定義と登録の本文（`SecretSpec`、`SecretInput`）も同じく型を出している。
+The workspace rule types (`WorkspacePolicy`, `PathRuleConfig`) are exposed in the spec.
+So are user, organization, and team settings (`PolicyLayer`, `GitHubScope`), and the bodies for defining and registering secrets (`SecretSpec`, `SecretInput`).
 
-読んでから置き換える API（ワークスペースの規則、個人、Organization、team の設定）は、読んだときの版を `If-Match` で送る。画面で編集しているあいだに、ほかの人の保存や依頼の承認で書き換えられることがあるので、412 を受けたら、編集した内容を残したまま、最新を読むか上書きするかを尋ねる（`features/policies` の `useVersionedSave`）。
+APIs that are read and then replaced (workspace rules; user, organization, and team settings) send the version they read in `If-Match`. While you are editing in the UI, someone else's save or an approved ask can change the data, so on a 412 the UI keeps your edits and asks whether to load the latest or overwrite (`useVersionedSave` in `features/policies`).
 
-## 出来事
+## Events
 
-ゲートウェイからの出来事（`/api/v1/events` の SSE）は、枠が一本の接続で受け、出来事の名前ごとに、各機能が申告した処理に渡す。
-ブラウザは同じサーバーへの接続の数に上限があるので、機能ごとに接続を張らない。
+The shell receives events from the gateway (SSE on `/api/v1/events`) over a single connection and passes each event, by name, to the handlers that features declared.
+Browsers limit the number of connections to the same server, so do not open a connection per feature.
 
-- 出来事は「何かが変わった」ことだけを伝え、画面は問い合わせを読み直して最新の状態を取る。出来事の中身を画面の状態として積み上げない。取りこぼしても、読み直せば正しい状態に戻るようにするためである。
-- `resync` は、つながったときと、サーバーが取りこぼしを知らせたとき（`lagged`）に呼ぶ。機能は、出来事を見ずに自分の問い合わせを読み直す。
-- 新しい種類の出来事は、ゲートウェイの側で名前（今は `ask`）を足し、それを受ける機能が `feature.ts` に処理を書く。
+- An event only says "something changed"; the UI refetches its queries to get the latest state. Do not accumulate event payloads as UI state. This way, if an event is missed, refetching restores the correct state.
+- `resync` is called on connect and when the server reports missed events (`lagged`). Features refetch their own queries without looking at events.
+- For a new kind of event, add its name on the gateway side (currently `ask`), and the feature that receives it writes a handler in `feature.ts`.
 
-## 安全
+## Security
 
-- **VM から来た文は文字列として出す**：依頼の宛先、質問、選択肢、理由は VM の中のプロセスが書く。React の文字列として描き、`dangerouslySetInnerHTML` や Markdown の HTML への変換には通さない。
-- **外のものを読み込まない**：スクリプト、フォント、画像は画面のファイルだけを使う。ゲートウェイは `script-src 'self'` の CSP を返す（Mantine が CSS の変数を入れるので、スタイルにだけインラインを許す）。
-- **長く使える認証情報を画面から作らない**：cookie のセッションでは、API のトークンの作成を、ゲートウェイが断る。画面に XSS があっても、期限のあるセッションから期限のない認証情報を持ち出させないためである。同じ性質の操作（SSH の鍵の登録など）を足すときも、画面からはできないようにする。
-- **シークレットは値を入れ直してだけ変えられる**：シークレットは画面から登録できる。値は読み出せず、定義を変えるときも必ずすべての値を送らせる（登録してある値を残して定義だけを変える `keep_secret_values` は、TUI だけが使う）。画面に XSS があっても、攻撃者の知っている値に置き換えることはできるが、登録してある本物の値をほかの宛先へ向け直すことはできない。この境目を保つため、API にも画面にも、値を残して定義を変える経路を足さない。画面では、値の欄を送ったら空にし、送った中身を TanStack Query の状態に残さない（`useMutation` の `gcTime: 0` と、終わったあとの `reset`）。
-- **ほかのサイトからの要求**：cookie で来た GET 以外の要求と WebSocket への切り替えは、ゲートウェイが `Origin` を確かめて断る。画面の側で、別のオリジンへ cookie を付けて送る作りにしない。
-- **VM の中のページは画面のオリジンに置かない**：公開したポートのページはエージェントが書き換えられる。画面と同じオリジンに置くと、そのページのスクリプトが利用者の cookie で管理 API を呼べるので、ゲートウェイはポートごとに別のホスト（`[api] proxy_url`）で中継する。画面からは、公開したポートを別のタブ（`rel="noopener noreferrer"`）で開くリンクだけを出し、枠（iframe）に入れて描かない。プロキシのホストどうしは同じサイトなので、ゲートウェイは cookie で来た要求の `Origin` と `Sec-Fetch-Site` を確かめ、ほかのホストのページから送らせたものを断る。
-- **長く続く接続は確かめ直す**：端末のように閉じると作業が消える接続は、つなぎ直させる代わりに、ゲートウェイが開いているあいだにセッションを確かめ直す（1 分ごと）。同じ性質の接続を足すときも、そうする。
+- **Render text from the VM as strings**: an ask's destination, question, choices, and reason are written by processes inside the VM. Render them as React strings; never pass them through `dangerouslySetInnerHTML` or Markdown-to-HTML conversion.
+- **Do not load external resources**: scripts, fonts, and images come only from the UI's own files. The gateway returns a CSP with `script-src 'self'` (inline is allowed only for styles, because Mantine injects CSS variables).
+- **Do not create long-lived credentials from the UI**: the gateway refuses to create API tokens over a cookie session. Even if the UI has an XSS, an attacker cannot turn an expiring session into a non-expiring credential. When adding operations of the same nature (registering SSH keys and so on), keep them unavailable from the UI as well.
+- **Secrets can only be changed by re-entering their values**: secrets can be registered from the UI. Values cannot be read back, and changing a definition always requires sending every value (`keep_secret_values`, which changes only the definition while keeping registered values, is used only by the TUI). Even with an XSS in the UI, an attacker can replace a value with one they know, but cannot redirect a registered real value to another destination. To keep this boundary, do not add a path in the API or the UI that changes a definition while keeping values. In the UI, clear the value fields after submitting, and do not keep the submitted contents in TanStack Query state (`gcTime: 0` on `useMutation`, and `reset` once it finishes).
+- **Cross-site requests**: for non-GET requests and WebSocket upgrades that arrive with a cookie, the gateway checks `Origin` and refuses them. Do not build anything on the UI side that sends cookies to another origin.
+- **Do not put pages from the VM on the UI's origin**: agents can rewrite the pages of published ports. If they were on the same origin as the UI, their scripts could call the admin API with the user's cookie, so the gateway proxies each port on a separate host (`[api] proxy_url`). The UI only shows links that open published ports in a separate tab (`rel="noopener noreferrer"`), and never embeds them in a frame (iframe). The proxy hosts are all on the same site, so the gateway checks `Origin` and `Sec-Fetch-Site` on cookie requests and refuses those sent from another host's page.
+- **Recheck long-lived connections**: for connections where closing loses work, like the terminal, the gateway rechecks the session while they are open (every minute) instead of forcing a reconnect. Do the same when adding connections of the same nature.
 
-## 見た目と使い勝手
+## Look and feel
 
-- **スマートフォンの幅を先に確かめる**：390px ほどの幅で使えることを確かめてから、広い画面を整える。
-- **ナビゲーション**：スマートフォンの幅では下に、広い画面では左に置く。見えていない側は描かない（画面の外のリンクにフォーカスを移さないため）。
-- **見た目は Mantine のテーマで揃える**：色、余白、角の丸みは `app/theme.ts` と部品の引数で決める。自分で CSS を書くのは、Mantine の部品で表せないとき（下のナビゲーションなど）に限り、CSS Modules で書く。
-- **配色**：明るい配色と暗い配色を、端末の設定に合わせて切り替える。どちらでも読めることを確かめる。
-- **文言**：英語で書く。`chloe` コマンドと管理の画面（TUI）の文言と揃える。
+- **Check smartphone width first**: confirm the UI is usable at about 390px wide before polishing wide screens.
+- **Navigation**: at the bottom on smartphone widths, on the left on wide screens. The hidden one is not rendered (so focus does not move to off-screen links).
+- **Keep the look consistent with the Mantine theme**: colors, spacing, and corner radii are set in `app/theme.ts` and component props. Write your own CSS only when a Mantine component cannot express it (such as the bottom navigation), and use CSS Modules for it.
+- **Color scheme**: switch between light and dark following the device setting. Check that both are readable.
+- **Wording**: write in English. Keep it consistent with the wording of the `chloe` command and the admin TUI.
 
-## 配る形
+## Distribution
 
-- ビルドした画面はバイナリに埋め込まず、deb に入れてファイルから出す（`/usr/share/chloe/web`、`[api] web_root`）。
-- Vite が `/assets/` に出すファイルは、名前に中身のハッシュが付くので長くキャッシュさせ、ほか（`index.html`、Service Worker）は毎回確かめさせる。`/assets/` にないファイルは 404 にする。
-- Service Worker が前もってキャッシュするのは画面のファイルだけで、`/api` の応答はキャッシュしない。
+- The built UI is not embedded in the binary; it ships in the deb and is served from files (`/usr/share/chloe/web`, `[api] web_root`).
+- Files Vite emits under `/assets/` have a content hash in their names, so they are cached for a long time; everything else (`index.html`, the Service Worker) is revalidated every time. Files not present under `/assets/` return 404.
+- The Service Worker precaches only the UI's files, and never caches `/api` responses.
 
-## テスト
+## Tests
 
-- **部品と画面**：Vitest と Testing Library で、MSW の偽の API を相手に確かめる。偽の API の手続きは `openapi-msw` で書き、スペックの型に合わせる。
-- **出来事の配り方のような、画面のない仕組み**：偽の EventSource などを渡して確かめる。
-- **本物のゲートウェイを相手にする確認**：API の決まり（cookie、`Origin`、権限）は `mvp-test.sh`（cookie を付けた curl と Node の WebSocket）で、画面の動きは `web/e2e` の Playwright（`web-test.sh`）で確かめる。E2E は、利用者が通る道（ログイン、端末、依頼に答える）を、スマートフォンの幅と広い画面の両方で通す。細かな場合分けは Vitest に置く。
+- **Components and screens**: tested with Vitest and Testing Library against an MSW fake API. Fake API handlers are written with `openapi-msw` to match the spec's types.
+- **Mechanisms without a screen, like event dispatch**: tested by passing a fake EventSource and the like.
+- **Tests against the real gateway**: API rules (cookies, `Origin`, permissions) are checked by `mvp-test.sh` (curl with cookies and a Node WebSocket), and UI behavior by Playwright in `web/e2e` (`web-test.sh`). E2E covers the paths users take (login, terminal, answering asks) at both smartphone width and on a wide screen. Fine-grained cases belong in Vitest.
 
-## まだ決めていないこと
+## Open questions
 
-- **プッシュ通知**：Service Worker と VAPID の鍵が要る。足すときは `web/src/sw.ts` に書く。
-- **文言の多言語化**：今は英語だけで、仕組みは入れていない。
-- **端末のつなぎ直し**：切れたあとに同じシェルにつなぎ直すことはできない（SSH と同じ）。ゲートウェイの側でシェルを持ち続ける仕組みが要る。
+- **Push notifications**: these need a Service Worker and VAPID keys. When added, they go in `web/src/sw.ts`.
+- **Localization**: English only for now; no mechanism is in place.
+- **Terminal reconnection**: after a disconnect you cannot reconnect to the same shell (same as SSH). This needs a mechanism on the gateway side to keep the shell alive.
