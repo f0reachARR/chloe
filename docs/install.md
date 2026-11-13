@@ -42,7 +42,7 @@ Compiling the kernel takes a few minutes, and the sources and intermediate build
 Subsequent builds only rebuild what changed.
 
 The root filesystem includes mise, at the version pinned in `images/guest/rootfs/Dockerfile`.
-Tools such as Claude Code and Codex are not included (users install them inside the VM with mise; see [Usage](usage.md#ツールを入れる)).
+Tools such as Claude Code and Codex are not included (users install them inside the VM with mise; see [Usage](usage.md#install-tools)).
 
 The deb version is `<last release version>+git<commit date>.<hash>` (with `.dirty` appended if there are uncommitted changes).
 It sorts after the release version, so you can install it over a release deb.
@@ -365,7 +365,7 @@ There are two ways to log in.
 - **GitHub**: Set the GitHub App's `client_secret`, and set the Callback URL in the App's settings to `<public_url>/api/auth/github/callback` (see [Preparing a GitHub App](github-app.md)).
 - **From SSH**: `ssh chloe@host chloe web login` prints a single-use URL and QR code valid for 5 minutes. This works without a GitHub App.
 
-See [Usage](usage.md#web-の画面) for how to use it.
+See [Usage](usage.md#web-ui) for how to use it.
 
 ## Upgrade
 

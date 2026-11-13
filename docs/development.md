@@ -1,6 +1,6 @@
 # Development
 
-The crate layout is in the [README](../README.md#リポジトリの構成), the design assumptions are in the [research and plan](design/research-and-plan.md) (Japanese), and the per-stage plans and results are in the [implementation log](design/implementation-steps.md) (Japanese).
+The crate layout is in the [README](../README.md#repository-layout), the design assumptions are in the [research and plan](design/research-and-plan.md) (Japanese), and the per-stage plans and results are in the [implementation log](design/implementation-steps.md) (Japanese).
 
 ## Build and static checks
 
@@ -73,7 +73,7 @@ Add fine-grained decision cases to the Rust tests, not to the VM-based tests.
 
 These need KVM and Docker.
 The `systemd` test also runs in a privileged Docker container, so root privileges are not needed.
-Build the guest image first ([Install](install.md#deb-を作る)).
+Build the guest image first ([Install](install.md#build-a-deb)).
 No real API keys are used: fake values are registered as secrets, and the tests confirm that injected requests get a 401 at the destination.
 
 ```sh

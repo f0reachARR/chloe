@@ -1,7 +1,7 @@
 # Web UI guidelines
 
 This document lists the rules to follow when building the web UI (`web/`), and the reasons behind them.
-How these decisions were made is in stages 20 to 22 of the [implementation log](design/implementation-steps.md) (Japanese); the development workflow (commands, adding a feature) is in [Development](development.md#web-の画面).
+How these decisions were made is in stages 20 to 22 of the [implementation log](design/implementation-steps.md) (Japanese); the development workflow (commands, adding a feature) is in [Development](development.md#web-ui).
 
 ## What the UI is for
 

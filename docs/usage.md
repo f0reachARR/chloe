@@ -355,7 +355,7 @@ Connections to ports other than 80 and 443 are refused immediately (`Connection 
 To add a destination, ask the server operator or an organization administrator (organization and team settings are changed with `chloe policy`; workspace rules with `chloe ws policy` or Policy in the workspace settings of the [web UI](#web-ui)).
 A team's maintainers can change the rules of that team's workspaces.
 If the server enables it, you can add destinations for your own personal workspaces yourself (`chloe policy set` changes your user settings, and `chloe ws policy set NAME` changes a workspace's rules).
-You can only add destinations that are not in the rules of the layers above (gateway or organization) (see [configuration layering](configuration.md#設定の重ね方)).
+You can only add destinations that are not in the rules of the layers above (gateway or organization) (see [configuration layering](configuration.md#configuration-layers)).
 
 HTTPS traffic is decrypted at the proxy, so the chloe CA certificate is installed inside the VM.
 The content (body), header values, and query values are not logged.
@@ -432,7 +432,7 @@ Remote forwarding (`-R`) is not supported yet.
 
 ## Open servers in the VM from a browser
 
-If the gateway has it enabled ([Installation](install.md#vm-の中のサーバーを開けるようにする)), you can open HTTP(S) servers running inside the VM without SSH port forwarding, even from a smartphone browser.
+If the gateway has it enabled ([Installation](install.md#open-servers-running-in-the-vm)), you can open HTTP(S) servers running inside the VM without SSH port forwarding, even from a smartphone browser.
 Only ports published inside the VM can be opened.
 
 ```sh
@@ -470,7 +470,7 @@ ssh chloe@chloe.example.com chloe ws unpublish acme/web 5173
 
 ## Web UI
 
-If the gateway has the web UI enabled ([Installation](install.md#web-の画面を有効にする)), you can answer asks from agents, check workspace status, and use workspace terminals from a browser.
+If the gateway has the web UI enabled ([Installation](install.md#enable-the-web-ui)), you can answer asks from agents, check workspace status, and use workspace terminals from a browser.
 It works from a smartphone, without an SSH terminal.
 Add it to your home screen (PWA) to open it like an app.
 

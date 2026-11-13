@@ -51,7 +51,7 @@ When running under systemd, use absolute paths everywhere.
 ### `[github_token]`
 
 Defines which environment variables in the VM receive the GitHub token (`github_token`), and which header for which destinations it is injected into.
-The format is the [secret definition](usage.md#シークレット) without the value.
+The format is the [secret definition](usage.md#secrets) without the value.
 Only one field (`value`) is allowed (the value comes from the GitHub App or the registered token).
 If omitted, the following definition is used.
 
@@ -146,7 +146,7 @@ Starts a runner per workspace on the same host.
 | `kind` | How runners are run |
 | --- | --- |
 | `docker` (default) | Starts the runner container (`chloe-dev-runner`) as a privileged Docker container. The user running the gateway must be in the `docker` group |
-| `systemd` | Starts the runner as a systemd unit (`chloe-runner@ws-<number>.service`). Only network setup runs as root; the user running the gateway needs no root privileges ([Installation](install.md#ランナーとホストのネットワーク)) |
+| `systemd` | Starts the runner as a systemd unit (`chloe-runner@ws-<number>.service`). Only network setup runs as root; the user running the gateway needs no root privileges ([Installation](install.md#runner-and-host-networking)) |
 
 With `kind = "docker"`, the keys are as follows.
 
@@ -214,7 +214,7 @@ Workspaces without an explicit size grow on their next start when you raise the 
 Lowering the default does not shrink existing disks.
 With `[cluster]`, set these here too (not in the `chloe-node` configuration).
 The runner is what grows the disk.
-When running runners in Docker, rebuild the runner container image (`chloe-dev-runner`) on every host after updating ([Installation](install.md#ランナーを-docker-で動かす)).
+When running runners in Docker, rebuild the runner container image (`chloe-dev-runner`) on every host after updating ([Installation](install.md#run-the-runner-in-docker)).
 
 ### `[cluster]`
 
@@ -241,7 +241,7 @@ The control plane's certificate is reissued by the CA on every start (its key is
 `public_url` is used for the GitHub login callback URL and to check the `Origin` of requests made with a web UI session.
 If it is `https://`, cookies get the `Secure` attribute.
 
-The `proxy_url` domain needs wildcard DNS (`*.preview.example.com`) and a certificate ([Installation](install.md#vm-の中のサーバーを開けるようにする)).
+The `proxy_url` domain needs wildcard DNS (`*.preview.example.com`) and a certificate ([Installation](install.md#open-servers-running-in-the-vm)).
 Agents can rewrite pages served from the VM, so we recommend using a different registrable domain than `public_url` (e.g. `chloe.example.com` and `chloe-preview.example.net`).
 If they are the same site, pages from the VM could overwrite the web UI's cookies.
 
@@ -281,7 +281,7 @@ Behind a load balancer that rewrites the source address (without the PROXY proto
 | `app_id` | (required) | App ID |
 | `client_id` | (required) | Client ID (used for Device Flow) |
 | `private_key` | (required) | Reference to the private key (`file:/path/to/key.pem`, `env:NAME`, `op://vault/item/field`) |
-| `client_secret` | none | Reference to the client secret. When set, users can log in to the web UI with GitHub ([Setting up the GitHub App](github-app.md#登録後に控える情報)) |
+| `client_secret` | none | Reference to the client secret. When set, users can log in to the web UI with GitHub ([Setting up the GitHub App](github-app.md#information-to-note-after-registration)) |
 | `organizations` | none | Restrict which organizations are used. If unset, every organization the app is installed in is used |
 | `organization` | none | Shorthand for `organizations` with a single entry |
 | `api_url`, `web_url` | `https://api.github.com`, `https://github.com` | GitHub API and web URLs |

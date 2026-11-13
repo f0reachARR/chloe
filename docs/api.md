@@ -1,7 +1,7 @@
 # Admin API
 
 The admin API performs the same operations as the `chloe` command over SSH, using HTTP(S) and JSON.
-See [Installation](install.md#管理-api-を有効にする) for how to enable it.
+See [Installation](install.md#enable-the-admin-api) for how to enable it.
 All paths start with `/api/v1` (they moved from the earlier `/v1`).
 `chloe-gateway openapi` writes out the OpenAPI spec, and a copy lives in the repository at `web/openapi.json`.
 
@@ -30,7 +30,7 @@ Every API call records the user, token ID, method, path, and status in the audit
 
 ### Web UI sessions
 
-The [web UI](usage.md#web-の画面) calls the same API with a session cookie (`chloe_session`) instead of a token.
+The [web UI](usage.md#web-ui) calls the same API with a session cookie (`chloe_session`) instead of a token.
 Because the browser attaches the cookie automatically, the API handles it as follows to reject requests forged from other sites.
 
 - Requests other than GET and HEAD, and upgrades to WebSocket (requests with `Upgrade`; the terminal), get 403 unless `Origin` matches the gateway's `public_url`.
@@ -156,7 +156,7 @@ api /api/v1/secrets/hf_token
 api /api/v1/secrets/hf_token -X DELETE
 ```
 
-The body is the same fields as the TOML in [Usage](usage.md#シークレット), written as JSON.
+The body is the same fields as the TOML in [Usage](usage.md#secrets), written as JSON.
 
 ```json
 {"env": ["HF_TOKEN"], "placeholder": "hf_{id}", "value": "hf_...",
@@ -179,7 +179,7 @@ api /api/v1/secret-templates
 
 ### User, organization, and team settings
 
-The settings fields are the same as in [Configuration](configuration.md#個人organizationteam-の設定), written as JSON.
+The settings fields are the same as in [Configuration](configuration.md#user-organization-and-team-settings), written as JSON.
 Read and write your own user settings at `/api/v1/policy` (you can change them only if the gateway enables `allow_personal_rules`).
 
 ```sh
@@ -214,7 +214,7 @@ api '/api/v1/policy-rules?scope=team:acme/dev'
 
 ### Workspace rules
 
-Write only the rules, as JSON ([Configuration](configuration.md#ワークスペースの規則)).
+Write only the rules, as JSON ([Configuration](configuration.md#workspace-rules)).
 
 ```sh
 api /api/v1/workspace-policies/acme/web -X PUT \
@@ -318,7 +318,7 @@ websocat -H "Authorization: Bearer $CHLOE_TOKEN" --binary \
 
 ### Published ports
 
-For a port published inside the VM with `chloe-ask port publish`, opening `url` in a browser goes through the web UI login and reaches the server in the VM ([Usage](usage.md#vm-の中のサーバーをブラウザで開く)).
+For a port published inside the VM with `chloe-ask port publish`, opening `url` in a browser goes through the web UI login and reaches the server in the VM ([Usage](usage.md#open-servers-in-the-vm-from-a-browser)).
 Ports can be published only from inside the VM; the admin API can only list and unpublish them.
 
 ```sh
