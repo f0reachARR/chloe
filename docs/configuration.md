@@ -9,7 +9,7 @@ When running under systemd, use absolute paths everywhere.
 | --- | --- | --- |
 | Gateway configuration | `chloe-gateway --config` | `deploy/gateway.toml` (for development, `images/guest/dev/gateway.example.toml`) |
 | `chloe-node` configuration | `chloe-node run --config` | `deploy/node.toml` |
-| GitHub App configuration | `github_app` in the gateway configuration | [Setting up the GitHub App](github-app.md) |
+| GitHub App configuration | `github_app` in the gateway configuration | [GitHub App setup](github-app.md) |
 | User, organization, and team settings and workspace rules | `chloe policy set`, `chloe ws policy set`, the admin API, the admin TUI | [User, organization, and team settings](#user-organization-and-team-settings) and [Workspace rules](#workspace-rules) below |
 
 ## Gateway
@@ -220,7 +220,7 @@ When running runners in Docker, rebuild the runner container image (`chloe-dev-r
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `listen` | (required) | Listen address of the internal API (mTLS) that `chloe-node` connects to |
+| `listen` | (required) | Listen address of the internal API (mutual TLS) that `chloe-node` connects to |
 | `server_names` | (required) | Names put in the internal API's certificate: the host name or IP address `chloe-node` connects to |
 | `pki_dir` | (required) | Directory for the CA certificate and key. Created if missing |
 | `join_ttl_secs` | `3600` | Lifetime of join tokens created by `node add` |
@@ -269,7 +269,7 @@ Behind a load balancer that rewrites the source address (without the PROXY proto
 
 | Key | Description |
 | --- | --- |
-| `listen` | Listen address of the API (mTLS) the control plane connects to. Use the same port as in the `node add` URL |
+| `listen` | Listen address of the API (mutual TLS) the control plane connects to. Use the same port as in the `node add` URL |
 | `credentials` | Directory with the certificate and key received from `chloe-node join` |
 | `control_plane` | URL of the control plane's internal API (where real-value lookups are relayed) |
 | `[runner]` | Same as the gateway's `[runner]` |
@@ -281,7 +281,7 @@ Behind a load balancer that rewrites the source address (without the PROXY proto
 | `app_id` | (required) | App ID |
 | `client_id` | (required) | Client ID (used for Device Flow) |
 | `private_key` | (required) | Reference to the private key (`file:/path/to/key.pem`, `env:NAME`, `op://vault/item/field`) |
-| `client_secret` | none | Reference to the client secret. When set, users can log in to the web UI with GitHub ([Setting up the GitHub App](github-app.md#information-to-note-after-registration)) |
+| `client_secret` | none | Reference to the client secret. When set, users can log in to the web UI with GitHub ([GitHub App setup](github-app.md#information-to-note-after-registration)) |
 | `organizations` | none | Restrict which organizations are used. If unset, every organization the app is installed in is used |
 | `organization` | none | Shorthand for `organizations` with a single entry |
 | `api_url`, `web_url` | `https://api.github.com`, `https://github.com` | GitHub API and web URLs |

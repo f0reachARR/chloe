@@ -278,7 +278,7 @@ content = "machine apt.example.com login deploy password {value}\n"
 In a running workspace, the files are placed again as soon as you register.
 If you delete the secret, or the workspace can no longer use it, the placed files are removed too.
 However, in a workspace whose root is discarded on every boot (`ephemeral`), stopping the VM also discards the list of placed files.
-So a file placed on the workspace disk (`/home/user`, `/workspace`) remains if you delete the secret while the workspace is stopped.
+So in such a workspace, a file placed on the workspace disk (`/home/user`, `/workspace`) remains if you delete the secret while the workspace is stopped.
 
 Write apt repositories in `sources.list` with `https://`.
 With `http://`, the real password travels in plaintext beyond the proxy (the same goes for any secret injected for an `http://` destination).
@@ -575,8 +575,10 @@ chloe ws unpublish NAME PORT                     unpublish a port
 chloe ws stop NAME
 chloe ws rm NAME [--disks]                      --disks also deletes the disks
 chloe secret list [--owner OWNER]
-chloe secret set [--owner OWNER] KIND            reads the value from stdin
-chloe secret rm [--owner OWNER] KIND
+chloe secret show [--owner OWNER] NAME
+chloe secret set [--owner OWNER] NAME            reads the value from stdin
+chloe secret set [--owner OWNER] NAME --spec     reads the definition and values as TOML from stdin
+chloe secret rm [--owner OWNER] NAME
 chloe policy show [OWNER]                        user, organization, or team settings
 chloe policy set [OWNER]                         reads TOML from stdin
 chloe policy rm [OWNER]
