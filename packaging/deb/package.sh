@@ -81,7 +81,7 @@ Upstream-Name: chloe
 Source: https://github.com/f0reachARR/chloe
 
 Files: *
-Copyright: 2026 chloe contributors
+Copyright: 2026 f0reachARR
 License: MIT or Apache-2.0
  On Debian systems, the full text of the Apache License 2.0 can be found
  in /usr/share/common-licenses/Apache-2.0.
