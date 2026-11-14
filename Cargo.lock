@@ -686,7 +686,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-agent-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "futures",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-ask"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-audit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-controller"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.23.1",
  "chloe-agent-proto",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-egress"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-github"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chloe-secrets",
  "jsonwebtoken",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-guest-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chloe-agent-proto",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-mtls"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "hyper",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-node"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-policy"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.23.1",
  "hmac 0.12.1",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-runner"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chloe-agent-proto",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "chloe-secrets"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
