@@ -1,34 +1,34 @@
-# ゲートウェイの設定の例 (/etc/chloe/gateway.toml)。配置は docs/install.md の「配置」に合わせてある。
+# Example gateway configuration (/etc/chloe/gateway.toml). Paths match the layout in docs/install.md.
 #
 #   sudo install -m 644 deploy/gateway.toml /etc/chloe/gateway.toml
 #   sudo systemctl enable --now chloe-gateway
 #
-# 接続は ssh <GitHub のログイン名>@<ホスト> 。公開鍵は GitHub に登録したものを使う。
-# GitHub App を設定すると、公開鍵を登録していない利用者は Device Flow でログインできる。
+# Connect with ssh <github-login>@<host>, using a public key registered on GitHub.
+# With a GitHub App configured, users without a registered public key can log in via Device Flow.
 
-# ホストの sshd が 22 番を使っているなら、sshd を別のポートに移すか、ここを別のポートにする。
+# If the host's sshd uses port 22, move sshd to another port or use another port here.
 listen = "0.0.0.0:22"
-# ホスト鍵、データベース、マスター鍵は、なければ作る。
+# The host key, database, and master key are created if missing.
 host_key = "/var/lib/chloe/host_key"
 database = "/var/lib/chloe/chloe.db"
 master_key = "/var/lib/chloe/master.key"
-# 監査ログ (JSON Lines)。ログイン、セッション、ポート転送、ランナー、シークレットの問い合わせを記録する。
+# Audit log (JSON Lines). Records logins, sessions, port forwarding, runners, and secret lookups.
 audit_log = "/var/log/chloe/audit.jsonl"
 idle_timeout_secs = 1800
 
-# GitHub App の設定 (docs/github-app.md)。アプリをインストールした Organization のメンバーがログインできる。
+# GitHub App configuration (docs/github-app.md). Members of organizations with the app installed can log in.
 # github_app = "/etc/chloe/github-app.toml"
 
-# ログインを許す GitHub のログイン名 (GitHub App の Organization のメンバーに加えて許す)。
+# GitHub logins allowed to log in (in addition to members of the GitHub App's organizations).
 allowed_users = ["your-github-login"]
-# サーバーの運用者。どの Organization と team の設定 (chloe policy) とシークレットも変えられる。
-# GitHub で Organization の管理者である利用者は、ここに書かなくてもその Organization のものを変えられる。
+# Server operators. They can change any organization's and team's settings (chloe policy) and secrets.
+# Organization administrators on GitHub can change their organization's without being listed here.
 admins = ["your-github-login"]
 
-# すべてのワークスペースに共通の、外への通信の規則。宛先、メソッド、パスで、上から順に評価し、
-# 最初に一致した規則で決める。どれにも一致しなければ遮断する。書き方は docs/configuration.md にある。
-# シークレットの差し替え先 (api.anthropic.com など) は、どの規則にも書いていなければ、
-# シークレットを登録すると自動で加わる。
+# Outbound traffic rules shared by all workspaces, by destination, method, and path. Evaluated top to bottom;
+# the first match decides. If none matches, traffic is blocked. See docs/configuration.md for the format.
+# Secret injection destinations (api.anthropic.com etc.) not written in any rule
+# are added automatically when the secret is registered.
 [[policy.rules]]
 name = "github-no-delete"
 hosts = ["api.github.com"]
@@ -49,7 +49,7 @@ hosts = [
     "github.com",
     "api.github.com",
     "*.githubusercontent.com",
-    # mise が引くツールの版の一覧 (ダウンロードの多くは github.com から)。
+    # Tool version lists fetched by mise (most downloads come from github.com).
     "mise-versions.jdx.dev",
     "registry.npmjs.org",
     "pypi.org",
@@ -60,8 +60,8 @@ hosts = [
 ]
 action = "allow"
 
-# 復号せずに中継だけする宛先 (証明書を固定するクライアント向け)。メソッドとパスは書けず、
-# ほかの規則と宛先が重なると起動しない。
+# Destinations relayed without decryption (for clients that pin certificates). Methods and paths cannot be set,
+# and the gateway does not start if destinations overlap other rules.
 [[policy.rules]]
 name = "passthrough"
 hosts = [
@@ -72,62 +72,62 @@ hosts = [
 ]
 action = "passthrough"
 
-# GitHub のトークン (github_token) を VM に渡す定義。省くと github.com 向けの既定を使う。
-# GitHub Enterprise Server に向けるときなどに書く。書き方はシークレットの定義 (docs/usage.md) から値を除いたもの。
+# How the GitHub token (github_token) is passed to the VM. If omitted, the github.com default is used.
+# Set it e.g. for GitHub Enterprise Server. Format: a secret definition (docs/usage.md) without the value.
 # [github_token]
 # env = ["GH_TOKEN", "GITHUB_TOKEN"]
 # placeholder = "ghu_{id}"
 # [[github_token.inject]]
 # hosts = ["ghe.example.com"]
 # header = "authorization"
-# format = "basic-password"           # git の HTTPS (Basic 認証のパスワード)
+# format = "basic-password"           # git over HTTPS (Basic auth password)
 # [[github_token.inject]]
 # hosts = ["api.ghe.example.com"]
 # header = "authorization"
 
-# ワークスペースの VM の vCPU の数とメモリ (MiB) の既定。利用者は chloe ws machine で変えられる。
+# Default vCPU count and memory (MiB) of workspace VMs. Users can change them with chloe ws machine.
 # [machine]
 # vcpus = 4
 # memory_mib = 4096
 
-# ワークスペースのディスクの大きさ (GiB) の既定と上限。利用者は chloe ws disk で上限まで大きくできる。
+# Default and maximum workspace disk sizes (GiB). Users can grow disks up to the maximum with chloe ws disk.
 # [disks]
 # workspace_gib = 20
 # docker_gib = 40
 # max_workspace_gib = 200
 # max_docker_gib = 400
 
-# 認証を通らない SSH の接続 (失敗も、何もせずに切ったのも) が window_secs のあいだに max_failures 回
-# に達した接続元を、ban_secs のあいだ受け付けない。max_failures = 0 で使わない。
+# Refuse, for ban_secs, sources whose unauthenticated SSH connections (failed or closed without doing anything)
+# reach max_failures within window_secs. max_failures = 0 disables this.
 # [ban]
 # max_failures = 10
 # window_secs = 600
 # ban_secs = 600
-# ignore = ["127.0.0.0/8", "::1", "10.0.0.0/8"]  # 監視やヘルスチェックの接続元
+# ignore = ["127.0.0.0/8", "::1", "10.0.0.0/8"]  # monitoring and health-check sources
 
-# 同じホストで、ランナーを systemd の unit で動かす。パスは /etc/chloe/runner.env に書く。
-# Docker のコンテナで動かすときは、kind を消して guest_dir、egress_bin、state_root を書く
-# (docs/configuration.md の [runner])。
+# Run runners on the same host as systemd units. Paths go in /etc/chloe/runner.env.
+# To run them in Docker containers, remove kind and set guest_dir, egress_bin, and state_root
+# ([runner] in docs/configuration.md).
 [runner]
 kind = "systemd"
 
-# 複数のホストにランナーを置くときは、[runner] の代わりに [cluster] を書く。
-# sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add <名前> --url https://<host>:8445
-# で参加用のトークンを作り、そのホストで chloe-node join を実行する (deploy/node.toml)。
+# To place runners on multiple hosts, write [cluster] instead of [runner].
+# sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add <name> --url https://<host>:8445
+# creates a join token; then run chloe-node join on that host (deploy/node.toml).
 # [cluster]
-# listen = "0.0.0.0:8444"            # chloe-node から受ける内部 API (相互 TLS)
-# server_names = ["cp.example.com"]  # chloe-node がつなぐ名前 (証明書に入れる)
-# pki_dir = "/var/lib/chloe/pki"     # CA の証明書と鍵
+# listen = "0.0.0.0:8444"            # internal API (mTLS) chloe-node connects to
+# server_names = ["cp.example.com"]  # name chloe-node connects to (put in the certificate)
+# pki_dir = "/var/lib/chloe/pki"     # CA certificate and key
 
-# HTTP(S) の管理 API と Web の画面。管理 API には chloe token create で作ったトークンを Bearer で渡す。
-# tls_cert と tls_key を書けば HTTPS、なければ HTTP (リバースプロキシの後ろかローカル向け)。
-# public_url を書くと Web の画面を出す (ブラウザで開く URL。リバースプロキシを置くならその URL)。
+# HTTP(S) admin API and web UI. Pass a token from chloe token create to the admin API as a Bearer token.
+# HTTPS if tls_cert and tls_key are set, otherwise HTTP (behind a reverse proxy or for local use).
+# Setting public_url serves the web UI (the URL opened in a browser; the reverse proxy's URL if you use one).
 # [api]
 # listen = "127.0.0.1:8080"
 # tls_cert = "/etc/chloe/api.crt"
 # tls_key = "/etc/chloe/api.key"
 # public_url = "https://chloe.example.com"
 # web_root = "/usr/local/share/chloe/web"
-# VM の中で公開したポートを開くホストの元。ランダムな名前の <名前>.<ドメイン> を割り当てるので、
-# ワイルドカードの DNS と証明書が要る。Web の画面とは登録できるドメインを分けるとよい。
+# Base for hosts that open ports published in the VM. Random <name>.<domain> hosts are assigned,
+# so wildcard DNS and a certificate are needed. Prefer a different registrable domain from the web UI.
 # proxy_url = "https://chloe-preview.example.net"

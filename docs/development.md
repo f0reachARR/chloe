@@ -1,8 +1,8 @@
-# 開発
+# Development
 
-クレートの構成は [README](../README.md#リポジトリの構成) に、設計の前提は [調査と計画](research-and-plan.md) に、段階ごとの計画と結果は [実装手順](implementation-steps.md) にある。
+The crate layout is in the [README](../README.md#repository-layout), the design assumptions are in the [research and plan](design/research-and-plan.md) (Japanese), and the per-stage plans and results are in the [implementation log](design/implementation-steps.md) (Japanese).
 
-## ビルドと静的な確認
+## Build and static checks
 
 ```sh
 cargo build --workspace
@@ -11,105 +11,105 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-`cargo test` は VM を使わずに数秒で終わる。
-ゲストのバイナリ（`chloe-guest-agent`）は、`images/guest/rootfs/build.sh` が musl でビルドしてルートファイルシステムに入れる。
+`cargo test` does not use VMs and finishes in a few seconds.
+The guest binary (`chloe-guest-agent`) is built with musl by `images/guest/rootfs/build.sh`, which puts it into the root filesystem.
 
-## Web の画面
+## Web UI
 
-Web の画面は `web/` にある。
-構成、依存の向き、状態の置き場所、安全のための決まりは [Web の画面の方針](web.md) にある。
-Node.js と pnpm は mise などで入れる（版は `web/package.json` の `packageManager`）。
+The web UI lives in `web/`.
+Its layout, dependency direction, where state lives, and security rules are in the [web UI guidelines](web.md).
+Install Node.js and pnpm with mise or similar (the version is `packageManager` in `web/package.json`).
 
 ```sh
 cd web
 pnpm install
-pnpm dev            # http://localhost:5173 。/api はゲートウェイ (CHLOE_API、既定 http://127.0.0.1:8080) へ中継する
+pnpm dev            # http://localhost:5173. /api is proxied to the gateway (CHLOE_API, default http://127.0.0.1:8080)
 pnpm typecheck
 pnpm lint           # oxlint
-pnpm format         # oxfmt (確かめるだけなら pnpm format:check)
+pnpm format         # oxfmt (pnpm format:check to only check)
 pnpm test           # Vitest
-pnpm build          # web/dist に書き出す
+pnpm build          # writes to web/dist
 ```
 
-開発では、ゲートウェイの `[api]` の `public_url` を Vite の URL（`http://localhost:5173`）にし、`web_root` は書かない。
-GitHub のログインのコールバックも Vite を通ってゲートウェイに届き、cookie と `Origin` の確認もそのまま働く。
-GitHub App を使わないときは、`chloe web login` が出す URL でログインする。
+For development, set the gateway's `public_url` under `[api]` to the Vite URL (`http://localhost:5173`) and leave `web_root` unset.
+The GitHub login callback also reaches the gateway through Vite, and the cookie and `Origin` checks work unchanged.
+Without a GitHub App, log in with the URL that `chloe web login` prints.
 
-### 機能を足す
+### Adding a feature
 
-1. `web/src/features/<機能>/` を作り、`index.ts` と、要れば `feature.ts`（ナビゲーションの項目、出来事の処理）を書く。
-2. `web/src/app/features.ts` の一覧に足す。
-3. `web/src/routes/_app/<パス>.tsx` にルートを書く（ログインしたあとの画面は `_app` の下に置く）。
+1. Create `web/src/features/<feature>/` and write `index.ts` and, if needed, `feature.ts` (navigation items, event handlers).
+2. Add it to the list in `web/src/app/features.ts`.
+3. Write the route in `web/src/routes/_app/<path>.tsx` (screens that require login go under `_app`).
 
-### API の型とテスト
+### API types and tests
 
-管理 API を変えたら、スペックを書き出し直して型を作り直す。
-`cargo test` は、`web/openapi.json` がコードとずれていると失敗する。
+When you change the admin API, re-export the spec and regenerate the types.
+`cargo test` fails if `web/openapi.json` is out of sync with the code.
 
 ```sh
 cargo run -p chloe-gateway -- openapi > web/openapi.json
 (cd web && pnpm api)
 ```
 
-テストの偽の API は `web/src/test/msw.ts` の `http` で書く。
-スペックにないパスや、型の合わない応答は `pnpm typecheck` で落ちる。
+Fake APIs for tests are written with `http` from `web/src/test/msw.ts`.
+Paths not in the spec and responses with mismatched types fail `pnpm typecheck`.
 
 ### E2E
 
-本物のゲートウェイと VM を相手にする画面の確認は `web/e2e` に Playwright で書き、`images/guest/dev/test-all.sh web` で回す（下の「VM を使う確認」）。
-スクリプトがゲートウェイを起動し、`chloe web login` の URL（`CHLOE_E2E_LOGIN`）と画面の URL（`CHLOE_E2E_URL`）を渡して `pnpm e2e` を実行する。
-初めは `pnpm exec playwright install chromium` でブラウザを入れる。
-コンソールに誤り（CSP の違反など）が出ると、テストは落ちる。
-`CHLOE_E2E_SCREENSHOTS=1` を付けると、すべてのテストの終わりの画面を `build/dev/web/playwright` に撮るので、見た目を確かめられる。
+UI tests against a real gateway and VM are written with Playwright in `web/e2e` and run with `images/guest/dev/test-all.sh web` (see [VM-based tests](#vm-based-tests) below).
+The script starts the gateway, passes the `chloe web login` URL (`CHLOE_E2E_LOGIN`) and the UI URL (`CHLOE_E2E_URL`), and runs `pnpm e2e`.
+The first time, install the browser with `pnpm exec playwright install chromium`.
+Tests fail if errors (such as CSP violations) appear in the console.
+With `CHLOE_E2E_SCREENSHOTS=1`, the final screen of every test is captured to `build/dev/web/playwright`, so you can check how things look.
 
-## 確認の二層
+## Two layers of tests
 
-- **Rust のテスト**：判断の中身を確かめる。controller の停止の予約、作業中のエージェントを待つ停止、reconcile、問い合わせへの答え、方針の層の重ね方、相互 TLS の役割の判定などは、偽のランナーと偽の guest-agent、偽の GitHub を相手に確かめる。
-- **VM を使う確認**：部品がつながっていることを確かめる。本物のゲートウェイ、`chloe-node`、ランナー、VM を動かし、機能ごとに代表の項目だけを確かめる。
+- **Rust tests**: check the decision logic. Controller stop scheduling, stopping that waits for busy agents, reconcile, answers to queries, policy layering, mutual TLS role checks, and so on are tested against a fake runner, a fake guest-agent, and a fake GitHub.
+- **VM-based tests**: check that the parts are wired together. They run a real gateway, `chloe-node`, runner, and VM, and check only representative items for each feature.
 
-判断の細かな場合分けは Rust のテストに足し、VM を使う確認には足さない。
+Add fine-grained decision cases to the Rust tests, not to the VM-based tests.
 
-## VM を使う確認
+## VM-based tests
 
-KVM と Docker が要る。
-`systemd` の確認も Docker の特権コンテナで行うので、root の権限は要らない。
-先にゲストのイメージをビルドしておく（[インストール](install.md#deb-を作る)）。
-本物の API キーは使わず、偽の値をシークレットに登録して、差し替えた要求が宛先で 401 になることで確かめる。
+These need KVM and Docker.
+The `systemd` test also runs in a privileged Docker container, so root privileges are not needed.
+Build the guest image first ([Install](install.md#build-a-deb)).
+No real API keys are used: fake values are registered as secrets, and the tests confirm that injected requests get a 401 at the destination.
 
 ```sh
-images/guest/dev/test-all.sh            # すべてを並べて実行する
-images/guest/dev/test-all.sh mvp node   # 名前を指定して実行する
+images/guest/dev/test-all.sh            # run everything in parallel
+images/guest/dev/test-all.sh mvp node   # run the named tests
 ```
 
-| 確認 | 内容 |
+| Test | Covers |
 | --- | --- |
-| `smoke` | VM の起動、Docker、mise、起動し直してもワークスペースと Docker のデータが残ること |
-| `net` | 透過プロキシ、許可リスト、DNS、差し替え、中継のみの宛先、mise がプロキシを通してツールを入れられること |
-| `root` | ランナーが渡す環境変数、ルートの使い捨てと保持 |
-| `disk` | 指定した大きさでディスクを作ること、次の起動で中身を残して広げること、縮めないこと |
-| `mvp` | 二人の利用者、シークレット、動いたままの更新、HTTP の要求の記録、エージェントからの依頼、ワークスペース、停止、管理 API |
-| `web` | Web の画面の E2E（`web/e2e`）。ビルドした画面を出すゲートウェイを相手に、Playwright の Chromium で、スマートフォンの幅と広い画面の両方で、端末、キーの列、Inbox で答えることを確かめる |
-| `github` | GitHub App（GitHub のふりをするサーバー）、Device Flow を必須にしたログイン、共通のユーザー名と鍵の結び付け、二つの Organization、設定とシークレットの権限、管理の TUI |
-| `lifecycle` | 作業中のエージェントを待つ停止、ゲートウェイの再起動、ポート転送、監査ログ |
-| `machine` | ワークスペースごとの VM の vCPU の数とメモリ、止めるまでの時間（止めないことを含む） |
-| `node` | 二つの `chloe-node`、参加、ほかのホストの HTTP の要求の記録、ディスクを広げること、相互 TLS、つながらないホスト |
-| `systemd` | systemd で動かすランナー（`kind = "systemd"`）。systemd を PID 1 にした特権コンテナをホストの代わりにし、`deploy/` の unit、polkit の規則、ホストのネットワークの規則で、起動、利用者、外への通信と DNS、ホストとプライベートアドレスへの遮断、方針の入れ替え、ゲートウェイの再起動、停止と片づけを確かめる |
+| `smoke` | VM boot, Docker, mise, and that the workspace and Docker data survive a restart |
+| `net` | Transparent proxy, allowlist, DNS, injection, passthrough destinations, and that mise can install tools through the proxy |
+| `root` | Environment variables passed by the runner, ephemeral and persistent root |
+| `disk` | Creating the disk at the specified size, growing it on the next boot while keeping its contents, and never shrinking it |
+| `mvp` | Two users, secrets, live updates, HTTP request log, asks from agents, workspaces, stop, admin API |
+| `web` | Web UI E2E (`web/e2e`). Against a gateway serving the built UI, using Playwright's Chromium at both smartphone width and on a wide screen, checks the terminal, the key row, and answering in the Inbox |
+| `github` | GitHub App (with a server impersonating GitHub), login with Device Flow required, linking a shared username to keys, two organizations, permissions for settings and secrets, admin TUI |
+| `lifecycle` | Stopping that waits for busy agents, gateway restart, port forwarding, audit log |
+| `machine` | Per-workspace VM vCPU count and memory, idle timeout (including never stopping) |
+| `node` | Two `chloe-node`s, join, HTTP request log from another host, growing the disk, mutual TLS, unreachable hosts |
+| `systemd` | Runner run by systemd (`kind = "systemd"`). Uses a privileged container with systemd as PID 1 in place of the host and, with the `deploy/` units, polkit rules, and host network rules, checks startup, users, outbound traffic and DNS, blocking of the host and private addresses, policy replacement, gateway restart, and stop and cleanup |
 
-どの確認も VM の名前、状態のディレクトリ、ポートが別なので、並べて実行できる（2026-10-17 の時点で 320 項目が 79 秒）。
-各スクリプトの出力は `build/dev/test-logs/<名前>.log` に出る。
-各項目には直前の項目からの秒数が付き、ゲートウェイを通す確認は節ごとの所要時間を最後に出す。
+Each test uses its own VM names, state directories, and ports, so they can run in parallel (as of 2026-10-17, 320 checks in 79 seconds).
+Each script's output goes to `build/dev/test-logs/<name>.log`.
+Each check is tagged with the seconds since the previous one, and tests that go through the gateway print per-section durations at the end.
 
-確認のスクリプトを書くときは、次のようにする。
+When writing test scripts:
 
-- 決まった秒数の `sleep` ではなく、条件（ログの行、ポート、ランナーの状態）を `wait_until` で待つ（`images/guest/dev/gateway-lib.sh`）。
-- 停止までの時間と問い合わせの間隔を、確認と確認のあいだにランナーが止まらない程度に短くする。
-- 本物の値（偽の値でも）とトークンを、確認の出力に出さない。
+- Instead of a fixed-length `sleep`, wait for a condition (a log line, a port, the runner's state) with `wait_until` (`images/guest/dev/gateway-lib.sh`).
+- Shorten the idle timeout and polling interval, but not so far that the runner stops between tests.
+- Never print real values (even fake ones) or tokens in test output.
 
-## deb の確認
+## Testing the deb
 
-`packaging/deb/build.sh` で作った deb を、systemd を PID 1 にした Ubuntu の特権コンテナに `apt` で入れて確かめる。
-新しく入れる、ランナーを動かす、版を上げて入れ直す（動いているワークスペースが止まらない）、消す、purge する、の順に確かめる。
-ゲストのイメージは `build/guest` を使う。
+The deb built by `packaging/deb/build.sh` is installed with `apt` into a privileged Ubuntu container with systemd as PID 1 and tested.
+The tests run in order: fresh install, running a runner, upgrading to a newer version (running workspaces do not stop), remove, and purge.
+The guest image comes from `build/guest`.
 
 ```sh
 packaging/deb/build.sh
@@ -117,32 +117,33 @@ packaging/deb/test.sh 24.04
 packaging/deb/test.sh 26.04
 ```
 
-`build.sh` は lintian の結果も出す。
-意図した警告は `packaging/deb/lintian-suppress` に理由とともに書く。
+`build.sh` also prints lintian results.
+Intended warnings go in `packaging/deb/lintian-suppress` along with the reason.
 
-## VM に直接入る
+## Entering a VM directly
 
-ゲートウェイを通さずに、開発用のコンテナで VM を起動して入れる。
+You can boot a VM in the development container and get into it without going through the gateway.
 
 ```sh
-images/guest/dev/run.sh                                     # 端末でシリアルコンソールにつなぐ
-CHLOE_DEV_DETACH=1 images/guest/dev/run.sh                  # バックグラウンドで起動する
+images/guest/dev/run.sh                                     # connect the terminal to the serial console
+CHLOE_DEV_DETACH=1 images/guest/dev/run.sh                  # start in the background
 target/debug/chloe-runner shell --vsock build/dev/vsock.sock
 ```
 
-VM の中で `sudo reboot` すると、Firecracker が終わる。
+Running `sudo reboot` inside the VM terminates Firecracker.
 
 ## CI
 
-GitHub Actions で、VM を使わずに回せる確認と deb のビルドを行う。
-KVM が要る VM を使う確認と deb の確認（`packaging/deb/test.sh`）は、CI では回さず手元で回す。
+GitHub Actions runs the tests that do not need VMs and builds the debs.
+The VM-based tests, which need KVM, and the deb tests (`packaging/deb/test.sh`) are not run in CI; run them locally.
 
-- **CI**（`.github/workflows/ci.yml`）：main への push と Pull Request で、上の「ビルドと静的な確認」（clippy は `-D warnings`）と、Web の画面の lint、整形、テスト、ビルドを行う。`web/src/shared/api/schema.d.ts` と `web/src/routeTree.gen.ts` が、作り直したものと違うと落ちる。
-- **release**（`.github/workflows/release.yml`）：main への push と手動の実行で、`packaging/deb/build.sh` を実行し、`chloe-common`、`chloe-gateway`、`chloe-node` を成果物として置く。手動の実行では、ゲストのカーネルとルートファイルシステムをビルドして `chloe-guest` も作る（外せる）。カーネルは、`images/guest/kernel/` が変わらなければキャッシュのものを使う。
-  main への push では、release-please（設定は `release-please-config.json` と `.release-please-manifest.json`）が、前のリリースからのコミットの Conventional Commits の型から次の版を決め、`CHANGELOG.md` と版（`Cargo.toml`、`Cargo.lock`、`web/package.json`）を上げるリリースの Pull Request を作り直す。1.0.0 までは、破壊的な変更でも major ではなく minor を上げる（`feat` で minor、`fix` で patch）。
-  その Pull Request をマージすると、タグ `v<版>` と GitHub のリリースができ、同じ実行の中で `chloe-guest` を含む deb を `DEB_RELEASE=1`（版に `+git` を付けない）で作って、リリースに置く。
-  リポジトリの設定で「Allow GitHub Actions to create and approve pull requests」を有効にしておく。GITHUB_TOKEN で作った Pull Request では CI が起きないので、リリースの Pull Request の CI は回らない（中身は版と `CHANGELOG.md` だけ）。
+- **CI** (`.github/workflows/ci.yml`): on pushes to main and pull requests, runs [Build and static checks](#build-and-static-checks) above (clippy with `-D warnings`) plus the web UI's lint, formatting, tests, and build. It fails if `web/src/shared/api/schema.d.ts` or `web/src/routeTree.gen.ts` differ from their regenerated versions.
+- **release** (`.github/workflows/release.yml`): on pushes to main and manual runs, runs `packaging/deb/build.sh` and uploads `chloe-common`, `chloe-gateway`, and `chloe-node` as artifacts. Manual runs also build the guest kernel and root filesystem to produce `chloe-guest` (this can be turned off). The kernel comes from the cache unless `images/guest/kernel/` has changed.
+  On pushes to main, release-please (configured in `release-please-config.json` and `.release-please-manifest.json`) determines the next version from the Conventional Commits types of the commits since the previous release, and recreates a release pull request that updates `CHANGELOG.md` and the versions (`Cargo.toml`, `Cargo.lock`, `web/package.json`). Until 1.0.0, even breaking changes bump minor rather than major (`feat` bumps minor, `fix` bumps patch).
+  Merging that pull request creates the tag `v<version>` and a GitHub release, and in the same run builds the debs including `chloe-guest` with `DEB_RELEASE=1` (no `+git` in the version) and attaches them to the release.
+  Enable "Allow GitHub Actions to create and approve pull requests" in the repository settings. Pull requests created with GITHUB_TOKEN do not trigger CI, so CI does not run on the release pull request (it only contains versions and `CHANGELOG.md`).
 
-## コミット
+## Commits
 
-Conventional Commits の形で、説明は日本語で書く（`feat(gateway): ...`、`fix(controller): ...`、`docs: ...`）。
+Use Conventional Commits, with descriptions in English and the crate or area as the scope (`feat(gateway): ...`, `fix(controller): ...`, `docs: ...`).
+release-please builds `CHANGELOG.md` from these messages.

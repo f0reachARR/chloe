@@ -43,7 +43,7 @@
 - **VM を使う確認**（`images/guest/dev/*-test.sh`）：部品がつながっていることを確かめる。本物のゲートウェイ、ランナー、VM を動かし、機能ごとに代表の項目だけを確かめる。判断の細かな場合分けは Rust のテストに任せる。
 
 VM を使う確認は `images/guest/dev/test-all.sh` でまとめて実行する。
-どの確認も VM の名前、状態のディレクトリ、ポートが別なので、並べて実行する（段階 7 を終えた時点で 6 つ、171 項目が 57 秒。今の一覧は [開発](development.md) にある）。
+どの確認も VM の名前、状態のディレクトリ、ポートが別なので、並べて実行する（段階 7 を終えた時点で 6 つ、171 項目が 57 秒。今の一覧は [開発](../development.md) にある）。
 各項目には直前の項目からの秒数が付き、ゲートウェイを通す確認は節ごとの所要時間を最後に出すので、遅くなった箇所はそこから探す。
 
 VM を使う確認では、次のように待ち時間を短く保つ。
@@ -441,7 +441,7 @@ VM の環境変数（プレースホルダー）は起動時に決まるので�
 `github-test.sh` の 56 項目を含め、VM を使う確認の 210 項目がすべて通った。
 本物の GitHub でも、インストールの一覧、インストールトークンの発行、Organization での役割（`admin`）を確かめた。
 
-- **8a 複数の Organization**：`/app/installations` から Organization ごとのインストールを調べ（5 分覚えておく）、Organization を指定してインストールトークンを発行し、所属を確かめる。App の設定の `organization` と `organizations` は任意で、書けば使う Organization を限る。アプリを Any account で公開するときは、ここで限る（[GitHub App の準備](github-app.md)）。
+- **8a 複数の Organization**：`/app/installations` から Organization ごとのインストールを調べ（5 分覚えておく）、Organization を指定してインストールトークンを発行し、所属を確かめる。App の設定の `organization` と `organizations` は任意で、書けば使う Organization を限る。アプリを Any account で公開するときは、ここで限る（[GitHub App の準備](../github-app.md)）。
 - **8b 役割**：所属は `/orgs/{org}/memberships/{user}` と team の memberships で確かめ、招待を承諾していない利用者はメンバーとみなさない。Organization の `admin` と team の `maintainer` を返す。
 - **8c 設定の層**：データベースの `policies` に Organization と team の設定を置き、全体、Organization、team の順に重ねる。許可リストは足し合わせ、パスの規則は上の層を先に並べる（最初に一致した規則で決まるので、下の層は上の層の規則を覆せない）。中継のみの宛先は、Organization と team の設定には書けない。復号しないので規則が効かず、書けると上の層の規則を素通りする宛先を作れてしまうためである。ルートの扱いの既定とインストールトークンの範囲は、もっとも下の層の値を使う。`chloe policy show|set|rm OWNER`（TOML）で読み書きし、変えたらその持ち主（Organization なら team も）の動いているランナーに送る。設定を変えられるのは、Organization の管理者とゲートウェイの設定の `admins`（サーバーの運用者）である。
 - **8d シークレット**：`chloe secret list|set|rm --owner OWNER`。team のワークスペースは、team になければ Organization のシークレットを使う（同じ種類なら team のものが優先する）。
@@ -629,7 +629,7 @@ VM を使う確認は 9 つ、398 項目がすべて通った（並べて 80 秒
   - `chloe-node`：`chloe-node`、その unit、`/etc/chloe/node.toml`。`chloe-common` に依存する。
   - `chloe-guest`：ゲストのカーネルとルートファイルシステム（約 2.3GB）。ビルドしたときの Claude Code と Codex を含むので、作るのは指定したときだけにし、公開する場所には置かない。`chloe-common` は `Suggests` で示すだけにする。
 - **置き場所**：`/usr/bin`（`chloe-gateway`、`chloe-node`）、`/usr/libexec/chloe`（`chloe-egress`、ランナーのスクリプト、Firecracker）、`/usr/lib/chloe/guest`（ゲストのイメージ）。`deploy/` の unit と設定の例は、手で置くときの `/usr/local` のまま残し、パッケージを作るときにパスを書き換える。手で置く手順を壊さず、元を一つに保つためである。
-- **既定の設定**：`deploy/gateway.toml` と `deploy/node.toml` の `[runner]` を `kind = "systemd"` にする。Docker で動かす書き方は、注釈と [設定](configuration.md) に残す。状態の置き場所は、ゲートウェイのホストでも `chloe-node` のホストでも `/var/lib/chloe/workspaces` にそろえ、`runner.env` を書き換えずに使えるようにする。
+- **既定の設定**：`deploy/gateway.toml` と `deploy/node.toml` の `[runner]` を `kind = "systemd"` にする。Docker で動かす書き方は、注釈と [設定](../configuration.md) に残す。状態の置き場所は、ゲートウェイのホストでも `chloe-node` のホストでも `/var/lib/chloe/workspaces` にそろえ、`runner.env` を書き換えずに使えるようにする。
 - **Firecracker**：Apache-2.0 で再配布できるので、公式のリリースのバイナリを `chloe-common` に入れる。`chloe-runner-start` は、同じディレクトリに `firecracker` があればそれを使い、なければ `PATH` から探す。
 - **unit の扱い**：インストールしただけでは、どの unit も有効にせず、起動もしない。設定の例のままでは、ゲートウェイが 22 番で待ち受けて sshd とぶつかり、`allowed_users` も仮の名前だからである。更新のときは、動いているゲートウェイと `chloe-node` だけを起動し直す（動いているワークスペースは止まらない）。ランナーの unit は、更新では止めない。止めるのは `chloe-common` を消すときだけにする。
 - **purge**：`/var/lib/chloe` は消さない。マスター鍵を失うと、保存したシークレットを読めなくなるからである。

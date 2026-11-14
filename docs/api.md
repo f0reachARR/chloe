@@ -1,132 +1,132 @@
-# 管理 API
+# Admin API
 
-SSH の `chloe` コマンドと同じ操作を、HTTP(S) と JSON で行う。
-有効にする手順は [インストール](install.md#管理-api-を有効にする) にある。
-パスはすべて `/api/v1` で始まる（以前の `/v1` からは移した）。
-OpenAPI のスペックは `chloe-gateway openapi` で書き出せ、リポジトリの `web/openapi.json` にも置いてある。
+The admin API performs the same operations as the `chloe` command over SSH, using HTTP(S) and JSON.
+See [Installation](install.md#enable-the-admin-api) for how to enable it.
+All paths start with `/api/v1` (they moved from the earlier `/v1`).
+`chloe-gateway openapi` writes out the OpenAPI spec, and a copy lives in the repository at `web/openapi.json`.
 
-## 認証
+## Authentication
 
-SSH で、API のトークンを作る。
-トークンはこのときにしか表示しない（データベースにはハッシュだけを置く）。
+Create an API token over SSH.
+The token is shown only at this point (the database stores only its hash).
 
 ```sh
 ssh alice@chloe.example.com chloe token create ci --expires 30d
 ```
 
-トークンを `Authorization: Bearer` で渡す。
+Pass the token in `Authorization: Bearer`.
 
 ```sh
 export CHLOE_TOKEN=chloe_...
 curl -H "Authorization: Bearer $CHLOE_TOKEN" https://chloe.example.com:8080/api/v1/me
 ```
 
-- トークンの権限は、作った利用者の権限と同じである。
-- 利用者がログインできなくなったら（Organization から抜けたなど）、トークンも使えない。
-- `--expires` を省くと期限がない。期限は `30d`（日）か `12h`（時間）で書く。
-- `chloe token list` で一覧を、`chloe token revoke <ID>` で失効させる。API の `/api/v1/tokens` でも同じことができる。
+- A token has the same permissions as the user who created it.
+- If the user can no longer log in (for example, they left the organization), the token stops working too.
+- Without `--expires`, the token never expires. Write the expiry as `30d` (days) or `12h` (hours).
+- `chloe token list` lists your tokens, and `chloe token revoke <ID>` revokes one. The API's `/api/v1/tokens` does the same.
 
-API の呼び出しは、利用者、トークンの ID、メソッド、パス、ステータスを監査ログに残す（本文は残さない）。
+Every API call records the user, token ID, method, path, and status in the audit log (request bodies are not recorded).
 
-### Web の画面のセッション
+### Web UI sessions
 
-[Web の画面](usage.md#web-の画面) は、トークンの代わりにセッションの cookie（`chloe_session`）で同じ API を呼ぶ。
-cookie はブラウザが自動で付けるので、ほかのサイトから送らせた要求を断るために、次のように扱う。
+The [web UI](usage.md#web-ui) calls the same API with a session cookie (`chloe_session`) instead of a token.
+Because the browser attaches the cookie automatically, the API handles it as follows to reject requests forged from other sites.
 
-- GET と HEAD のほかの要求と、WebSocket への切り替え（`Upgrade` のある要求。端末）は、`Origin` がゲートウェイの `public_url` と一致しなければ 403 にする。
-- トークンを作る（`POST /api/v1/tokens`）ことは、cookie では 403 にする。
-- シークレットの登録（`PUT /api/v1/secrets/{name}`）は cookie でもできる。定義を書くときは必ずすべての欄の値が要り、登録してある値を残して定義だけを変える方法は API にない（[シークレット](#シークレット)）。
-- 監査ログには `via = "web"` とセッションの ID を残す。
+- Requests other than GET and HEAD, and upgrades to WebSocket (requests with `Upgrade`; the terminal), get 403 unless `Origin` matches the gateway's `public_url`.
+- Creating a token (`POST /api/v1/tokens`) gets 403 with a cookie.
+- Registering a secret (`PUT /api/v1/secrets/{name}`) works with a cookie. When you write a definition, you must always supply values for every field; the API has no way to change only the definition while keeping the registered values ([Secrets](#secrets)).
+- The audit log records `via = "web"` and the session ID.
 
-ログインの経路は `/api/auth` にある（`GET /api/auth/methods`、`GET /api/auth/github`、`POST /api/auth/link`、`POST /api/auth/logout`）。
+The login endpoints live under `/api/auth` (`GET /api/auth/methods`, `GET /api/auth/github`, `POST /api/auth/link`, `POST /api/auth/logout`).
 
-## 誤り
+## Errors
 
-誤りのときは、ステータスと `{"error": "..."}` を返す。
+On error, the API returns a status and `{"error": "..."}`.
 
-| ステータス | 意味 |
+| Status | Meaning |
 | --- | --- |
-| 400 | 指定が正しくない（JSON、持ち主やシークレットの種類の書き方、設定の項目） |
-| 401 | トークンもセッションもない、知らない、期限切れか失効した |
-| 403 | 権限がない |
-| 404 | ない（入れないワークスペースも、ないものとして扱う） |
-| 409 | すでにある |
+| 400 | Invalid input (JSON, owner or secret kind syntax, settings fields) |
+| 401 | No token or session, or it is unknown, expired, or revoked |
+| 403 | Not permitted |
+| 404 | Not found (workspaces you cannot access are also treated as not found) |
+| 409 | Already exists |
 
-## 一覧
+## Endpoints
 
-ワークスペースの名前（`{name}`）は、SSH のユーザー名の `+` のあとと同じ書き方（`api`、`acme/web`、`acme/dev/tools`）。
-持ち主（`{owner}`、`owner=`）は Organization（`acme`）か team（`acme/dev`）。
+Workspace names (`{name}`) use the same syntax as the part after `+` in the SSH user name (`api`, `acme/web`, `acme/dev/tools`).
+An owner (`{owner}`, `owner=`) is an organization (`acme`) or a team (`acme/dev`).
 
-| メソッドとパス | 内容 |
+| Method and path | Description |
 | --- | --- |
-| `GET /api/v1/me` | トークンかセッションの利用者 |
-| `GET /api/v1/events` | 依頼の出来事（SSE） |
-| `GET /api/v1/owners` | 入れる持ち主（個人、Organization、team）。ワークスペースを作れる先 |
-| `GET /api/v1/workspaces[?status=true]` | 入れるワークスペースの一覧（`status=true` なら、エージェントが作業中かを VM に尋ねる） |
-| `POST /api/v1/workspaces` | ワークスペースを作る |
-| `GET /api/v1/workspaces/{name}[?status=true]` | ワークスペース |
-| `PATCH /api/v1/workspaces/{name}` | ルートの扱い、ディスクや VM の大きさ、止めるまでの時間を変える、止める |
-| `DELETE /api/v1/workspaces/{name}[?disks=true]` | ワークスペースを消す（`disks=true` でなければディスクは残る） |
-| `GET /api/v1/workspace-policies/{name}` | ワークスペースの規則（`ETag` は版） |
-| `PUT /api/v1/workspace-policies/{name}` | ワークスペースの規則を置き換える（`If-Match` で版を確かめる） |
-| `DELETE /api/v1/workspace-policies/{name}` | ワークスペースの規則を消す |
-| `GET /api/v1/workspace-rules/{name}` | ワークスペースで効く規則と出どころ、ワークスペースの規則とその版、変えられるか |
-| `GET /api/v1/workspace-requests/{name}[?lines=]` | HTTP の要求の記録の末尾（既定 200 件、2000 件まで） |
-| `GET /api/v1/workspace-terminal/{name}[?cols=&rows=]` | シェルの端末（WebSocket） |
-| `GET /api/v1/workspace-ports/{name}` | VM の中で公開したポートと、ブラウザで開く URL |
-| `DELETE /api/v1/workspace-ports/{name}?port=` | ポートの公開を取り消す |
-| `GET /api/v1/secrets[?owner=]` | シークレットの名前と定義の一覧 |
-| `GET /api/v1/secrets/{kind}[?owner=]` | シークレットの定義（値は返さない） |
-| `GET /api/v1/secret-templates` | シークレットの雛形（管理の画面と同じもの。定義だけ） |
-| `PUT /api/v1/secrets/{kind}[?owner=]` | シークレットを登録する |
-| `DELETE /api/v1/secrets/{kind}[?owner=]` | シークレットを消す |
-| `GET /api/v1/policy-scopes` | 見られる設定の層（ゲートウェイ、個人、Organization、team）と、変えられるか、規則の数、ワークスペース |
-| `GET /api/v1/policy-rules?scope=` | 層で効く規則と出どころ、層の設定とその版、変えられるか |
-| `GET /api/v1/policy` | 自分の個人の設定（`ETag` は版） |
-| `PUT /api/v1/policy` | 個人の設定を置き換える（`If-Match` で版を確かめる） |
-| `GET /api/v1/policies/{owner}` | Organization か team の設定（`ETag` は版） |
-| `PUT /api/v1/policies/{owner}` | 設定を置き換える（`If-Match` で版を確かめる） |
-| `DELETE /api/v1/policies/{owner}` | 設定を消す |
-| `GET /api/v1/tokens` | 自分のトークンの一覧（値は含まない） |
-| `POST /api/v1/tokens` | トークンを作る |
-| `DELETE /api/v1/tokens/{id}` | トークンを失効させる |
-| `GET /api/v1/asks[?all=true]` | 入れるワークスペースの、エージェントからの依頼（`all=true` でなければ答えを待つものだけ） |
-| `GET /api/v1/asks/{id}` | 依頼 |
-| `POST /api/v1/asks/{id}/answer` | 依頼に答える |
+| `GET /api/v1/me` | The user behind the token or session |
+| `GET /api/v1/events` | Ask events (SSE) |
+| `GET /api/v1/owners` | Owners you can access (user, organization, team): where you can create workspaces |
+| `GET /api/v1/workspaces[?status=true]` | Workspaces you can access (with `status=true`, asks each VM whether an agent is busy) |
+| `POST /api/v1/workspaces` | Create a workspace |
+| `GET /api/v1/workspaces/{name}[?status=true]` | A workspace |
+| `PATCH /api/v1/workspaces/{name}` | Change the root mode, disk or VM size, or idle timeout; stop the workspace |
+| `DELETE /api/v1/workspaces/{name}[?disks=true]` | Delete a workspace (disks are kept unless `disks=true`) |
+| `GET /api/v1/workspace-policies/{name}` | Workspace rules (`ETag` is the version) |
+| `PUT /api/v1/workspace-policies/{name}` | Replace the workspace rules (`If-Match` checks the version) |
+| `DELETE /api/v1/workspace-policies/{name}` | Delete the workspace rules |
+| `GET /api/v1/workspace-rules/{name}` | Rules in effect for the workspace with their sources, the workspace's own rules and their version, and whether you can change them |
+| `GET /api/v1/workspace-requests/{name}[?lines=]` | Tail of the HTTP request log (200 entries by default, up to 2000) |
+| `GET /api/v1/workspace-terminal/{name}[?cols=&rows=]` | Shell terminal (WebSocket) |
+| `GET /api/v1/workspace-ports/{name}` | Ports published in the VM, with the URLs to open in a browser |
+| `DELETE /api/v1/workspace-ports/{name}?port=` | Unpublish a port |
+| `GET /api/v1/secrets[?owner=]` | Secret names and definitions |
+| `GET /api/v1/secrets/{kind}[?owner=]` | A secret's definition (values are not returned) |
+| `GET /api/v1/secret-templates` | Secret templates (the same ones as the admin TUI; definitions only) |
+| `PUT /api/v1/secrets/{kind}[?owner=]` | Register a secret |
+| `DELETE /api/v1/secrets/{kind}[?owner=]` | Delete a secret |
+| `GET /api/v1/policy-scopes` | Configuration layers you can view (gateway, user, organization, team), with whether you can change them, their rule counts, and workspaces |
+| `GET /api/v1/policy-rules?scope=` | Rules in effect at a layer with their sources, the layer's own settings and their version, and whether you can change them |
+| `GET /api/v1/policy` | Your user settings (`ETag` is the version) |
+| `PUT /api/v1/policy` | Replace your user settings (`If-Match` checks the version) |
+| `GET /api/v1/policies/{owner}` | Organization or team settings (`ETag` is the version) |
+| `PUT /api/v1/policies/{owner}` | Replace the settings (`If-Match` checks the version) |
+| `DELETE /api/v1/policies/{owner}` | Delete the settings |
+| `GET /api/v1/tokens` | Your tokens (without their values) |
+| `POST /api/v1/tokens` | Create a token |
+| `DELETE /api/v1/tokens/{id}` | Revoke a token |
+| `GET /api/v1/asks[?all=true]` | Asks from agents in workspaces you can access (only those awaiting an answer unless `all=true`) |
+| `GET /api/v1/asks/{id}` | An ask |
+| `POST /api/v1/asks/{id}/answer` | Answer an ask |
 
-権限は SSH のコマンドと同じである。
-シークレットの `owner=` を省くと、自分の個人のシークレットを扱う。
+Permissions are the same as for the SSH commands.
+If you omit `owner=` for secrets, you work with your own personal secrets.
 
-## 例
+## Examples
 
-以下では `api` を次のように定める。
+The examples below define `api` as follows.
 
 ```sh
 api() { curl -s -H "Authorization: Bearer $CHLOE_TOKEN" -H 'content-type: application/json' "https://chloe.example.com:8080$@"; }
 ```
 
-### ワークスペース
+### Workspaces
 
 ```sh
 api /api/v1/workspaces
 # [{"name":"default","root":"ephemeral","running":true,"workspace_disk_gib":20,"docker_disk_gib":40,"vcpus":4,"memory_mib":4096,"idle_timeout_secs":1800,"pending_asks":1}, ...]
 api '/api/v1/workspaces?status=true'
-# [{"name":"default",...,"pending_asks":1,"busy":["claude-4f1c…"]}, ...]   (busy は作業中のエージェントの印 (<ツール>-<セッション>)。止まっていれば []、VM が答えなければ null)
+# [{"name":"default",...,"pending_asks":1,"busy":["claude-4f1c…"]}, ...]   (busy lists markers of busy agents (<tool>-<session>): [] if idle, null if the VM did not answer)
 
 api /api/v1/workspaces -X POST -d '{"name": "acme/web", "root": "persistent", "workspace_disk_gib": 50}'
 # {"name":"acme/web","root":"persistent","running":false,"workspace_disk_gib":50,"docker_disk_gib":40,"vcpus":4,"memory_mib":4096,"idle_timeout_secs":1800,"pending_asks":0}   (201)
 
 api /api/v1/workspaces/acme/web -X PATCH -d '{"root": "ephemeral"}'
-api /api/v1/workspaces/acme/web -X PATCH -d '{"docker_disk_gib": 80}'   # 次の起動から
-api /api/v1/workspaces/acme/web -X PATCH -d '{"vcpus": 8, "memory_mib": 16384}'   # 次の起動から
+api /api/v1/workspaces/acme/web -X PATCH -d '{"docker_disk_gib": 80}'   # from the next start
+api /api/v1/workspaces/acme/web -X PATCH -d '{"vcpus": 8, "memory_mib": 16384}'   # from the next start
 api /api/v1/workspaces/acme/web -X PATCH -d '{"idle_timeout": "never"}'
-api /api/v1/workspaces/acme/web -X PATCH -d '{"running": false}'    # 止める
+api /api/v1/workspaces/acme/web -X PATCH -d '{"running": false}'    # stop
 api /api/v1/workspaces/acme/web -X DELETE                             # 204
 ```
 
-`GET /api/v1/owners` は、ワークスペースを作れる持ち主を、個人、Organization、その team の順に返す。
-`prefix` をワークスペースの名前の前に付けると、作るときの `name` になる。
-GitHub App を使っていれば、所属する Organization の team は、ワークスペースがなくても並ぶ（GitHub に尋ねた結果は 5 分覚えておく）。
+`GET /api/v1/owners` returns the owners you can create workspaces under, in the order user, organizations, then their teams.
+Prefixing a workspace name with `prefix` gives the `name` to use when creating it.
+With a GitHub App, the teams of organizations you belong to are listed even if they have no workspaces (results from GitHub are cached for 5 minutes).
 
 ```sh
 api /api/v1/owners
@@ -135,20 +135,20 @@ api /api/v1/owners
 #  {"owner":"team:acme/dev","kind":"team","name":"acme/dev","prefix":"acme/dev/"}]
 ```
 
-`root` を省いて作ると、持ち主（個人、Organization と team）の設定の既定を使う。
-`workspace_disk_gib` と `docker_disk_gib` は GiB で、省くとゲートウェイの設定の既定を使う。
-変えるときは大きくするだけで、今より小さい値と上限を超える値は 400 を返す。
-新しい大きさは、次にワークスペースを起動したときに効く。
-`vcpus`（1 から 32）と `memory_mib`（MiB、512 以上）も、省くとゲートウェイの設定の既定を使い、次の起動から効く。
-`idle_timeout` は `chloe ws idle` と同じ書き方（`30m`、`2h`、`never`、`default`）で、返す `idle_timeout_secs` は既定を当てはめた秒数（止めないなら `null`）。
-`"running": true` は受け付けない（ワークスペースは SSH でつないだときに起動する）。
+If you omit `root` when creating a workspace, the default from the owner's (user, organization, or team) settings applies.
+`workspace_disk_gib` and `docker_disk_gib` are in GiB; if omitted, the gateway configuration's defaults apply.
+You can only grow them: a value smaller than the current one or above the limit returns 400.
+The new size takes effect the next time the workspace starts.
+`vcpus` (1 to 32) and `memory_mib` (MiB, 512 or more) likewise fall back to the gateway configuration's defaults when omitted, and take effect from the next start.
+`idle_timeout` uses the same syntax as `chloe ws idle` (`30m`, `2h`, `never`, `default`), and the returned `idle_timeout_secs` is the number of seconds after applying defaults (`null` if the workspace never stops).
+`"running": true` is not accepted (a workspace starts when you connect over SSH).
 
-### シークレット
+### Secrets
 
 ```sh
 api /api/v1/secrets/hf_token -X PUT -d @hf.json                                         # 204
 api '/api/v1/secrets/hf_token?owner=acme/dev' -X PUT -d @hf.json
-api /api/v1/secrets/hf_token -X PUT -d '{"value": "hf_..."}'      # 値だけを変える（定義はそのまま）
+api /api/v1/secrets/hf_token -X PUT -d '{"value": "hf_..."}'      # change only the value (definition unchanged)
 api /api/v1/secrets
 # {"owner":"alice","names":["hf_token"],"entries":[{"name":"hf_token","owner":"alice","builtin":false,"spec":{...}}]}
 api /api/v1/secrets/hf_token
@@ -156,36 +156,36 @@ api /api/v1/secrets/hf_token
 api /api/v1/secrets/hf_token -X DELETE
 ```
 
-本文は、[使い方](usage.md#シークレット)の TOML と同じ項目を JSON で書く。
+The body is the same fields as the TOML in [Usage](usage.md#secrets), written as JSON.
 
 ```json
 {"env": ["HF_TOKEN"], "placeholder": "hf_{id}", "value": "hf_...",
  "inject": [{"hosts": ["huggingface.co"], "header": "authorization"}]}
 ```
 
-値はシェルの履歴に残らないよう、ファイルや標準入力から渡す（`-d @value.json`）。
+Pass values from a file or standard input (`-d @value.json`) so they don't end up in your shell history.
 
-定義（環境変数、プレースホルダー、規則、ファイル）を一つでも書くと、定義を置き換える。
-そのときは、すべての欄の値も書く（欄がいくつもあるシークレットの値を替えるときも、`fields` に定義と値を書く）。
-登録してある値を残して定義だけを変えることはできない。
-差し替えの宛先を変えるには、値を知っている人が値を入れ直す必要があるので、Web の画面のセッションを奪われても、登録してある本物の値をほかの宛先へ送らせることはできない。
-`entries` は名前と定義を返す（GitHub のユーザートークン `github_user_token` は含まない）。
-`/api/v1/owners` の `can_manage_secrets` は、その持ち主のシークレットを変えられるかを示す。
+Writing any part of the definition (environment variables, placeholder, rules, files) replaces the definition.
+In that case, also write the values for every field (for a secret with several fields, even when changing values, write both the definitions and values in `fields`).
+You cannot change only the definition while keeping the registered values.
+Changing injection destinations requires someone who knows the value to enter it again, so even a hijacked web UI session cannot send a registered real value to other destinations.
+`entries` returns names and definitions (excluding the GitHub user token `github_user_token`).
+`can_manage_secrets` in `/api/v1/owners` indicates whether you can change that owner's secrets.
 
 ```sh
 api /api/v1/secret-templates
 # [{"name":"anthropic_api_key","spec":{"fields":{"value":{"env":["ANTHROPIC_API_KEY"],"placeholder":"sk-ant-api03-{id}"}},"inject":[...]}}, ...]
 ```
 
-### 個人、Organization、team の設定
+### User, organization, and team settings
 
-設定の項目は [設定](configuration.md#個人organizationteam-の設定) と同じで、JSON で書く。
-自分の個人の設定は `/api/v1/policy` で読み書きする（ゲートウェイで `allow_personal_rules` を有効にしたときだけ変えられる）。
+The settings fields are the same as in [Configuration](configuration.md#user-organization-and-team-settings), written as JSON.
+Read and write your own user settings at `/api/v1/policy` (you can change them only if the gateway enables `allow_personal_rules`).
 
 ```sh
 api /api/v1/policies/acme -X PUT \
   -d '{"rules": [{"hosts": ["registry.example.com"], "action": "allow"}], "root": "persistent"}'
-# {"updated_runners":2}   (設定を送った、動いているランナーの数)
+# {"updated_runners":2}   (number of running runners the settings were sent to)
 
 api /api/v1/policies/acme
 # {"rules":[{"hosts":["registry.example.com"],"action":"allow"}],"root":"persistent"}
@@ -196,12 +196,12 @@ api /api/v1/policies/acme/dev -X PUT \
 api /api/v1/policy -X PUT -d '{"rules": [{"hosts": ["example.com"], "action": "allow"}]}'
 ```
 
-ワークスペースの規則と同じく、`GET` は設定の版を `ETag` で返し、`PUT` に `If-Match` でその版を付けると、読んだあとに書き換えられていれば 412 を返す（[ワークスペースの規則](#ワークスペースの規則)）。
+As with workspace rules, `GET` returns the settings version in `ETag`; if you pass that version to `PUT` in `If-Match` and the settings changed after you read them, it returns 412 ([Workspace rules](#workspace-rules)).
 
-`GET /api/v1/policy-scopes` は、見られる設定の層を、ゲートウェイ、個人、Organization、その team の順に返す。
-層（`scope`）は `gateway`、`user:alice`、`org:acme`、`team:acme/dev` と書く。
-`GET /api/v1/policy-rules?scope=` は、その層で効く規則を出どころを添えて返し、`own` にその層の設定、`version` に版を返す（ゲートウェイの層の版は `none` で、変えられない）。
-持ち主の層は、そのメンバーか設定を変えられる人だけが見られ、個人の層は本人だけが見られる。
+`GET /api/v1/policy-scopes` returns the configuration layers you can view, in the order gateway, user, organizations, then their teams.
+A layer (`scope`) is written `gateway`, `user:alice`, `org:acme`, or `team:acme/dev`.
+`GET /api/v1/policy-rules?scope=` returns the rules in effect at that layer with their sources, plus the layer's own settings in `own` and the version in `version` (the gateway layer's version is `none`, and it cannot be changed).
+An owner's layer is visible only to its members and to those who can change its settings; a user layer is visible only to that user.
 
 ```sh
 api /api/v1/policy-scopes
@@ -212,9 +212,9 @@ api '/api/v1/policy-rules?scope=team:acme/dev'
 # {"rules":[...],"own":{"rules":[...],"github":{"repositories":["web"]}},"editable":true,"version":"9a1b2c3d4e5f6071"}
 ```
 
-### ワークスペースの規則
+### Workspace rules
 
-規則だけを JSON で書く（[設定](configuration.md#ワークスペースの規則)）。
+Write only the rules, as JSON ([Configuration](configuration.md#workspace-rules)).
 
 ```sh
 api /api/v1/workspace-policies/acme/web -X PUT \
@@ -225,22 +225,22 @@ api /api/v1/workspace-policies/acme/web
 api /api/v1/workspace-policies/acme/web -X DELETE
 ```
 
-`GET /api/v1/workspace-policies/{name}` は、規則の版を `ETag` で返す。
-`PUT` に `If-Match` でその版を付けると、読んだあとに規則が書き換えられていれば（ほかの人が保存した、通信の許可を承認して規則が足された）、置き換えずに 412 を返す。
-`If-Match` がなければ、確かめずに置き換える。
-規則がないときの版は `none` である。
+`GET /api/v1/workspace-policies/{name}` returns the rules' version in `ETag`.
+If you pass that version to `PUT` in `If-Match` and the rules changed after you read them (someone else saved them, or approving a network ask added a rule), it returns 412 without replacing them.
+Without `If-Match`, it replaces them unchecked.
+When there are no rules, the version is `none`.
 
 ```sh
 api -i /api/v1/workspace-policies/acme/web | grep -i etag
 # etag: "3f9c0d1e2a4b5c6d"
 api /api/v1/workspace-policies/acme/web -X PUT -H 'If-Match: "3f9c0d1e2a4b5c6d"' \
   -d '{"rules": [{"hosts": ["staging.example.com"], "action": "deny"}]}'
-# 書き換えられていれば {"error":"the rules of acme/web changed after you read them; read them again"}   (412)
+# if they changed: {"error":"the rules of acme/web changed after you read them; read them again"}   (412)
 ```
 
-`GET /api/v1/workspace-rules/{name}` は、ワークスペースで効く規則を、評価する順（上の層から）に出どころを添えて返す。
-出どころ（`source.kind`）は、ゲートウェイの設定（`gateway`）、個人、Organization か team の設定（`owner`、`source.owner` に持ち主）、ワークスペースの規則（`workspace`）、シークレットの差し替えのために足したもの（`secret`）である。
-`own` はワークスペース自身の規則、`version` はその版（`If-Match` に渡す）、`editable` は利用者がワークスペースの規則を変えられるかである。
+`GET /api/v1/workspace-rules/{name}` returns the rules in effect for the workspace in evaluation order (from the top layer), each with its source.
+The source (`source.kind`) is the gateway configuration (`gateway`), user, organization, or team settings (`owner`, with the owner in `source.owner`), the workspace rules (`workspace`), or rules added for secret injection (`secret`).
+`own` is the workspace's own rules, `version` is their version (pass it in `If-Match`), and `editable` is whether the user can change the workspace rules.
 
 ```sh
 api /api/v1/workspace-rules/acme/web
@@ -250,10 +250,10 @@ api /api/v1/workspace-rules/acme/web
 #  "own":[{"hosts":["staging.example.com"],"action":"allow"}],"editable":true,"version":"3f9c0d1e2a4b5c6d"}
 ```
 
-### HTTP の要求の記録
+### HTTP request log
 
-ワークスペースの HTTP の要求の記録の末尾を、古い順の配列で返す。
-欄は `chloe-egress` が記録する一行と同じで、知らない欄が増えることがある。
+Returns the tail of the workspace's HTTP request log as an array, oldest first.
+The fields match the lines `chloe-egress` records, and unknown fields may be added.
 
 ```sh
 api '/api/v1/workspace-requests/acme/web?lines=2'
@@ -264,26 +264,26 @@ api '/api/v1/workspace-requests/acme/web?lines=2'
 #   "injected":["anthropic_api_key-0"],"response_bytes":5120,"duration_ms":2310}]
 ```
 
-### エージェントからの依頼
+### Asks from agents
 
-本文には `allow`、`deny`、`answer` のどれか一つを書く。
-`allow` は通信の許可に、`answer` は質問に使い、`deny` はどちらにも使える。
-`can_allow` は、トークンの利用者が通信の許可を承認できるかを示す。
+The body contains exactly one of `allow`, `deny`, or `answer`.
+`allow` is for network asks, `answer` is for questions, and `deny` works for both.
+`can_allow` indicates whether the token's user can approve network asks.
 
 ```sh
 api /api/v1/asks
-# [{"workspace":"acme/web","id":12,"kind":"network","host":"docs.example.com","reason":"API の仕様を読む",
+# [{"workspace":"acme/web","id":12,"kind":"network","host":"docs.example.com","reason":"read the API spec",
 #   "status":"pending","created_at":1792152059,"expires_at":1792238459,"can_allow":true}]
 api /api/v1/asks/12/answer -X POST -d '{"allow": true}'
 api /api/v1/asks/13/answer -X POST -d '{"answer": "dev"}'
-api /api/v1/asks/14/answer -X POST -d '{"deny": true, "message": "今は不要"}'
-# 答えた依頼に答え直すと 409
+api /api/v1/asks/14/answer -X POST -d '{"deny": true, "message": "not needed right now"}'
+# answering an already-answered ask returns 409
 ```
 
-`/api/v1/events` は、依頼が出た、答えた、取り下げたという出来事を SSE で流す。
-入れるワークスペースの出来事だけが届く。
-出来事の名前は `ask` で、取りこぼしたときは `lagged` が届くので、一覧を読み直す。
-15 分で閉じるので、つなぎ直す（そのときにトークンかセッションを確かめ直す）。
+`/api/v1/events` streams events over SSE when an ask is created, answered, or withdrawn.
+You receive only events for workspaces you can access.
+The event name is `ask`; if you miss events, you receive `lagged`, so re-read the list.
+The stream closes after 15 minutes, so reconnect (the token or session is re-checked at that point).
 
 ```sh
 curl -sN -H "Authorization: Bearer $CHLOE_TOKEN" https://chloe.example.com:8080/api/v1/events
@@ -291,35 +291,35 @@ curl -sN -H "Authorization: Bearer $CHLOE_TOKEN" https://chloe.example.com:8080/
 # data: {"type":"created","id":15,"workspace":"acme/web"}
 ```
 
-### 端末
+### Terminal
 
-`/api/v1/workspace-terminal/{name}` は、WebSocket に切り替えて、ワークスペースのシェルを開く（SSH の `ssh -t` と同じ）。
-ワークスペースが止まっていれば起動し、開いているあいだは止めない。
-接続を閉じるとシェルは終わる。
-`cols` と `rows` は最初の端末の大きさ（既定 80 と 24）で、端末の種類は `xterm-256color` になる。
+`/api/v1/workspace-terminal/{name}` upgrades to WebSocket and opens a shell in the workspace (equivalent to `ssh -t` over SSH).
+If the workspace is stopped, it starts it, and it does not stop the workspace while the terminal is open.
+Closing the connection ends the shell.
+`cols` and `rows` set the initial terminal size (80 and 24 by default), and the terminal type is `xterm-256color`.
 
-- バイナリのフレームは、端末の入力と出力そのものである。
-- テキストのフレームは JSON である。送るのは大きさの変更（`{"type":"resize","cols":120,"rows":40}`）だけで、受けるのは次の四つ。
+- Binary frames are the raw terminal input and output.
+- Text frames are JSON. The only frame you send is a resize (`{"type":"resize","cols":120,"rows":40}`); you receive the following four.
 
-| フレーム | 意味 |
+| Frame | Meaning |
 | --- | --- |
-| `{"type":"starting"}` | ワークスペースを用意している（止まっていれば VM を起動する。1 分ほどかかる） |
-| `{"type":"started"}` | シェルが起動した |
-| `{"type":"exit","code":0}` | シェルが終わった。このあと閉じる |
-| `{"type":"error","message":"..."}` | 開けなかったか、続けられなくなった。このあと閉じる |
+| `{"type":"starting"}` | Preparing the workspace (starts the VM if it is stopped; takes about a minute) |
+| `{"type":"started"}` | The shell has started |
+| `{"type":"exit","code":0}` | The shell has exited. The connection closes next |
+| `{"type":"error","message":"..."}` | The shell could not be opened or could not continue. The connection closes next |
 
-開いているあいだは、1 分ごとにトークンかセッションを確かめ直し、失効していれば `error` を送って閉じる。
-入れないワークスペースは、切り替える前に 404 で断る。
+While the terminal is open, the token or session is re-checked every minute; if it has been revoked, the server sends `error` and closes.
+Workspaces you cannot access are rejected with 404 before the upgrade.
 
 ```sh
 websocat -H "Authorization: Bearer $CHLOE_TOKEN" --binary \
   'wss://chloe.example.com:8080/api/v1/workspace-terminal/acme%2Fweb?cols=120&rows=40'
 ```
 
-### 公開したポート
+### Published ports
 
-VM の中で `chloe-ask port publish` で公開したポートは、`url` をブラウザで開くと、Web の画面のログインを通って VM の中のサーバーに届く（[使い方](usage.md#vm-の中のサーバーをブラウザで開く)）。
-公開は VM の中からしかできず、管理 API では一覧と取り消しだけができる。
+For a port published inside the VM with `chloe-ask port publish`, opening `url` in a browser goes through the web UI login and reaches the server in the VM ([Usage](usage.md#open-servers-in-the-vm-from-a-browser)).
+Ports can be published only from inside the VM; the admin API can only list and unpublish them.
 
 ```sh
 api /api/v1/workspace-ports/acme%2Fweb
@@ -327,23 +327,23 @@ api /api/v1/workspace-ports/acme%2Fweb
 api '/api/v1/workspace-ports/acme%2Fweb?port=5173' -X DELETE   # 204
 ```
 
-プロキシのホスト（`url` のホスト）は、管理 API と同じトークンを `Authorization: Bearer` で受ける。
-トークンは VM の中のサーバーに渡さない。
+The proxy host (the host in `url`) accepts the same token as the admin API in `Authorization: Bearer`.
+The token is not passed on to the server in the VM.
 
 ```sh
 curl -H "Authorization: Bearer $CHLOE_TOKEN" https://k3x7q2m5vbtd.chloe-preview.example.net/
 ```
 
-ブラウザで開くと、プロキシのホストは Web の画面の `/api/auth/proxy` へ送り、Web の画面のセッションで一度だけ使えるコードを作って、プロキシのホストの `/__chloe/auth` へ戻す。
-プロキシのホストはコードを、そのホストだけに付く cookie（`chloe_proxy`）に替える。
-この cookie は Web の画面のセッションに結び付いていて、ログアウトや `chloe web revoke` で使えなくなる。
-Web の画面にログインしていなければ、ログインのあと（`/api/auth/continue`）に開こうとしたポートへ戻す。
+When you open it in a browser, the proxy host redirects to the web UI's `/api/auth/proxy`, which uses the web UI session to create a one-time code and redirects back to the proxy host's `/__chloe/auth`.
+The proxy host exchanges the code for a cookie (`chloe_proxy`) scoped to that host only.
+This cookie is bound to the web UI session and stops working when you log out or run `chloe web revoke`.
+If you are not logged in to the web UI, you are sent back to the port you tried to open after logging in (`/api/auth/continue`).
 
-### トークン
+### Tokens
 
 ```sh
 api /api/v1/tokens -X POST -d '{"name": "deploy", "expires": "7d"}'
-# {"id":3,"token":"chloe_..."}   (201。値はこのときだけ返す)
+# {"id":3,"token":"chloe_..."}   (201; the value is returned only this once)
 api /api/v1/tokens
 api /api/v1/tokens/3 -X DELETE
 ```

@@ -1,129 +1,129 @@
-# インストール
+# Installation
 
-chloe を一台のホストで動かす手順と、ランナーを複数のホストに置く手順を書く。
-Ubuntu には deb で入れる。
-deb を使わずに手で置く手順と、ランナーを Docker のコンテナで動かす手順は、後ろの節にある。
+This page covers running chloe on a single host and spreading runners across several hosts.
+On Ubuntu, you install chloe from deb packages.
+Installing the files by hand without a deb, and running the runner in a Docker container, are covered in later sections.
 
-ランナー（ワークスペースの VM とプロキシ）は、systemd の unit で動かす。
-root で動くのはワークスペースごとのネットワークの準備だけで、プロキシ、DNS、Firecracker は専用の利用者 `chloe` で動く。
-jailer による Firecracker の隔離はまだないので、ホストは chloe 専用にし、信頼できる利用者に限って使う。
+Runners (a workspace's VM and its proxy) run as systemd units.
+Only the per-workspace network setup runs as root; the proxy, DNS, and Firecracker run as the dedicated user `chloe`.
+Firecracker is not yet isolated with jailer, so dedicate the host to chloe and let only trusted users use it.
 
-## ホストの要件
+## Host requirements
 
-- **CPU と OS**：x86_64 の Ubuntu 24.04 か 26.04。KVM が使えること（`/dev/kvm` がある）。物理サーバーか、入れ子の仮想化を許した VM。
-- **ディスク**：ゲストのイメージに約 3GB。ワークスペースごとに、ワークスペースのディスク（既定 20GiB）と Docker のディスク（既定 40GiB）を疎なファイルで作る。使った分だけ実際に消費する。大きさの既定と上限は設定の `[disks]` で変えられる。
-- **ネットワーク**：VM が許可リストの宛先へつなぐときに、外へ出られること。ランナーとホストをつなぐ veth に `10.250.0.0/16` を使う（ホストのネットワークと重なるときは変える。「ランナーとホストのネットワーク」を参照）。
+- **CPU and OS**: Ubuntu 24.04 or 26.04 on x86_64. KVM must be available (`/dev/kvm` exists). Either a physical server or a VM with nested virtualization enabled.
+- **Disk**: About 3GB for the guest image. Each workspace gets a workspace disk (20GiB by default) and a Docker disk (40GiB by default), created as sparse files. Only the space actually used is consumed. The default sizes and the limits can be changed in the `[disks]` section of the configuration.
+- **Network**: The host must be able to reach the outside when a VM connects to a destination on the allowlist. The veth pairs that connect runners to the host use `10.250.0.0/16` (change it if it overlaps the host's network; see [Runner and host networking](#runner-and-host-networking)).
 
-ワークスペースの VM は、既定では 4 vCPU、メモリ 4GiB で起動する。既定は設定の `[machine]` で、ワークスペースごとの大きさは利用者が `chloe ws machine` で変えられる。上限はないので、同時に動く VM の大きさの合計がホストのメモリを超えないかを見ておく。
+By default, a workspace VM boots with 4 vCPUs and 4GiB of memory. The defaults are set in `[machine]` in the configuration, and users can change the size of each workspace with `chloe ws machine`. There is no upper limit, so make sure the total size of the VMs running at the same time does not exceed the host's memory.
 
-## deb で入れる
+## Install from a deb
 
-リリースの deb は、GitHub の[リリース](https://github.com/f0reachARR/chloe/releases)に置いてある（`chloe-guest` を含む）。
-自分で作るときは、次の「deb を作る」の手順で作る。
+Release debs are published on GitHub [Releases](https://github.com/f0reachARR/chloe/releases) (including `chloe-guest`).
+To build them yourself, follow [Build a deb](#build-a-deb) below.
 
-### deb を作る
+### Build a deb
 
-deb は、ビルドするマシンで作る。
-Docker が要る（ビルドは Ubuntu 24.04 のコンテナの中で行い、できたものは 24.04 と 26.04 で動く）。
-リポジトリのルートで実行する。
+Build the debs on a build machine.
+Docker is required (the build runs inside an Ubuntu 24.04 container, and the result runs on both 24.04 and 26.04).
+Run the following from the repository root.
 
 ```sh
-# ゲストのカーネル (Linux 6.18 系) と、ルートファイルシステム (Ubuntu 26.04、Docker、mise)。
+# The guest kernel (Linux 6.18 series) and root filesystem (Ubuntu 26.04, Docker, mise).
 images/guest/kernel/build.sh
 images/guest/rootfs/build.sh
 
-# chloe-common、chloe-gateway、chloe-node、chloe-guest を build/deb/ に作る。
+# Build chloe-common, chloe-gateway, chloe-node, and chloe-guest into build/deb/.
 packaging/deb/build.sh --guest
 ```
 
-`--guest` を付けなければ、`chloe-guest` を作らない。
-ゲストのイメージを作るスクリプトは、手順ごとに番号と所要時間を表示する。
-カーネルのコンパイルは数分かかり、ソースとビルドの途中のファイルは `build/cache/` に残る（約 2GB）。
-二回目からは差分だけをビルドする。
+Without `--guest`, `chloe-guest` is not built.
+The guest image build scripts print a number and the elapsed time for each step.
+Compiling the kernel takes a few minutes, and the sources and intermediate build files are kept in `build/cache/` (about 2GB).
+Subsequent builds only rebuild what changed.
 
-ルートファイルシステムには、`images/guest/rootfs/Dockerfile` で版を決めた mise が入る。
-Claude Code や Codex などのツールは入れない（利用者が VM の中で mise で入れる。[使い方](usage.md#ツールを入れる)）。
+The root filesystem includes mise, at the version pinned in `images/guest/rootfs/Dockerfile`.
+Tools such as Claude Code and Codex are not included (users install them inside the VM with mise; see [Usage](usage.md#install-tools)).
 
-deb の版は `<最後のリリースの版>+git<コミットの日付>.<ハッシュ>` になる（コミットしていない変更があれば `.dirty` が付く）。
-リリースの版より後に並ぶので、リリースの deb の上に入れられる。
-control の Maintainer は、環境変数 `DEB_MAINTAINER` で変えられる。
+The deb version is `<last release version>+git<commit date>.<hash>` (with `.dirty` appended if there are uncommitted changes).
+It sorts after the release version, so you can install it over a release deb.
+The Maintainer field in control can be changed with the `DEB_MAINTAINER` environment variable.
 
-| パッケージ | 中身 |
+| Package | Contents |
 | --- | --- |
-| `chloe-common` | `chloe-egress`、Firecracker、ランナーのスクリプトと unit、polkit の規則、`/etc/chloe/runner.env`。利用者 `chloe` と、状態のディレクトリ（`/var/lib/chloe`）を作る |
-| `chloe-gateway` | `chloe-gateway`、その unit、`/etc/chloe/gateway.toml`、シークレットの定義の例（`/usr/share/doc/chloe-gateway/examples/secrets/`） |
-| `chloe-node` | `chloe-node`、その unit、`/etc/chloe/node.toml`（複数のホストに置くときのランナーのホスト） |
-| `chloe-guest` | ゲストのカーネルとルートファイルシステム（`/usr/lib/chloe/guest`） |
+| `chloe-common` | `chloe-egress`, Firecracker, the runner scripts and units, the polkit rule, `/etc/chloe/runner.env`. Creates the user `chloe` and the state directory (`/var/lib/chloe`) |
+| `chloe-gateway` | `chloe-gateway`, its unit, `/etc/chloe/gateway.toml`, example secret definitions (`/usr/share/doc/chloe-gateway/examples/secrets/`) |
+| `chloe-node` | `chloe-node`, its unit, `/etc/chloe/node.toml` (for runner hosts in a multi-host setup) |
+| `chloe-guest` | The guest kernel and root filesystem (`/usr/lib/chloe/guest`) |
 
-### 入れる
+### Install the packages
 
-作った deb をホストに写し、`apt` で入れる（依存するパッケージも入る）。
+Copy the debs to the host and install them with `apt` (dependencies are installed too).
 
 ```sh
 sudo apt install ./chloe-common_*.deb ./chloe-gateway_*.deb ./chloe-guest_*.deb
 ```
 
-入れただけでは、ゲートウェイは起動しない。
-設定の例のままでは、22 番で待ち受けて sshd とぶつかり、ログインを許す利用者も仮の名前だからである。
-次の「一台で動かす」の手順で設定してから起動する。
+Installing does not start the gateway.
+With the example configuration as-is, it would listen on port 22 and clash with sshd, and the users allowed to log in are placeholder names.
+Configure it as described in [Run on a single host](#run-on-a-single-host) before starting it.
 
-置かれるものは次のとおり。
+The packages install the following.
 
-| 置き場所 | 中身 |
+| Location | Contents |
 | --- | --- |
-| `/usr/bin/` | `chloe-gateway`、`chloe-node` |
-| `/usr/libexec/chloe/` | `chloe-egress`、Firecracker、ランナーのスクリプト |
-| `/usr/lib/chloe/guest/` | ゲストのカーネルとルートファイルシステム |
-| `/usr/lib/systemd/system/` | `chloe-gateway.service`、`chloe-node.service`、ランナーの unit（`chloe-host-net.service`、`chloe-netns@.service`、`chloe-runner@.service`） |
-| `/etc/chloe/` | 設定（`gateway.toml`、`node.toml`、`runner.env`）。GitHub App の設定と秘密鍵、管理 API の証明書と鍵もここに置く |
-| `/var/lib/chloe/` | ゲートウェイの状態（ホスト鍵、データベース、マスター鍵、CA）と、ワークスペースの状態（`workspaces/`） |
-| `/var/lib/chloe-node/` | `chloe-node` の証明書と鍵 |
-| `/var/log/chloe/` | 監査ログ |
+| `/usr/bin/` | `chloe-gateway`, `chloe-node` |
+| `/usr/libexec/chloe/` | `chloe-egress`, Firecracker, the runner scripts |
+| `/usr/lib/chloe/guest/` | The guest kernel and root filesystem |
+| `/usr/lib/systemd/system/` | `chloe-gateway.service`, `chloe-node.service`, the runner units (`chloe-host-net.service`, `chloe-netns@.service`, `chloe-runner@.service`) |
+| `/etc/chloe/` | Configuration (`gateway.toml`, `node.toml`, `runner.env`). The GitHub App settings and private key, and the admin API certificate and key, also go here |
+| `/var/lib/chloe/` | Gateway state (host key, database, master key, CA) and workspace state (`workspaces/`) |
+| `/var/lib/chloe-node/` | The `chloe-node` certificate and key |
+| `/var/log/chloe/` | Audit log |
 
-`/etc/chloe/` の設定は conffile なので、編集したものは更新で上書きされない。
+The configuration files in `/etc/chloe/` are conffiles, so your edits are not overwritten on upgrade.
 
-## 一台で動かす
+## Run on a single host
 
-### 設定
+### Configuration
 
-`/etc/chloe/gateway.toml` を編集する。
-項目の一覧は [設定](configuration.md) にある。
-少なくとも次を書き換える。
+Edit `/etc/chloe/gateway.toml`.
+All settings are listed in [Configuration](configuration.md).
+At a minimum, change the following.
 
-- `listen`：SSH の待ち受け。例は `0.0.0.0:22` で、ホストの sshd と重なる。sshd を別のポートに移すか、ゲートウェイを別のポートで待ち受ける。
-- `allowed_users` と `admins`：ログインを許す GitHub のログイン名と、サーバーの運用者。
-- `[[policy.rules]]`：すべてのワークスペースに共通の、外への通信の規則。どの規則にも一致しない通信は遮断する。
+- `listen`: The SSH listen address. The example is `0.0.0.0:22`, which clashes with the host's sshd. Either move sshd to another port or have the gateway listen on another port.
+- `allowed_users` and `admins`: The GitHub logins allowed to log in, and the server's operators.
+- `[[policy.rules]]`: Outbound traffic rules shared by all workspaces. Traffic that matches no rule is blocked.
 
-状態の置き場所（`host_key`、`database`、`master_key`、`audit_log`）は、unit の `StateDirectory=` と `LogsDirectory=` が作る `/var/lib/chloe` と `/var/log/chloe` の下にしてある。
-別の場所に変えるときは、`chloe` の利用者が書けるディレクトリにする。
-ランナーの置き場所とアドレスは `/etc/chloe/runner.env` に書く（[設定](configuration.md#runner)）。
+The state locations (`host_key`, `database`, `master_key`, `audit_log`) are set under `/var/lib/chloe` and `/var/log/chloe`, which the unit's `StateDirectory=` and `LogsDirectory=` create.
+If you move them elsewhere, use a directory the `chloe` user can write to.
+The runner's locations and addresses go in `/etc/chloe/runner.env` (see [Configuration](configuration.md#runner)).
 
-### 起動
+### Start
 
 ```sh
 sudo systemctl enable --now chloe-gateway
 journalctl -u chloe-gateway -f
 ```
 
-ホスト鍵、データベース、マスター鍵は、初めて起動したときに作る。
-GitHub App を設定していれば、利用者は `chloe` のユーザー名で入り、初回は Device Flow で GitHub のアカウントを確かめる。
-GitHub App がなければ、GitHub に登録した公開鍵で入る。
+The host key, database, and master key are created on first start.
+If a GitHub App is configured, users log in with the user name `chloe` and, the first time, verify their GitHub account with the Device Flow.
+Without a GitHub App, users log in with the public keys registered on GitHub.
 
 ```sh
-ssh chloe@<ホスト>                    # GitHub App があるとき
-ssh <GitHub のログイン名>@<ホスト>     # GitHub App がないとき
+ssh chloe@<host>                # with a GitHub App
+ssh <github-login>@<host>       # without a GitHub App
 ```
 
-最初の接続でワークスペースの VM を起動する（数秒かかる）。
-使い方は [使い方](usage.md) にある。
+The first connection boots the workspace VM (this takes a few seconds).
+See [Usage](usage.md) for how to use it.
 
-ゲートウェイを再起動しても、動いているワークスペースは止まらない。
-起動したゲートウェイが引き取り、本物の値の問い合わせに答え続ける。
+Restarting the gateway does not stop running workspaces.
+The newly started gateway takes them over and keeps answering their requests for real values.
 
-### 運用のコマンド
+### Operational commands
 
-`node add` など、`chloe-gateway` のサブコマンドを手で実行するときは、`chloe` の利用者で実行する。
-root で実行すると、SQLite がデータベースの横に作るファイル（`chloe.db-wal` など）が root のものになり、ゲートウェイが開けなくなることがある。
+When you run `chloe-gateway` subcommands such as `node add` by hand, run them as the `chloe` user.
+If you run them as root, the files SQLite creates next to the database (such as `chloe.db-wal`) can end up owned by root, and the gateway may then fail to open them.
 
 ```sh
 sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node list
@@ -131,141 +131,141 @@ sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node list
 
 ### GitHub App
 
-GitHub App を設定すると、Organization のメンバーがログインでき、ログインには Device Flow が必須になり、VM の中で GitHub を使える。
-登録の手順は [GitHub App の準備](github-app.md) にある。
-アプリの設定と秘密鍵を `/etc/chloe/` に置き、ゲートウェイの設定の `github_app` にそのパスを書く。
+With a GitHub App configured, members of an organization can log in, the Device Flow becomes mandatory for login, and GitHub can be used inside the VM.
+See [Preparing a GitHub App](github-app.md) for how to register one.
+Put the app settings and private key in `/etc/chloe/`, and set their paths in `github_app` in the gateway configuration.
 
-## ランナーとホストのネットワーク
+## Runner and host networking
 
-ゲートウェイは、ワークスペースのランナーを `systemctl start chloe-runner@ws-<番号>` で起動する。
-polkit の規則は、`chloe` の利用者にこの unit の起動、停止、読み直しだけを許す。
-`chloe-runner@` は、ワークスペースごとのネットワーク namespace を作る `chloe-netns@`（root）と、ホスト側の規則を置く `chloe-host-net`（root）を引き込む。
+The gateway starts a workspace's runner with `systemctl start chloe-runner@ws-<number>`.
+The polkit rule allows the `chloe` user only to start, stop, and reload this unit.
+`chloe-runner@` pulls in `chloe-netns@` (root), which creates the per-workspace network namespace, and `chloe-host-net` (root), which installs the host-side rules.
 
-動いているランナーは `systemctl list-units 'chloe-runner@*'` で、ゲストのシリアルコンソールの出力は `journalctl -u chloe-runner@ws-<番号>` で見られる。
-プロキシと DNS のログは `/var/lib/chloe/workspaces/<ws-番号>/logs/` にある。
+You can list running runners with `systemctl list-units 'chloe-runner@*'`, and view the guest's serial console output with `journalctl -u chloe-runner@ws-<number>`.
+The proxy and DNS logs are in `/var/lib/chloe/workspaces/<ws-number>/logs/`.
 
-ランナーの namespace は、veth（ホスト側の名前は `cw<番号>`）でホストとつなぎ、ホストで masquerade して外へ出す。
-外へ出るのは namespace の中のプロキシと DNS だけで、VM の通信は namespace の中でプロキシと DNS に向けられる。
-veth のアドレスは `/etc/chloe/runner.env` の `CHLOE_NET_POOL`（既定 `10.250.0.0/16`）から、ランナー一つに /30 ずつ割り当てる。
-`chloe-host-net` は、nftables の表 `inet chloe-host` に次の規則を置き、`net.ipv4.ip_forward` を 1 にする。
+A runner's namespace is connected to the host by a veth pair (named `cw<number>` on the host side), and the host masquerades its traffic out.
+Only the proxy and DNS inside the namespace go out; the VM's traffic is directed to the proxy and DNS inside the namespace.
+veth addresses are allocated as one /30 per runner from `CHLOE_NET_POOL` in `/etc/chloe/runner.env` (default `10.250.0.0/16`).
+`chloe-host-net` installs the following rules in the nftables table `inet chloe-host` and sets `net.ipv4.ip_forward` to 1.
 
-- namespace からホストへの通信を落とす（コントロールプレーンの内部 API、sshd などを守る）。
-- namespace からプライベートアドレス（RFC1918 など）への転送を落とす。プロキシは宛先のアドレスを確かめないので、利用者の規則で内部のアドレスに解決される名前を許しても、ここで止まる。ただし DNS（53 番）は通す。上流の DNS サーバーが LAN の中にあることが多いためである。
-- namespace 同士の転送を落とす。
+- Drop traffic from namespaces to the host (protecting the control plane's internal API, sshd, and so on).
+- Drop forwarding from namespaces to private addresses (RFC1918 and so on). The proxy does not check destination addresses, so even if a user's rule allows a name that resolves to an internal address, it is stopped here. DNS (port 53) is let through, however, because the upstream DNS server is often on the LAN.
+- Drop forwarding between namespaces.
 
-DNS の上流は、systemd-resolved を使っていれば `/run/systemd/resolve/resolv.conf` に書かれたサーバーを使う（namespace の中からは `127.0.0.53` に届かないため）。
-systemd-resolved を使っていなければ `/etc/resolv.conf` を使う。
+For upstream DNS, if the host uses systemd-resolved, the servers listed in `/run/systemd/resolve/resolv.conf` are used (`127.0.0.53` is not reachable from inside the namespace).
+Otherwise, `/etc/resolv.conf` is used.
 
-次の点に気をつける。
+Watch out for the following.
 
-- `nftables.service` を使っているホストでは、その設定（`/etc/nftables.conf`）の `flush ruleset` で `inet chloe-host` も消える。`nftables.service` を読み直したら、`sudo systemctl reload chloe-host-net` で置き直す（restart にすると、動いているランナーも止まる）。
-- ほかの仕組み（Docker、ufw など）が転送を落とす規則を置いていると、`cw*` からの転送も落とされることがある。nftables では、同じ hook の規則はどの表でも受け入れられたときだけ通る。
+- On hosts that use `nftables.service`, the `flush ruleset` in its configuration (`/etc/nftables.conf`) also removes `inet chloe-host`. After reloading `nftables.service`, reinstall the rules with `sudo systemctl reload chloe-host-net` (a restart would also stop running runners).
+- If another component (Docker, ufw, and so on) installs rules that drop forwarded traffic, forwarding from `cw*` may be dropped too. In nftables, a packet passes a hook only if it is accepted by the rules for that hook in every table.
 
-## 状態の置き場所とバックアップ
+## State locations and backup
 
-例の配置での場所を括弧に書く。
+The locations in the example layout are shown in parentheses.
 
-| 置き場所 | 中身 | バックアップ |
+| Location | Contents | Backup |
 | --- | --- | --- |
-| `database`（`/var/lib/chloe/chloe.db`） | ワークスペース、シークレット（暗号化したもの）、設定、トークンのハッシュ、ホストの一覧 | 要る。`master_key` と組で |
-| `master_key`（`/var/lib/chloe/master.key`） | シークレットを暗号化する鍵 | 要る。失うと、保存したシークレットを読めなくなる |
-| `host_key`（`/var/lib/chloe/host_key`） | SSH のホスト鍵 | 要る。変わると、利用者の `known_hosts` と合わなくなる |
-| `[cluster]` の `pki_dir`（`/var/lib/chloe/pki`） | CA の証明書と鍵 | 要る。失うと、すべてのホストに参加し直させる |
-| `audit_log`（`/var/log/chloe/audit.jsonl`） | 監査ログ（JSON Lines） | 運用の方針による |
-| `runner.env` の `CHLOE_STATE_ROOT`（`/var/lib/chloe/workspaces`。複数のホストでは各ホストに置く） | ワークスペースごとのディスク、プロキシの CA、HTTP のログ | ワークスペースの中身を残したいなら要る |
+| `database` (`/var/lib/chloe/chloe.db`) | Workspaces, secrets (encrypted), settings, token hashes, the host list | Required, together with `master_key` |
+| `master_key` (`/var/lib/chloe/master.key`) | The key that encrypts secrets | Required. If lost, stored secrets can no longer be read |
+| `host_key` (`/var/lib/chloe/host_key`) | The SSH host key | Required. If it changes, it no longer matches users' `known_hosts` |
+| `pki_dir` in `[cluster]` (`/var/lib/chloe/pki`) | The CA certificate and key | Required. If lost, every host has to join again |
+| `audit_log` (`/var/log/chloe/audit.jsonl`) | The audit log (JSON Lines) | Depends on your operational policy |
+| `CHLOE_STATE_ROOT` in `runner.env` (`/var/lib/chloe/workspaces`; on each host in a multi-host setup) | Per-workspace disks, the proxy CA, the HTTP log | Required if you want to keep workspace contents |
 
-`database` は SQLite で、WAL のモードで使う。
-動かしたまま写すときは、`sqlite3` の `.backup` を `chloe` の利用者で使う。
+`database` is SQLite, used in WAL mode.
+To copy it while chloe is running, use `sqlite3`'s `.backup` as the `chloe` user.
 
 ```sh
 sudo -u chloe sqlite3 /var/lib/chloe/chloe.db ".backup /var/lib/chloe/chloe.db.bak"
 ```
 
-`chloe ws rm` でワークスペースを消しても、ワークスペースのディスクは残る。
-一緒に消すには `chloe ws rm NAME --disks` とする。
+Deleting a workspace with `chloe ws rm` leaves its disks in place.
+To delete them as well, use `chloe ws rm NAME --disks`.
 
-## 複数のホストに置く
+## Run across multiple hosts
 
-ゲートウェイ（コントロールプレーン）を一か所に置き、各ホストで `chloe-node` を動かす。
-コントロールプレーンは CA を持ち、ホストの証明書を発行する。
-コントロールプレーンとホストのあいだは相互 TLS でつなぐ。
+Put the gateway (the control plane) in one place and run `chloe-node` on each host.
+The control plane holds a CA and issues host certificates.
+The control plane and the hosts connect over mutual TLS (mTLS).
 
-### ポート
+### Ports
 
-| 向き | ポート（例） | 用途 |
+| Direction | Port (example) | Purpose |
 | --- | --- | --- |
-| 利用者 → コントロールプレーン | 22 | SSH |
-| ホスト → コントロールプレーン | 8444 | 内部 API（参加、本物の値の問い合わせの中継） |
-| コントロールプレーン → ホスト | 8445 | `chloe-node` の API（ランナーの操作、端末の中継） |
+| User → control plane | 22 | SSH |
+| Host → control plane | 8444 | Internal API (join, relaying requests for real values) |
+| Control plane → host | 8445 | The `chloe-node` API (runner operations, terminal relay) |
 
-### コントロールプレーン
+### Control plane
 
-コントロールプレーンには `chloe-common` と `chloe-gateway` を入れる（ランナーを置かないので `chloe-guest` は要らない）。
-ゲートウェイの設定から `[runner]` を消し、`[cluster]` を書く。
+On the control plane, install `chloe-common` and `chloe-gateway` (no runners run there, so `chloe-guest` is not needed).
+Remove `[runner]` from the gateway configuration and add `[cluster]`.
 
 ```toml
 [cluster]
 listen = "0.0.0.0:8444"
-# ホストがつなぐ名前か IP アドレス。内部 API の証明書に入れる。
+# The name or IP address hosts connect to. Included in the internal API certificate.
 server_names = ["cp.example.com"]
 pki_dir = "/var/lib/chloe/pki"
 ```
 
-起動すると、CA がなければ作る。
-ホストを登録し、参加用のトークンを作る。
-URL は、コントロールプレーンがそのホストの API を呼ぶときのもので、ホストの証明書にこのホスト名が入る。
+On start, the gateway creates the CA if it does not exist.
+Register a host and create a join token.
+The URL is the one the control plane uses to call that host's API, and its host name goes into the host's certificate.
 
 ```sh
 sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node add n1 --url https://n1.example.com:8445
 ```
 
-表示されたトークンは一度だけ使え、1 時間で失効する（`join_ttl_secs` で変えられる）。
-トークンには CA の証明書の指紋が入っていて、ホストは最初の接続でコントロールプレーンを確かめる。
+The printed token can be used only once and expires after one hour (configurable with `join_ttl_secs`).
+The token contains the fingerprint of the CA certificate, which the host uses to verify the control plane on its first connection.
 
-### ホスト
+### Hosts
 
-各ホストに `chloe-common`、`chloe-node`、`chloe-guest` を入れる。
+On each host, install `chloe-common`, `chloe-node`, and `chloe-guest`.
 
 ```sh
 sudo apt install ./chloe-common_*.deb ./chloe-node_*.deb ./chloe-guest_*.deb
 ```
 
-参加して、証明書を受け取る。
-`/var/lib` には `chloe` の利用者が書けないので、状態のディレクトリを先に作っておく（unit の `StateDirectory=` が作るのは起動のときである）。
+Join and receive a certificate.
+The `chloe` user cannot write to `/var/lib`, so create the state directory first (the unit's `StateDirectory=` only creates it when the unit starts).
 
 ```sh
 sudo install -d -o chloe -g chloe -m 700 /var/lib/chloe-node
-sudo -u chloe chloe-node join --server https://cp.example.com:8444 --token <トークン> --dir /var/lib/chloe-node/tls
+sudo -u chloe chloe-node join --server https://cp.example.com:8444 --token <token> --dir /var/lib/chloe-node/tls
 ```
 
-`/etc/chloe/node.toml` の `control_plane` を書き換えて起動する。
+Set `control_plane` in `/etc/chloe/node.toml` and start the service.
 
 ```sh
 sudo systemctl enable --now chloe-node
 ```
 
-コントロールプレーンで `sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node list` を実行すると、参加したホストを確かめられる。
+Run `sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node list` on the control plane to check which hosts have joined.
 
-### 置き場所
+### Placement
 
-ワークスペースは、最初に起動したホストに結びつく（ディスクがそのホストにあるので）。
-新しいワークスペースは、置いたワークスペースがもっとも少ないホストに置く。
-ホストをまたいでワークスペースを移す手段は、まだない。
+A workspace is bound to the host it was first started on (because its disks are on that host).
+A new workspace is placed on the host with the fewest workspaces.
+There is no way yet to move a workspace between hosts.
 
-ホストがつながらないあいだ、そのホストのワークスペースには入れないが、ほかのホストのワークスペースは使える。
-コントロールプレーンは、つながらないホストのランナーを止まったとはみなさず、つながったら元どおり扱う。
+While a host is unreachable, its workspaces cannot be entered, but workspaces on other hosts remain usable.
+The control plane does not treat the runners on an unreachable host as stopped, and handles them as before once the host reconnects.
 
-ホストの登録を消すには、そのホストに置いたワークスペースを先に消す。
+To remove a host's registration, first delete the workspaces placed on it.
 
 ```sh
 sudo -u chloe chloe-gateway --config /etc/chloe/gateway.toml node rm n1
 ```
 
-## 管理 API を有効にする
+## Enable the admin API
 
-ゲートウェイの設定に `[api]` を書く。
-証明書と鍵を書けば HTTPS で、なければ HTTP で待ち受ける。
-HTTP で待ち受けるときは、ローカルからだけ使うか、TLS を終端するリバースプロキシの後ろに置く。
+Add `[api]` to the gateway configuration.
+If you set a certificate and key, it listens over HTTPS; otherwise over HTTP.
+When listening over HTTP, use it only locally or put it behind a reverse proxy that terminates TLS.
 
 ```toml
 [api]
@@ -274,15 +274,15 @@ listen = "127.0.0.1:8080"
 # tls_key = "/etc/chloe/api.key"
 ```
 
-鍵は `chloe` の利用者が読めるようにする（`sudo install -m 640 -g chloe api.key /etc/chloe/api.key`）。
+Make the key readable by the `chloe` user (`sudo install -m 640 -g chloe api.key /etc/chloe/api.key`).
 
-使い方は [管理 API](api.md) にある。
+See [Admin API](api.md) for usage.
 
-## Web の画面を有効にする
+## Enable the web UI
 
-Web の画面は、管理 API と同じ待ち受けで出す。
-`[api]` に、ブラウザで開く URL（`public_url`）と、画面のファイルの置き場所（`web_root`）を書く。
-画面のファイルは chloe-gateway の deb に入っている。
+The web UI is served on the same listener as the admin API.
+In `[api]`, set the URL opened in the browser (`public_url`) and the location of the UI files (`web_root`).
+The UI files are included in the chloe-gateway deb.
 
 ```toml
 [api]
@@ -291,20 +291,20 @@ public_url = "https://chloe.example.com"
 web_root = "/usr/share/chloe/web"
 ```
 
-TLS を終端するリバースプロキシの後ろに置くときは、`public_url` をリバースプロキシの URL にする。
-画面は `/` から置くので、`public_url` にパスは書けない（`https://example.com/chloe` のようにはできない）。
-依頼の出来事は `/api/v1/events` から SSE で流すので、リバースプロキシで応答を溜めないようにし、待ち時間を長くする（nginx なら `proxy_buffering off;` と `proxy_read_timeout 1h;`。ゲートウェイは `X-Accel-Buffering: no` も返す）。
-Web の端末は `/api/v1/workspace-terminal/` を WebSocket に切り替えるので、リバースプロキシで `Upgrade` と `Connection` のヘッダーを通す。
-端末は何も打たないあいだも、画面が 30 秒ごとに `ping` のフレームを送り、ゲートウェイが `pong` を返す。待ち時間はそれより長くする（nginx の既定の 60 秒でも切れない）。
+When it sits behind a reverse proxy that terminates TLS, set `public_url` to the reverse proxy's URL.
+The UI is served from `/`, so `public_url` cannot contain a path (something like `https://example.com/chloe` does not work).
+Ask events are streamed over SSE from `/api/v1/events`, so disable response buffering in the reverse proxy and use a long timeout (with nginx, `proxy_buffering off;` and `proxy_read_timeout 1h;`; the gateway also returns `X-Accel-Buffering: no`).
+The web terminal upgrades `/api/v1/workspace-terminal/` to a WebSocket, so the reverse proxy must pass the `Upgrade` and `Connection` headers.
+Even while nothing is typed, the UI sends a `ping` frame every 30 seconds and the gateway replies with `pong`; make the timeout longer than that (nginx's default of 60 seconds is fine).
 
 ```nginx
-# http の中
+# inside http
 map $http_upgrade $connection_upgrade {
     default upgrade;
     ''      close;
 }
 
-# server の中
+# inside server
 location /api/ {
     proxy_pass http://127.0.0.1:8080;
     proxy_http_version 1.1;
@@ -316,10 +316,10 @@ location /api/ {
 }
 ```
 
-## VM の中のサーバーを開けるようにする
+## Open servers running in the VM
 
-VM の中で `chloe-ask port publish` で公開したポートは、ポートごとのランダムな名前のホスト（`<名前>.<ドメイン>`）で、ブラウザから開ける。
-Web の画面を有効にしたうえで、`[api]` に `proxy_url` を書く。
+Ports published inside the VM with `chloe-ask port publish` can be opened from a browser at a host with a random per-port name (`<name>.<domain>`).
+Enable the web UI, then set `proxy_url` in `[api]`.
 
 ```toml
 [api]
@@ -329,11 +329,11 @@ web_root = "/usr/share/chloe/web"
 proxy_url = "https://chloe-preview.example.net"
 ```
 
-ドメインの下のすべての名前（`*.chloe-preview.example.net`）を、ゲートウェイかリバースプロキシに向ける。
-ワイルドカードの DNS のレコードと、ワイルドカードの証明書（Let's Encrypt なら DNS-01 のチャレンジで取る）が要る。
-ゲートウェイは、要求の `Host` でプロキシのホストを見分けるので、リバースプロキシは `Host` をそのまま渡す。
-ゲートウェイは、つないできた相手（リバースプロキシ）のアドレスを `X-Forwarded-For` の末尾に足して VM の中のサーバーへ渡すので、利用者の IP アドレスを届けるには、リバースプロキシでも `X-Forwarded-For` を付ける。
-VM の中の開発用のサーバーの HMR などは WebSocket を使うので、`Upgrade` と `Connection` も通す。
+Point every name under the domain (`*.chloe-preview.example.net`) at the gateway or the reverse proxy.
+This requires a wildcard DNS record and a wildcard certificate (with Let's Encrypt, obtained via the DNS-01 challenge).
+The gateway identifies the published port's host by the request's `Host`, so the reverse proxy must pass `Host` through unchanged.
+The gateway appends the address of the peer that connected to it (the reverse proxy) to the end of `X-Forwarded-For` before passing the request to the server in the VM, so to deliver the user's IP address, the reverse proxy must also set `X-Forwarded-For`.
+Development servers in the VM use WebSockets for HMR and the like, so pass `Upgrade` and `Connection` too.
 
 ```nginx
 server {
@@ -347,7 +347,7 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
-        # 利用者の IP アドレスを、ゲートウェイが VM の中のサーバーへ渡す。
+        # The gateway passes the user's IP address on to the server in the VM.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -357,72 +357,72 @@ server {
 }
 ```
 
-VM の中のページはエージェントが書き換えられるので、Web の画面とは登録できるドメインを分けることを勧める（[設定](configuration.md#api)）。
-VM からは、許可リストに足さなければプロキシのホストに届かない。
+Agents can rewrite pages served from the VM, so we recommend using a separate registrable domain from the web UI's (see [Configuration](configuration.md#api)).
+The VM cannot reach the proxy host unless it is added to the allowlist.
 
-ログインは二通りある。
+There are two ways to log in.
 
-- **GitHub**：GitHub App の `client_secret` を書き、App の設定の Callback URL を `<public_url>/api/auth/github/callback` にする（[GitHub App の準備](github-app.md)）。
-- **SSH から**：`ssh chloe@host chloe web login` が、5 分だけ一度使える URL と QR コードを出す。GitHub App がなくても使える。
+- **GitHub**: Set the GitHub App's `client_secret`, and set the Callback URL in the App's settings to `<public_url>/api/auth/github/callback` (see [Preparing a GitHub App](github-app.md)).
+- **From SSH**: `ssh chloe@host chloe web login` prints a single-use URL and QR code valid for 5 minutes. This works without a GitHub App.
 
-使い方は [使い方](usage.md#web-の画面) にある。
+See [Usage](usage.md#web-ui) for how to use it.
 
-## 更新
+## Upgrade
 
-新しく作った deb を、入れたときと同じく `apt install` で入れる。
+Install the newly built debs with `apt install`, the same way you installed them.
 
-- **ゲートウェイと `chloe-node`**：動いていれば、起動し直す。データベースのマイグレーションは起動のときに適用する。動いているワークスペースは止まらない。
-- **ランナー（`chloe-common`）**：動いているランナーは止めない。新しいスクリプトと `chloe-egress` は、次に起動するランナーから使う。ホスト側の規則は置き直す。
-- **ゲストのイメージ（`chloe-guest`）**：次に起動するワークスペースから新しいイメージを使う。dpkg は新しいファイルを別の名前で書いてから置き換えるので、動いている VM は開いている古いファイルを読み続けられる。動いているワークスペースは、`chloe ws stop` で止めるまで古いイメージのまま動く。ルートを保持するワークスペース（`persistent`）は、残した変更を新しいイメージの上に重ねて起動し、層を作ったときとイメージの版が違うことを VM の中の `/etc/chloe/root-outdated` に書く（版が違うときに層をどう扱うかは、まだ決めていない）。
+- **The gateway and `chloe-node`**: If they are running, the upgrade restarts them. Database migrations are applied on start. Running workspaces are not stopped.
+- **Runners (`chloe-common`)**: Running runners are not stopped. New runners use the new scripts and `chloe-egress` from their next start. The host-side rules are reinstalled.
+- **Guest image (`chloe-guest`)**: Workspaces use the new image from their next start. dpkg writes the new file under a different name and then swaps it in, so running VMs can keep reading the old file they have open. A running workspace keeps running on the old image until you stop it with `chloe ws stop`. A workspace with a persistent root (`persistent`) boots with its saved changes layered on top of the new image, and records in `/etc/chloe/root-outdated` inside the VM that the image version differs from the one the layer was created on (how to handle the layer when the versions differ is not decided yet).
 
-複数のホストに置くときは、どのホストでも `chloe-node`、`chloe-common`、`chloe-guest` を更新する。
+In a multi-host setup, upgrade `chloe-node`, `chloe-common`, and `chloe-guest` on every host.
 
-## 消す
+## Uninstall
 
 ```sh
 sudo apt remove chloe-gateway chloe-node chloe-common chloe-guest
 ```
 
-消すと、ゲートウェイと `chloe-node` を止めて無効にし、動いているランナーも止める。
-`apt purge` にすると、`/etc/chloe/` の設定も消す。
-どちらでも、状態（`/var/lib/chloe`、`/var/lib/chloe-node`、`/var/log/chloe`）と利用者 `chloe` は残す。
-マスター鍵を失うと、保存したシークレットを読めなくなるからである。
-要らなければ手で消す。
+Removing the packages stops and disables the gateway and `chloe-node`, and also stops running runners.
+`apt purge` also deletes the configuration in `/etc/chloe/`.
+Either way, the state (`/var/lib/chloe`, `/var/lib/chloe-node`, `/var/log/chloe`) and the user `chloe` are kept.
+This is because losing the master key would make stored secrets unreadable.
+Delete them by hand if you no longer need them.
 
-## deb を使わずに置く
+## Install without a deb
 
-Ubuntu 以外のディストリビューションや、開発中のものを試すときは、ビルドしたものを手で置く。
-`deploy/` の設定の例と unit は、この節の配置（`/usr/local`）で書いてある。
+On distributions other than Ubuntu, or to try out work in progress, install the build output by hand.
+The example configuration and units in `deploy/` are written for the layout in this section (`/usr/local`).
 
-### ビルドに要るもの
+### Build requirements
 
-- **Rust**：[rustup](https://rustup.rs/) を入れる。リポジトリの `rust-toolchain.toml` が、stable と、ゲストのバイナリに使う `x86_64-unknown-linux-musl` のターゲットを選ぶ。
-- **BoringSSL のビルドに要るもの**：プロキシ（`chloe-egress`）は BoringSSL をソースからビルドする。C と C++ のコンパイラ、cmake、libclang、git が要る。Debian と Ubuntu では次のとおり。
+- **Rust**: Install [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml` selects stable and the `x86_64-unknown-linux-musl` target used for the guest binaries.
+- **BoringSSL build dependencies**: The proxy (`chloe-egress`) builds BoringSSL from source. It needs C and C++ compilers, cmake, libclang, and git. On Debian and Ubuntu:
 
   ```sh
   sudo apt-get install build-essential cmake clang libclang-dev git
   ```
 
-- **Docker**：カーネルとルートファイルシステムは Docker のコンテナの中でビルドする。
-- **Node.js と pnpm**：Web の画面を出すときだけ要る（版は `web/package.json` の `packageManager`）。
+- **Docker**: The kernel and root filesystem are built inside Docker containers.
+- **Node.js and pnpm**: Needed only to serve the web UI (the version is in `packageManager` in `web/package.json`).
 
-### ビルドする
+### Build
 
 ```sh
 images/guest/kernel/build.sh
 images/guest/rootfs/build.sh
 cargo build --release -p chloe-gateway -p chloe-egress -p chloe-node
-(cd web && pnpm install --frozen-lockfile && pnpm build)   # Web の画面を出すときだけ
+(cd web && pnpm install --frozen-lockfile && pnpm build)   # only to serve the web UI
 ```
 
-### ホストに要るもの
+### Host packages
 
 ```sh
 sudo apt-get install dnsmasq-base e2fsprogs iproute2 jq nftables polkitd
 ```
 
-Firecracker は Ubuntu のアーカイブにないので、[リリース](https://github.com/firecracker-microvm/firecracker/releases)のバイナリを置く。
-版はランナーのコンテナ（`images/guest/dev/runner.Dockerfile`）と合わせる。
+Firecracker is not in the Ubuntu archive, so install the binary from its [releases](https://github.com/firecracker-microvm/firecracker/releases).
+Use the same version as the runner container (`images/guest/dev/runner.Dockerfile`).
 
 ```sh
 v=v1.17.0
@@ -433,9 +433,9 @@ tar -xzf "firecracker-$v-x86_64.tgz"
 sudo install -m 755 "release-$v-x86_64/firecracker-$v-x86_64" /usr/local/bin/firecracker
 ```
 
-### 置く
+### Install the files
 
-リポジトリのルートで実行する。
+Run the following from the repository root.
 
 ```sh
 sudo useradd --system --no-create-home --home-dir /var/lib/chloe --shell /usr/sbin/nologin --groups kvm chloe
@@ -448,44 +448,44 @@ sudo install -m 644 deploy/systemd/*.service /etc/systemd/system/
 sudo install -m 644 deploy/polkit/50-chloe.rules /etc/polkit-1/rules.d/
 sudo install -m 644 deploy/tmpfiles/chloe.conf /etc/tmpfiles.d/
 sudo install -d -m 755 /etc/chloe
-sudo install -m 644 deploy/runner.env deploy/gateway.toml /etc/chloe/   # chloe-node のホストでは node.toml
+sudo install -m 644 deploy/runner.env deploy/gateway.toml /etc/chloe/   # node.toml on chloe-node hosts
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/chloe.conf
 sudo systemctl daemon-reload
-# Web の画面を出すときだけ (古いファイルを消してから置く)
+# Only to serve the web UI (remove the old files first)
 sudo rm -rf /usr/local/share/chloe/web && sudo install -d -m 755 /usr/local/share/chloe && sudo cp -r web/dist /usr/local/share/chloe/web
 ```
 
-利用者 `chloe` は `kvm` のグループに入れる（Firecracker が `/dev/kvm` を開くため）。
-ゲストのイメージは `cp` ではなく `install` で置く。
-`install` は古いファイルを消してから新しいファイルを作るので、動いている VM は開いている古いファイルを読み続けられる。
-`cp` は同じファイルの中身を上書きするので、動いている VM のルートファイルシステムを壊す。
+Add the user `chloe` to the `kvm` group (so Firecracker can open `/dev/kvm`).
+Install the guest images with `install`, not `cp`.
+`install` removes the old file before creating the new one, so running VMs can keep reading the old file they have open.
+`cp` overwrites the contents of the same file, which corrupts the root filesystem of running VMs.
 
-あとは「一台で動かす」か「複数のホストに置く」の手順で設定して起動する。
-更新するときは、同じ `install` で置き直し、`sudo systemctl restart chloe-gateway`（ホストでは `chloe-node`）で起動し直す。
+Then configure and start chloe as described in [Run on a single host](#run-on-a-single-host) or [Run across multiple hosts](#run-across-multiple-hosts).
+To upgrade, reinstall with the same `install` commands and restart with `sudo systemctl restart chloe-gateway` (`chloe-node` on hosts).
 
-## ランナーを Docker で動かす
+## Run the runner in Docker
 
-設定の `[runner]` から `kind` を消し、`guest_dir`、`egress_bin`、`state_root` を書くと、ランナーを Docker の特権コンテナ（`chloe-dev-runner`）で動かす（[設定](configuration.md#runner)）。
-開発機での確認はこの動かし方で行う。
-ランナーのコンテナは `--privileged` で動き、ゲートウェイ（ホストでは `chloe-node`）を動かす利用者は `docker` のグループに入る。
-`docker` のグループに入った利用者は root と同じことができる。
+If you remove `kind` from `[runner]` in the configuration and set `guest_dir`, `egress_bin`, and `state_root`, runners run in a privileged Docker container (`chloe-dev-runner`) (see [Configuration](configuration.md#runner)).
+Testing on development machines uses this mode.
+The runner container runs with `--privileged`, and the user that runs the gateway (`chloe-node` on hosts) is added to the `docker` group.
+Members of the `docker` group can do anything root can.
 
 ```sh
 docker build -t chloe-dev-runner -f images/guest/dev/runner.Dockerfile images/guest
 sudo usermod -aG docker chloe
 ```
 
-`chloe-dev-runner` をビルドし直したら、動いているワークスペースを一度止める。
-古いイメージで動いているランナーは、設定の変更を受けたときに VM の DNS の許可リストを作り直せない。
+After rebuilding `chloe-dev-runner`, stop running workspaces once.
+Runners still on the old image cannot rebuild the VM's DNS allowlist when they receive a configuration change.
 
-Docker から systemd の動かし方に移るときは、すべてのワークスペースを止めてから設定を書き換える（`docker ps --filter name=chloe-` で、ランナーのコンテナが残っていないことを確かめる）。
-止めずに切り替えると、新しい動かし方は動いている Docker のコンテナを自分のランナーとして見つけられない。
-ワークスペースの状態のディレクトリの形は同じなので、ディスクとプロキシの CA はそのまま引き継げる。
-状態のディレクトリに root のファイルが残っていれば、`sudo chown -R chloe:chloe /var/lib/chloe/workspaces` で持ち主を直す。
+To switch from Docker to systemd, stop all workspaces before changing the configuration (check with `docker ps --filter name=chloe-` that no runner containers remain).
+If you switch without stopping them, the new mode cannot recognize the running Docker containers as its own runners.
+The layout of a workspace's state directory is the same, so disks and the proxy CA carry over as-is.
+If root-owned files remain in the state directory, fix their ownership with `sudo chown -R chloe:chloe /var/lib/chloe/workspaces`.
 
-## 困ったとき
+## Troubleshooting
 
-- **ログ**：ゲートウェイと `chloe-node` は標準エラーにログを出す（`journalctl -u chloe-gateway` で読める。`RUST_LOG` で詳しさを変えられる）。ワークスペースごとのプロキシのログ（`egress.log`）、HTTP のログ（`requests.jsonl`）、DNS のログ（`dnsmasq.log`）は `/var/lib/chloe/workspaces/<ws-番号>/logs/` にある。HTTP のログは、利用者も `chloe ws log` と管理の画面で見られる。これらのログはローテーションせず、ワークスペースのディスクと一緒に消すまで大きくなり続ける。
-- **VM が起動しない**：`journalctl -u chloe-runner@ws-<番号> -u chloe-netns@ws-<番号>` に、ネットワークの準備、Firecracker、ゲストのシリアルコンソールの出力が出る。`/dev/kvm` を `kvm` のグループで開けるかを確かめる。ランナーを Docker で動かしているときは、`docker logs chloe-ws-<番号>` に出る。
-- **ゲートウェイがランナーを起動できない**：`systemctl start chloe-runner@...` が `Interactive authentication required` で失敗するなら、polkit の規則（`/usr/share/polkit-1/rules.d/50-chloe.rules`）が読まれているか、polkit が動いているか（`systemctl status polkit`）を確かめる。
-- **VM から外につながらない**：許可リストにない宛先は、プロキシが 403 で断る（名前はプロキシのアドレスに引ける）。`requests.jsonl` と `dnsmasq.log` で、遮断した宛先がわかる。許可した宛先にもつながらないなら、`sudo nft list table inet chloe-host` でホスト側の規則が置かれているか（`nftables.service` に消されていないか）を確かめる。
+- **Logs**: The gateway and `chloe-node` log to standard error (read them with `journalctl -u chloe-gateway`; adjust verbosity with `RUST_LOG`). Each workspace's proxy log (`egress.log`), HTTP request log (`requests.jsonl`), and DNS log (`dnsmasq.log`) are in `/var/lib/chloe/workspaces/<ws-number>/logs/`. Users can also view the HTTP request log with `chloe ws log` and in the admin TUI. These logs are not rotated and keep growing until they are deleted along with the workspace's disks.
+- **The VM does not boot**: `journalctl -u chloe-runner@ws-<number> -u chloe-netns@ws-<number>` shows the network setup, Firecracker, and the guest's serial console output. Check that `/dev/kvm` can be opened by the `kvm` group. When running the runner in Docker, the output is in `docker logs chloe-ws-<number>`.
+- **The gateway cannot start runners**: If `systemctl start chloe-runner@...` fails with `Interactive authentication required`, check that the polkit rule (`/usr/share/polkit-1/rules.d/50-chloe.rules`) is loaded and that polkit is running (`systemctl status polkit`).
+- **The VM cannot reach the outside**: The proxy rejects destinations not on the allowlist with 403 (names resolve to the proxy's address). `requests.jsonl` and `dnsmasq.log` show which destinations were blocked. If allowed destinations are also unreachable, check with `sudo nft list table inet chloe-host` that the host-side rules are in place (and have not been removed by `nftables.service`).
